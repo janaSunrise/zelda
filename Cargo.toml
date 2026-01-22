@@ -1,0 +1,13 @@
+[package]
+name = "zelda"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oxc_parser = "0.56"
+oxc_ast = "0.56"
+oxc_allocator = "0.56"
+oxc_span = "0.56"
+oxc_diagnostics = "0.56"
+clap = { version = "4", features = ["derive", "color"] }
+miette = { version = "7", features = ["fancy"] }
