@@ -1,0 +1,217 @@
+//! Binding declarations: variables, functions, classes, interfaces, type aliases.
+//!
+//! Each declaration type registers symbols in the appropriate namespace:
+//! - Variables, functions: value namespace
+//! - Interfaces, type aliases: type namespace
+//! - Classes: both namespaces (constructor + instance type)
+
+use oxc_ast::ast::*;
+
+use crate::symbols::{ScopeKind, SymbolKind};
+use crate::types::Type;
+
+use super::Binder;
+
+impl Binder {
+    /// Bind a variable declaration (let, const, var).
+    pub(super) fn bind_variable_declaration(&mut self, decl: &VariableDeclaration) {
+        for declarator in &decl.declarations {
+            self.bind_variable_declarator(declarator);
+        }
+    }
+
+    /// Bind a single variable declarator.
+    ///
+    /// 1. Extract the name from the binding pattern
+    /// 2. Get type from annotation or infer from initializer
+    /// 3. Add symbol to current scope
+    /// 4. Check initializer for undefined references
+    fn bind_variable_declarator(&mut self, declarator: &VariableDeclarator) {
+        if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
+            let name = ident.name.as_str();
+            let span = ident.span;
+
+            let ty = self.resolve_binding_type(declarator);
+
+            if let Err(err) = self.symbols.define(name, ty, SymbolKind::Variable, span) {
+                self.errors.push(err.into());
+            }
+        }
+
+        if let Some(init) = &declarator.init {
+            self.bind_expression(init);
+        }
+    }
+
+    /// Bind a function declaration.
+    ///
+    /// 1. Add function to current scope (before body, for recursion)
+    /// 2. Push new function scope
+    /// 3. Add parameters to function scope
+    /// 4. Bind body statements
+    /// 5. Pop back to parent scope
+    pub(super) fn bind_function_declaration(&mut self, decl: &Function) {
+        if let Some(ident) = &decl.id {
+            let name = ident.name.as_str();
+            let span = ident.span;
+            let ty = self.build_function_type(decl);
+
+            if let Err(err) = self.symbols.define(name, ty, SymbolKind::Function, span) {
+                self.errors.push(err.into());
+            }
+        }
+
+        self.symbols.push_scope(ScopeKind::Function);
+
+        for param in &decl.params.items {
+            self.bind_formal_parameter(param);
+        }
+
+        if let Some(body) = &decl.body {
+            for stmt in &body.statements {
+                self.bind_statement(stmt);
+            }
+        }
+
+        self.symbols.pop_scope();
+    }
+
+    fn bind_formal_parameter(&mut self, param: &FormalParameter) {
+        if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
+            let name = ident.name.as_str();
+            let span = ident.span;
+            let ty = self.resolve_type_annotation_oxc(&param.type_annotation);
+
+            if let Err(err) = self.symbols.define(name, ty, SymbolKind::Parameter, span) {
+                self.errors.push(err.into());
+            }
+        }
+    }
+
+    /// Bind a class declaration.
+    ///
+    /// Classes exist in both value and type namespaces:
+    /// - Value: the constructor function `Foo`
+    /// - Type: the instance type `Foo`
+    pub(super) fn bind_class_declaration(&mut self, decl: &Class) {
+        if let Some(ident) = &decl.id {
+            let name = ident.name.as_str();
+            let span = ident.span;
+            let ty = Type::type_ref(name, vec![]);
+
+            if let Err(err) = self.symbols.define(name, ty.clone(), SymbolKind::Class, span) {
+                self.errors.push(err.into());
+            }
+            if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::Class, span) {
+                self.errors.push(err.into());
+            }
+        }
+
+        self.symbols.push_scope(ScopeKind::Class);
+
+        for element in &decl.body.body {
+            self.bind_class_element(element);
+        }
+
+        self.symbols.pop_scope();
+    }
+
+    fn bind_class_element(&mut self, element: &ClassElement) {
+        match element {
+            ClassElement::MethodDefinition(method) => {
+                let func = &method.value;
+                self.symbols.push_scope(ScopeKind::Function);
+
+                for param in &func.params.items {
+                    self.bind_formal_parameter(param);
+                }
+
+                if let Some(body) = &func.body {
+                    for stmt in &body.statements {
+                        self.bind_statement(stmt);
+                    }
+                }
+
+                self.symbols.pop_scope();
+            }
+            ClassElement::PropertyDefinition(prop) => {
+                if let Some(value) = &prop.value {
+                    self.bind_expression(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Bind an interface declaration.
+    ///
+    /// Interfaces only exist in the type namespace.
+    pub(super) fn bind_interface_declaration(&mut self, decl: &TSInterfaceDeclaration) {
+        let name = decl.id.name.as_str();
+        let span = decl.id.span;
+        let ty = self.build_interface_type(decl);
+
+        if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::Interface, span) {
+            self.errors.push(err.into());
+        }
+    }
+
+    /// Bind a type alias declaration.
+    ///
+    /// Type aliases only exist in the type namespace.
+    pub(super) fn bind_type_alias_declaration(&mut self, decl: &TSTypeAliasDeclaration) {
+        let name = decl.id.name.as_str();
+        let span = decl.id.span;
+        let ty = self.resolve_ts_type(&decl.type_annotation);
+
+        if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, span) {
+            self.errors.push(err.into());
+        }
+    }
+
+    /// Bind an arrow function expression.
+    ///
+    /// Arrow functions: `() => expr` or `() => { stmts }`.
+    /// In oxc, the body is always a FunctionBody struct. When `arrow.expression` is true,
+    /// it contains a single ExpressionStatement wrapping the expression.
+    pub(super) fn bind_arrow_function(&mut self, arrow: &ArrowFunctionExpression) {
+        self.symbols.push_scope(ScopeKind::Function);
+
+        for param in &arrow.params.items {
+            self.bind_formal_parameter(param);
+        }
+
+        for stmt in &arrow.body.statements {
+            self.bind_statement(stmt);
+        }
+
+        self.symbols.pop_scope();
+    }
+
+    /// Bind a named function expression.
+    ///
+    /// Named function expressions bind their name inside their own scope.
+    /// `const f = function foo() { foo(); }` - `foo` is only visible inside.
+    pub(super) fn bind_function_expression(&mut self, func: &Function) {
+        self.symbols.push_scope(ScopeKind::Function);
+
+        if let Some(ident) = &func.id {
+            let name = ident.name.as_str();
+            let span = ident.span;
+            let ty = self.build_function_type(func);
+            let _ = self.symbols.define(name, ty, SymbolKind::Function, span);
+        }
+
+        for param in &func.params.items {
+            self.bind_formal_parameter(param);
+        }
+
+        if let Some(body) = &func.body {
+            for stmt in &body.statements {
+                self.bind_statement(stmt);
+            }
+        }
+
+        self.symbols.pop_scope();
+    }
+}
