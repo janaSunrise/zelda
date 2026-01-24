@@ -18,32 +18,30 @@ pub enum Type {
     NumberLiteral(f64),
     BooleanLiteral(bool),
 
-    // Compound
+    // Compound types
     Array(Box<Type>),
     Tuple(Vec<Type>),
     Union(Vec<Type>),
     Intersection(Vec<Type>),
 
-    // Objects
+    // Structural types
     Object {
         properties: Vec<Property>,
         index_signature: Option<IndexSignature>,
     },
-
-    // Functions
     Function {
         params: Vec<Param>,
         return_type: Box<Type>,
         type_params: Vec<TypeParam>,
     },
 
-    // References
+    // Named type reference with `type`: Array<string>, Map<K,V>, User, etc.
     TypeRef {
         name: String,
         type_args: Vec<Type>,
     },
 
-    // Type parameter (used in generic definitions)
+    // Type parameter in a generic definition: the T in <T extends Foo>
     TypeParameter {
         name: String,
         constraint: Option<Box<Type>>,
@@ -109,7 +107,6 @@ impl Type {
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Primitives
             Type::String => write!(f, "string"),
             Type::Number => write!(f, "number"),
             Type::Boolean => write!(f, "boolean"),
@@ -120,12 +117,10 @@ impl fmt::Display for Type {
             Type::Unknown => write!(f, "unknown"),
             Type::Never => write!(f, "never"),
 
-            // Literals
             Type::StringLiteral(s) => write!(f, "\"{}\"", s),
             Type::NumberLiteral(n) => write!(f, "{}", n),
             Type::BooleanLiteral(b) => write!(f, "{}", b),
 
-            // Compound
             Type::Array(elem) => write!(f, "{}[]", elem),
             Type::Tuple(types) => {
                 write!(f, "[")?;
@@ -142,7 +137,7 @@ impl fmt::Display for Type {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
-                    // Wrap function types in () for clarity
+                    // Wrap function types: ((x: number) => void) | string
                     if matches!(ty, Type::Function { .. }) {
                         write!(f, "({})", ty)?;
                     } else {
@@ -156,7 +151,7 @@ impl fmt::Display for Type {
                     if i > 0 {
                         write!(f, " & ")?;
                     }
-                    // Wrap union/function types in () for clarity
+                    // Wrap unions and functions with parentheses
                     if matches!(ty, Type::Union(_) | Type::Function { .. }) {
                         write!(f, "({})", ty)?;
                     } else {
@@ -166,7 +161,6 @@ impl fmt::Display for Type {
                 Ok(())
             }
 
-            // Objects
             Type::Object {
                 properties,
                 index_signature,
@@ -196,7 +190,6 @@ impl fmt::Display for Type {
                 write!(f, " }}")
             }
 
-            // Functions
             Type::Function {
                 params,
                 return_type,
@@ -235,7 +228,6 @@ impl fmt::Display for Type {
                 write!(f, ") => {}", return_type)
             }
 
-            // References
             Type::TypeRef { name, type_args } => {
                 write!(f, "{}", name)?;
                 if !type_args.is_empty() {
@@ -269,6 +261,7 @@ impl fmt::Display for Type {
     }
 }
 
+/// Property in an object type: { name: string, age?: number }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Property {
     pub name: String,
@@ -298,6 +291,7 @@ impl Property {
     }
 }
 
+/// Parameter in a function type: (x: number, ...rest: string[]) => void
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
@@ -327,6 +321,7 @@ impl Param {
     }
 }
 
+/// Type parameter in a generic: <T extends Constraint = Default>
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
@@ -354,9 +349,10 @@ impl TypeParam {
     }
 }
 
+/// Index signature: { [key: string]: number }
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexSignature {
-    pub key_type: Box<Type>, // string or number
+    pub key_type: Box<Type>,
     pub value_type: Box<Type>,
 }
 

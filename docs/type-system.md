@@ -142,6 +142,7 @@ Variance matters for function compatibility:
 
 > Contravariant: Able to accept broader types. eg. you can pass a function that accepts `Animal` where a function that
 > accepts `Dog` is expected.
+
 > Covariant: Able to produce more specific types. eg. you can use a function that returns `Dog` where a function that
 > returns `Animal` is expected.
 
