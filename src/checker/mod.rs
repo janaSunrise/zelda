@@ -352,4 +352,37 @@ mod tests {
         let errors = check("const x: string | number = true;");
         assert_eq!(errors.len(), 1);
     }
+
+    #[test]
+    fn test_shorthand_property() {
+        // { x } is equivalent to { x: x }
+        let errors = check("const x = 1; const obj = { x };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_method_shorthand() {
+        // { foo() {} } is equivalent to { foo: function() {} }
+        let errors = check("const obj = { foo() { return 1; } };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_spread_in_object() {
+        let errors = check("const a = { x: 1 }; const b = { ...a, y: 2 };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_empty_array() {
+        let errors = check("const arr: number[] = [];");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_empty_array_inferred() {
+        // Empty array infers never[] but we allow it
+        let errors = check("const arr = [];");
+        assert!(errors.is_empty());
+    }
 }

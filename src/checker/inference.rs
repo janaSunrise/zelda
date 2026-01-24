@@ -133,27 +133,63 @@ impl<'a> Checker<'a> {
     }
 
     /// Infer type of object literal.
+    ///
+    /// Handles:
+    /// - Regular properties: `{ x: 1 }`
+    /// - Shorthand properties: `{ x }` (equivalent to `{ x: x }`)
+    /// - Computed properties: `{ [expr]: value }`
+    /// - Method shorthand: `{ foo() {} }`
     fn infer_object_literal(&self, obj: &ObjectExpression) -> Type {
         let mut properties = Vec::new();
 
         for prop in &obj.properties {
             match prop {
                 ObjectPropertyKind::ObjectProperty(p) => {
+                    // Handle method shorthand: { foo() {} }
+                    if p.method {
+                        if let PropertyKey::StaticIdentifier(ident) = &p.key {
+                            let ty = self.infer_expression(&p.value);
+                            properties.push(Property::new(ident.name.to_string(), ty));
+                        }
+                        continue;
+                    }
+
                     let name = match &p.key {
                         PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
                         PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                        PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                        // Computed property: { [expr]: value }
+                        _ if p.computed => {
+                            // For computed properties with string literal keys, use the value
+                            if let PropertyKey::StringLiteral(s) = &p.key {
+                                Some(s.value.to_string())
+                            } else {
+                                // Dynamic computed key would need index signature
+                                None
+                            }
+                        }
                         _ => None,
                     };
 
                     if let Some(name) = name {
+                        // Shorthand property: { x } is equivalent to { x: x }
+                        // p.shorthand is true and p.value is the same identifier
                         let ty = self.infer_expression(&p.value);
                         // Widen literal types in object properties
                         let ty = self.widen_type(ty);
                         properties.push(Property::new(name, ty));
                     }
                 }
-                ObjectPropertyKind::SpreadProperty(_) => {
-                    // TODO: merge spread properties
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    // Merge properties from spread object
+                    let spread_type = self.infer_expression(&spread.argument);
+                    if let Type::Object {
+                        properties: spread_props,
+                        ..
+                    } = spread_type
+                    {
+                        properties.extend(spread_props);
+                    }
                 }
             }
         }
