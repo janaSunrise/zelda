@@ -1,8 +1,4 @@
 //! The binder walks the AST and populates the symbol table.
-//!
-//! - `declarations`: Binding variable, function, class, interface declarations
-//! - `expressions`: Walking expressions to find undefined references
-//! - `types`: Converting AST type nodes to our Type representation
 
 mod declarations;
 mod expressions;

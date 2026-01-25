@@ -13,8 +13,6 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     /// Check if source type is assignable to target type.
-    ///
-    /// This is the core of TypeScript's structural type system.
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
         // Same type
         if source == target {
@@ -39,6 +37,23 @@ impl<'a> Checker<'a> {
         // Nothing is assignable to never (except never itself, handled above)
         if matches!(target, Type::Never) {
             return false;
+        }
+
+        // In strict mode, null/undefined are only assignable to void, any, unknown, null, undefined
+        if matches!(source, Type::Null | Type::Undefined) {
+            // null/undefined are assignable to void
+            if matches!(target, Type::Void) {
+                return true;
+            }
+            // In non-strict mode, null/undefined are assignable to any type
+            // (except never, already handled above)
+            return true;
+        }
+
+        // void is only assignable to void, any, unknown (already handled)
+        // undefined is assignable to void
+        if matches!(source, Type::Undefined) && matches!(target, Type::Void) {
+            return true;
         }
 
         // Literal types are assignable to their base types

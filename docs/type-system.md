@@ -76,29 +76,178 @@ type Person = Named & Aged; // { name: string; age: number }
 
 ### Type Narrowing
 
-Type narrowing reducing the type of a variable from a broader type to a more specific type.
-
-This can be done using type guards, conditional checks, and control flow analysis.
+Type narrowing is reducing a variable's type from broad to specific based on runtime checks.
 
 ```ts
 function process(x: string | number) {
   if (typeof x === "string") {
-    // x is narrowed to `string`
-    x.toUpperCase();
+    x.toUpperCase(); // x is string here
   } else {
-    // x is narrowed to `number`
-    x.toFixed();
+    x.toFixed(); // x is number here
   }
 }
 ```
 
-Type guards are expressions that perform runtime checks which guarantee the type in a certain scope.
+The checker sees the `typeof` check and understands that `x` must be a `string` in the true branch and a `number` in the
+false branch.
 
-Type guards:
+#### Type Guards
+
+Type guards are expressions that narrow types.
 
 - `typeof x === "string"`: narrows to string
 - `x instanceof Date`: narrows to date
 - `"prop" in x`: narrows to types with that property
+
+#### How Narrowing Actually Works
+
+Think of it like this: at the start of a function, a parameter `x: string | number` could be either. As you add conditions, you're eliminating possibilities.
+
+```ts
+function f(x: string | number | null) {
+  // x: string | number | null
+
+  if (x === null) {
+    return; // early return
+  }
+  // x: string | number (null eliminated)
+
+  if (typeof x === "string") {
+    // x: string
+  } else {
+    // x: number
+  }
+}
+```
+
+Each branch remembers what checks came before it.
+
+### Control Flow Analysis
+
+This is one of the trickier parts of a type checker.
+
+#### The Problem
+
+Consider this code:
+
+```ts
+function f(x: string | number) {
+  if (typeof x === "string") {
+    console.log(x.toUpperCase());
+  }
+  console.log(x); // what's x here?
+}
+```
+
+After the if block, what type is `x`? Still `string | number` - the if block doesn't change the type for code after it, only code
+inside it.
+
+What about this?
+
+```ts
+function f(x: string | number) {
+  if (typeof x === "string") {
+    return;
+  }
+  console.log(x); // what's x here?
+}
+```
+
+Now `x` is `number`. Because if `x` were a string, we would have returned. The only way to reach that last line is if `x` is
+not a string.
+
+The checker needs to understand control flow to get this right.
+
+#### Control Flow Graph
+
+Internally, we model code as a graph of flow nodes. Each node represents a point in the code, and edges represent possible execution paths.
+
+```ts
+function f(x: string | number) {
+  if (typeof x === "string") {
+    return x.length;
+  }
+  return x.toFixed();
+}
+```
+
+At each node, we track what type the variable has. When paths split (if/else), we narrow differently in each branch.
+
+#### Implementing It
+
+The basic algorithm:
+
+1. Walk the AST and build a control flow graph
+2. At each node, compute the type of each variable based on:
+   - The type from the previous node
+   - Any narrowing that happens at this node
+3. When paths merge (after if/else), compute the union of types from all incoming paths
+
+Here's the tricky part. When you see a variable reference like `x.toUpperCase()`, you need to:
+
+1. Find where `x` was declared
+2. Walk backwards through the control flow to find what type `x` has at this point
+3. Apply all the narrowing that happened along the way
+
+#### Exhaustiveness
+
+When you've eliminated all possibilities, you get `never`:
+
+```ts
+function f(x: string | number) {
+  if (typeof x === "string") {
+    return;
+  }
+  if (typeof x === "number") {
+    return;
+  }
+  // x: never (unreachable)
+  x; // this line can never execute
+}
+```
+
+This is useful for exhaustiveness checking:
+
+```ts
+type Shape = Circle | Square | Triangle;
+
+function area(s: Shape) {
+  switch (s.kind) {
+    case "circle":
+      return Math.PI * s.r ** 2;
+    case "square":
+      return s.side ** 2;
+    // forgot triangle.
+  }
+
+  // s: Triangle (not never, so we missed a case)
+  const _exhaustive: never = s; // error: Triangle is not never
+}
+```
+
+If we handled all cases, `s` would be `never` at the end, and the assignment would work.
+
+#### Loops
+
+Loops complicate things because the type at the start of a loop depends on:
+
+1. The type before the loop
+2. The type at the end of the loop body (which loops back)
+
+```ts
+function f(x: string | number | null) {
+  while (x !== null) {
+    // x: string | number (null removed by condition)
+    if (typeof x === "string") {
+      x = x.length; // x becomes number
+    }
+    // x: number (either was number, or we converted it)
+  }
+  // x: null (loop only exits when x is null)
+}
+```
+
+The checker needs to iterate until the types stabilize (fixed-point iteration).
 
 ### Generics
 
