@@ -299,26 +299,208 @@ impl Binder {
             Expression::NumericLiteral(n) => Type::NumberLiteral(n.value),
             Expression::BooleanLiteral(b) => Type::BooleanLiteral(b.value),
             Expression::NullLiteral(_) => Type::Null,
-            Expression::ArrayExpression(_) => Type::Array(Box::new(Type::Any)),
-            Expression::ObjectExpression(_) => Type::Object {
-                properties: vec![],
-                index_signature: None,
-            },
-            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
-                Type::Function {
-                    params: vec![],
-                    return_type: Box::new(Type::Any),
-                    type_params: vec![],
-                }
+            Expression::ArrayExpression(arr) => {
+                let elem_type = self.infer_array_element_type(arr);
+                Type::Array(Box::new(elem_type))
             }
+            Expression::ObjectExpression(obj) => self.infer_object_type(obj),
+            Expression::ArrowFunctionExpression(arrow) => self.infer_arrow_function_type(arrow),
+            Expression::FunctionExpression(func) => self.infer_function_expression_type(func),
             Expression::Identifier(ident) => {
-                // Look up the identifier's type
                 self.symbols
                     .lookup(ident.name.as_str())
                     .map(|s| s.ty.clone())
                     .unwrap_or(Type::Any)
             }
+            Expression::BinaryExpression(binary) => self.infer_binary_type(binary),
+            Expression::UnaryExpression(unary) => self.infer_unary_type(unary),
+            Expression::CallExpression(call) => self.infer_call_type(call),
+            Expression::ConditionalExpression(cond) => {
+                let consequent = self.infer_expression_type(&cond.consequent);
+                let alternate = self.infer_expression_type(&cond.alternate);
+                if consequent == alternate {
+                    consequent
+                } else {
+                    Type::Union(vec![consequent, alternate])
+                }
+            }
+            Expression::ParenthesizedExpression(paren) => {
+                self.infer_expression_type(&paren.expression)
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.infer_member_access(&member.object, member.property.name.as_str())
+            }
             _ => Type::Any,
+        }
+    }
+
+    fn infer_object_type(&self, obj: &ObjectExpression) -> Type {
+        let mut properties = Vec::new();
+
+        for prop in &obj.properties {
+            match prop {
+                ObjectPropertyKind::ObjectProperty(p) => {
+                    let name = match &p.key {
+                        PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+                        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                        PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                        _ => None,
+                    };
+
+                    if let Some(name) = name {
+                        let ty = self.infer_expression_type(&p.value);
+                        // Widen literal types in object properties
+                        let ty = self.widen_type(ty);
+                        properties.push(Property::new(name, ty));
+                    }
+                }
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    let spread_type = self.infer_expression_type(&spread.argument);
+                    if let Type::Object { properties: spread_props, .. } = spread_type {
+                        properties.extend(spread_props);
+                    }
+                }
+            }
+        }
+
+        Type::Object {
+            properties,
+            index_signature: None,
+        }
+    }
+
+    fn infer_array_element_type(&self, arr: &ArrayExpression) -> Type {
+        if arr.elements.is_empty() {
+            return Type::Never;
+        }
+
+        let mut types = Vec::new();
+        for elem in &arr.elements {
+            if let Some(expr) = elem.as_expression() {
+                let ty = self.infer_expression_type(expr);
+                let ty = self.widen_type(ty);
+                if !types.contains(&ty) {
+                    types.push(ty);
+                }
+            }
+        }
+
+        if types.is_empty() {
+            Type::Any
+        } else if types.len() == 1 {
+            types.pop().unwrap()
+        } else {
+            Type::Union(types)
+        }
+    }
+
+    fn infer_arrow_function_type(&self, arrow: &ArrowFunctionExpression) -> Type {
+        let params: Vec<Param> = arrow
+            .params
+            .items
+            .iter()
+            .map(|p| {
+                let name = match &p.pattern {
+                    BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                let ty = self.resolve_type_annotation_oxc(&p.type_annotation);
+                Param::new(name, ty)
+            })
+            .collect();
+
+        let return_type = arrow
+            .return_type
+            .as_ref()
+            .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+            .unwrap_or(Type::Any);
+
+        Type::Function {
+            params,
+            return_type: Box::new(return_type),
+            type_params: vec![],
+        }
+    }
+
+    fn infer_function_expression_type(&self, func: &Function) -> Type {
+        self.build_function_type(func)
+    }
+
+    fn infer_binary_type(&self, binary: &BinaryExpression) -> Type {
+        match binary.operator {
+            BinaryOperator::Addition => {
+                let left = self.infer_expression_type(&binary.left);
+                let right = self.infer_expression_type(&binary.right);
+                if matches!(left, Type::String | Type::StringLiteral(_))
+                    || matches!(right, Type::String | Type::StringLiteral(_))
+                {
+                    Type::String
+                } else {
+                    Type::Number
+                }
+            }
+            BinaryOperator::Subtraction
+            | BinaryOperator::Multiplication
+            | BinaryOperator::Division
+            | BinaryOperator::Remainder
+            | BinaryOperator::Exponential => Type::Number,
+            BinaryOperator::LessThan
+            | BinaryOperator::LessEqualThan
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterEqualThan
+            | BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality
+            | BinaryOperator::Instanceof
+            | BinaryOperator::In => Type::Boolean,
+            _ => Type::Number,
+        }
+    }
+
+    fn infer_unary_type(&self, unary: &UnaryExpression) -> Type {
+        match unary.operator {
+            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus | UnaryOperator::BitwiseNot => {
+                Type::Number
+            }
+            UnaryOperator::LogicalNot => Type::Boolean,
+            UnaryOperator::Typeof => Type::String,
+            UnaryOperator::Void => Type::Undefined,
+            UnaryOperator::Delete => Type::Boolean,
+        }
+    }
+
+    fn infer_call_type(&self, call: &CallExpression) -> Type {
+        let callee_type = self.infer_expression_type(&call.callee);
+        if let Type::Function { return_type, .. } = callee_type {
+            *return_type
+        } else {
+            Type::Any
+        }
+    }
+
+    fn infer_member_access(&self, object: &Expression, prop_name: &str) -> Type {
+        let obj_type = self.infer_expression_type(object);
+        match obj_type {
+            Type::Object { properties, .. } => {
+                properties
+                    .iter()
+                    .find(|p| p.name == prop_name)
+                    .map(|p| p.ty.clone())
+                    .unwrap_or(Type::Any)
+            }
+            Type::Array(_) if prop_name == "length" => Type::Number,
+            Type::String | Type::StringLiteral(_) if prop_name == "length" => Type::Number,
+            _ => Type::Any,
+        }
+    }
+
+    pub(super) fn widen_type(&self, ty: Type) -> Type {
+        match ty {
+            Type::StringLiteral(_) => Type::String,
+            Type::NumberLiteral(_) => Type::Number,
+            Type::BooleanLiteral(_) => Type::Boolean,
+            other => other,
         }
     }
 }

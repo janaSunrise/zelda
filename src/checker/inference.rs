@@ -97,7 +97,7 @@ impl<'a> Checker<'a> {
     /// Infer type of array literal.
     ///
     /// Empty arrays get `never[]`, otherwise union of all element types.
-    fn infer_array_literal(&self, arr: &ArrayExpression) -> Type {
+    pub(super) fn infer_array_literal(&self, arr: &ArrayExpression) -> Type {
         if arr.elements.is_empty() {
             return Type::Array(Box::new(Type::Never));
         }
@@ -139,7 +139,7 @@ impl<'a> Checker<'a> {
     /// - Shorthand properties: `{ x }` (equivalent to `{ x: x }`)
     /// - Computed properties: `{ [expr]: value }`
     /// - Method shorthand: `{ foo() {} }`
-    fn infer_object_literal(&self, obj: &ObjectExpression) -> Type {
+    pub(super) fn infer_object_literal(&self, obj: &ObjectExpression) -> Type {
         let mut properties = Vec::new();
 
         for prop in &obj.properties {

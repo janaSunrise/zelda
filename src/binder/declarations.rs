@@ -15,8 +15,9 @@ use super::Binder;
 impl Binder {
     /// Bind a variable declaration (let, const, var).
     pub(super) fn bind_variable_declaration(&mut self, decl: &VariableDeclaration) {
+        let is_const = decl.kind == VariableDeclarationKind::Const;
         for declarator in &decl.declarations {
-            self.bind_variable_declarator(declarator);
+            self.bind_variable_declarator(declarator, is_const);
         }
     }
 
@@ -24,14 +25,17 @@ impl Binder {
     ///
     /// 1. Extract the name from the binding pattern
     /// 2. Get type from annotation or infer from initializer
-    /// 3. Add symbol to current scope
-    /// 4. Check initializer for undefined references
-    fn bind_variable_declarator(&mut self, declarator: &VariableDeclarator) {
+    /// 3. Widen literal types for let/var (not const)
+    /// 4. Add symbol to current scope
+    /// 5. Check initializer for undefined references
+    fn bind_variable_declarator(&mut self, declarator: &VariableDeclarator, is_const: bool) {
         if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
             let name = ident.name.as_str();
             let span = ident.span;
 
             let ty = self.resolve_binding_type(declarator);
+            // Widen literal types for let/var
+            let ty = if is_const { ty } else { self.widen_type(ty) };
 
             if let Err(err) = self.symbols.define(name, ty, SymbolKind::Variable, span) {
                 self.errors.push(err.into());

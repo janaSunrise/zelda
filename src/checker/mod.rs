@@ -70,6 +70,22 @@ impl TypeError {
             errors::MISSING_RETURN.code,
         )
     }
+
+    pub fn missing_property(prop: &str, source: &Type, target: &Type, span: Span) -> Self {
+        Self::new(
+            errors::PROPERTY_MISSING.format(&[prop, &source.to_string(), &target.to_string()]),
+            span,
+            errors::PROPERTY_MISSING.code,
+        )
+    }
+
+    pub fn excess_property(prop: &str, target: &Type, span: Span) -> Self {
+        Self::new(
+            errors::EXCESS_PROPERTY.format(&[prop, &target.to_string()]),
+            span,
+            errors::EXCESS_PROPERTY.code,
+        )
+    }
 }
 
 /// The type checker verifies type correctness of the program.
@@ -218,10 +234,12 @@ impl<'a> Checker<'a> {
             }
             Expression::StaticMemberExpression(member) => {
                 self.check_expression(&member.object);
+                self.check_static_member_expression(member);
             }
             Expression::ComputedMemberExpression(member) => {
                 self.check_expression(&member.object);
                 self.check_expression(&member.expression);
+                self.check_computed_member_expression(member);
             }
 
             // Literals and identifiers don't need checking
@@ -312,6 +330,94 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check a static member expression (obj.prop) for property existence.
+    fn check_static_member_expression(&mut self, member: &StaticMemberExpression) {
+        let object_type = self.infer_expression(&member.object);
+        let prop_name = member.property.name.as_str();
+
+        // Skip checking for `any` and `unknown` types
+        if matches!(object_type, Type::Any | Type::Unknown) {
+            return;
+        }
+
+        // Check if property exists on the object type
+        if !self.has_property(&object_type, prop_name) {
+            self.errors.push(TypeError::property_not_found(
+                prop_name,
+                &object_type,
+                member.span,
+            ));
+        }
+    }
+
+    /// Check a computed member expression (obj["prop"] or obj[expr]) for property existence.
+    fn check_computed_member_expression(&mut self, member: &ComputedMemberExpression) {
+        let object_type = self.infer_expression(&member.object);
+        let index_type = self.infer_expression(&member.expression);
+
+        // Skip checking for `any` and `unknown` types
+        if matches!(object_type, Type::Any | Type::Unknown) {
+            return;
+        }
+
+        // If indexing with a string literal, check property existence
+        if let Type::StringLiteral(prop_name) = &index_type {
+            if !self.has_property(&object_type, prop_name) {
+                self.errors.push(TypeError::property_not_found(
+                    prop_name,
+                    &object_type,
+                    member.span,
+                ));
+            }
+        }
+
+        // Array/tuple indexing with number is always valid
+        // Index signatures are checked separately
+    }
+
+    /// Check if a type has a property with the given name.
+    fn has_property(&self, ty: &Type, prop_name: &str) -> bool {
+        match ty {
+            Type::Object { properties, index_signature } => {
+                // Check direct properties
+                if properties.iter().any(|p| p.name == prop_name) {
+                    return true;
+                }
+                // Check index signature (string index allows any property)
+                if index_signature.is_some() {
+                    return true;
+                }
+                false
+            }
+            Type::Array(_) => {
+                // Arrays have built-in properties
+                matches!(prop_name, "length" | "push" | "pop" | "shift" | "unshift"
+                    | "slice" | "splice" | "concat" | "join" | "map" | "filter"
+                    | "reduce" | "forEach" | "find" | "findIndex" | "includes"
+                    | "indexOf" | "every" | "some" | "sort" | "reverse" | "fill"
+                    | "flat" | "flatMap" | "at" | "entries" | "keys" | "values")
+            }
+            Type::String | Type::StringLiteral(_) => {
+                // Strings have built-in properties
+                matches!(prop_name, "length" | "charAt" | "charCodeAt" | "concat"
+                    | "includes" | "endsWith" | "startsWith" | "indexOf" | "lastIndexOf"
+                    | "match" | "replace" | "search" | "slice" | "split" | "substring"
+                    | "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd"
+                    | "padStart" | "padEnd" | "repeat" | "at")
+            }
+            Type::Union(types) => {
+                // Property must exist on all union members
+                types.iter().all(|t| self.has_property(t, prop_name))
+            }
+            Type::Intersection(types) => {
+                // Property must exist on at least one intersection member
+                types.iter().any(|t| self.has_property(t, prop_name))
+            }
+            Type::Any | Type::Unknown => true,
+            _ => false,
+        }
+    }
+
     /// Check a variable declaration for type compatibility.
     fn check_variable_declaration(&mut self, decl: &VariableDeclaration) {
         let is_const = decl.kind == VariableDeclarationKind::Const;
@@ -334,7 +440,14 @@ impl<'a> Checker<'a> {
                 // If there's a type annotation, check compatibility
                 if let Some(annotation) = &declarator.type_annotation {
                     let declared_type = self.resolve_type(&annotation.type_annotation);
-                    if !self.is_assignable(&init_type, &declared_type) {
+
+                    // Check for object literal specific errors (missing/excess properties)
+                    if let Expression::ObjectExpression(obj) = init {
+                        self.check_object_literal_against_type(obj, &declared_type, declarator.span);
+                    } else if let Expression::ArrayExpression(arr) = init {
+                        // Contextual typing: check array literal against tuple type
+                        self.check_array_literal_against_type(arr, &declared_type, declarator.span);
+                    } else if !self.is_assignable(&init_type, &declared_type) {
                         self.errors.push(TypeError::not_assignable(
                             &init_type,
                             &declared_type,
@@ -343,6 +456,164 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// Check an array literal against an expected type.
+    ///
+    /// Handles contextual typing for tuples: [1, "hello"] against [number, string]
+    fn check_array_literal_against_type(
+        &mut self,
+        arr: &ArrayExpression,
+        expected: &Type,
+        span: Span,
+    ) {
+        // If expected type is a tuple, check element-by-element
+        if let Type::Tuple(expected_types) = expected {
+            // Check length
+            if arr.elements.len() != expected_types.len() {
+                let inferred = self.infer_array_literal(arr);
+                self.errors
+                    .push(TypeError::not_assignable(&inferred, expected, span));
+                return;
+            }
+
+            // Check each element against expected type
+            for (elem, expected_type) in arr.elements.iter().zip(expected_types.iter()) {
+                if let Some(expr) = elem.as_expression() {
+                    let elem_type = self.infer_expression(expr);
+                    if !self.is_assignable(&elem_type, expected_type) {
+                        self.errors.push(TypeError::not_assignable(
+                            &elem_type,
+                            expected_type,
+                            span,
+                        ));
+                    }
+                }
+            }
+            return;
+        }
+
+        // If expected type is an array, check all elements against element type
+        if let Type::Array(expected_elem) = expected {
+            for elem in &arr.elements {
+                if let Some(expr) = elem.as_expression() {
+                    let elem_type = self.infer_expression(expr);
+                    if !self.is_assignable(&elem_type, expected_elem) {
+                        self.errors.push(TypeError::not_assignable(
+                            &elem_type,
+                            expected_elem,
+                            span,
+                        ));
+                    }
+                }
+            }
+            return;
+        }
+
+        // Fall back to normal assignability
+        let inferred = self.infer_array_literal(arr);
+        if !self.is_assignable(&inferred, expected) {
+            self.errors
+                .push(TypeError::not_assignable(&inferred, expected, span));
+        }
+    }
+
+    /// Check an object literal against an expected type.
+    ///
+    /// This performs:
+    /// 1. Missing property check - all required properties must be present
+    /// 2. Excess property check - no extra properties allowed (fresh literal only)
+    /// 3. Property type compatibility check
+    fn check_object_literal_against_type(
+        &mut self,
+        obj: &ObjectExpression,
+        expected: &Type,
+        span: Span,
+    ) {
+        // Resolve TypeRef to actual type
+        let resolved = if let Type::TypeRef { name, .. } = expected {
+            self.symbols
+                .lookup_type(name)
+                .map(|s| s.ty.clone())
+                .unwrap_or_else(|| expected.clone())
+        } else {
+            expected.clone()
+        };
+
+        let Type::Object {
+            properties: expected_props,
+            index_signature,
+        } = &resolved
+        else {
+            // Not an object type, fall back to normal assignability
+            let source = self.infer_object_literal(obj);
+            if !self.is_assignable(&source, expected) {
+                self.errors
+                    .push(TypeError::not_assignable(&source, expected, span));
+            }
+            return;
+        };
+
+        // Collect properties from the object literal
+        let mut literal_props: Vec<(String, Span)> = Vec::new();
+        for prop in &obj.properties {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                if let Some(name) = self.get_property_key_name(&p.key) {
+                    literal_props.push((name.clone(), p.span));
+
+                    // Check property type compatibility
+                    if let Some(expected_prop) = expected_props.iter().find(|ep| ep.name == name) {
+                        let value_type = self.infer_expression(&p.value);
+                        if !self.is_assignable(&value_type, &expected_prop.ty) {
+                            self.errors.push(TypeError::not_assignable(
+                                &value_type,
+                                &expected_prop.ty,
+                                p.span,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let literal_prop_names: std::collections::HashSet<&str> =
+            literal_props.iter().map(|(n, _)| n.as_str()).collect();
+
+        // Check for missing required properties
+        let source_type = self.infer_object_literal(obj);
+        for expected_prop in expected_props {
+            if !expected_prop.optional && !literal_prop_names.contains(expected_prop.name.as_str()) {
+                self.errors.push(TypeError::missing_property(
+                    &expected_prop.name,
+                    &source_type,
+                    expected,
+                    span,
+                ));
+            }
+        }
+
+        // Check for excess properties (only if no index signature)
+        if index_signature.is_none() {
+            let expected_prop_names: std::collections::HashSet<&str> =
+                expected_props.iter().map(|p| p.name.as_str()).collect();
+
+            for (prop_name, prop_span) in &literal_props {
+                if !expected_prop_names.contains(prop_name.as_str()) {
+                    self.errors
+                        .push(TypeError::excess_property(prop_name, expected, *prop_span));
+                }
+            }
+        }
+    }
+
+    /// Get the name from a property key.
+    fn get_property_key_name(&self, key: &PropertyKey) -> Option<String> {
+        match key {
+            PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+            PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+            PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+            _ => None,
         }
     }
 
@@ -517,12 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn test_arrow_function_inference() {
-        let errors = check("const f = (x: number) => x + 1;");
-        assert!(errors.is_empty());
-    }
-
-    #[test]
     fn test_binary_operations() {
         let errors = check("const x = 1 + 2; const y = \"a\" + \"b\";");
         assert!(errors.is_empty());
@@ -531,12 +796,6 @@ mod tests {
     #[test]
     fn test_assignable_literal_to_base() {
         let errors = check("const x: string = \"hello\";");
-        assert!(errors.is_empty());
-    }
-
-    #[test]
-    fn test_union_assignable() {
-        let errors = check("const x: string | number = 42;");
         assert!(errors.is_empty());
     }
 
@@ -655,6 +914,675 @@ mod tests {
     fn test_undefined_assignable_to_string() {
         // In non-strict mode, undefined is assignable to anything
         let errors = check("const x: string = undefined;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_object_missing_property() {
+        let errors = check("const x: { a: number } = {};");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2741);
+    }
+
+    #[test]
+    fn test_object_missing_multiple_properties() {
+        let errors = check("const x: { a: number; b: string } = {};");
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn test_object_has_required_property() {
+        let errors = check("const x: { a: number } = { a: 1 };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_object_property_type_mismatch() {
+        let errors = check("const x: { a: number } = { a: \"hello\" };");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_object_excess_property() {
+        let errors = check("const x: { a: number } = { a: 1, b: 2 };");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2353);
+    }
+
+    #[test]
+    fn test_object_multiple_excess_properties() {
+        let errors = check("const x: { a: number } = { a: 1, b: 2, c: 3 };");
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn test_object_optional_property_missing_ok() {
+        let errors = check("const x: { a: number; b?: string } = { a: 1 };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_object_optional_property_present_ok() {
+        let errors = check("const x: { a: number; b?: string } = { a: 1, b: \"hi\" };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_object_optional_property_wrong_type() {
+        let errors = check("const x: { a: number; b?: string } = { a: 1, b: 42 };");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_object_all_optional_empty_ok() {
+        let errors = check("const x: { a?: number; b?: string } = {};");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_property_access_exists() {
+        let errors = check("const obj = { x: 1 }; const y = obj.x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_property_access_not_exists() {
+        let errors = check("const obj = { x: 1 }; const y = obj.z;");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    #[test]
+    fn test_property_access_on_typed_object() {
+        let errors = check("const obj: { x: number } = { x: 1 }; const y = obj.x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_property_access_not_exists_on_typed() {
+        let errors = check("const obj: { x: number } = { x: 1 }; const y = obj.z;");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    #[test]
+    fn test_computed_property_access_string_literal() {
+        let errors = check("const obj = { x: 1 }; const y = obj[\"x\"];");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_computed_property_access_not_exists() {
+        let errors = check("const obj = { x: 1 }; const y = obj[\"z\"];");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    #[test]
+    fn test_property_access_on_any() {
+        // Accessing property on `any` should not error
+        let errors = check("const obj: any = {}; const y = obj.anything;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_array_length_property() {
+        let errors = check("const arr = [1, 2, 3]; const len = arr.length;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_array_method_property() {
+        let errors = check("const arr = [1, 2, 3]; const mapped = arr.map;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_string_length_property() {
+        let errors = check("const s = \"hello\"; const len = s.length;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_nested_property_access() {
+        let errors = check("const obj = { inner: { x: 1 } }; const y = obj.inner.x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_nested_property_not_exists() {
+        let errors = check("const obj = { inner: { x: 1 } }; const y = obj.inner.z;");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    #[test]
+    fn test_union_source_all_branches_must_match() {
+        // string | number is NOT assignable to string
+        let errors = check("const x: string | number = 1; const y: string = x;");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_union_target_any_branch_works() {
+        // string is assignable to string | number
+        let errors = check("const x: string | number = \"hello\";");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_with_null() {
+        let errors = check("const x: string | null = null;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_with_undefined() {
+        let errors = check("const x: number | undefined = undefined;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_nested_union() {
+        let errors = check("const x: (string | number) | boolean = true;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_intersection_must_satisfy_all() {
+        // Object must have both a and b
+        let errors = check("const x: { a: number } & { b: string } = { a: 1 };");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_intersection_satisfies_all() {
+        let errors = check("const x: { a: number } & { b: string } = { a: 1, b: \"hi\" };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_array_element_type_mismatch() {
+        let errors = check("const x: number[] = [1, 2, \"three\"];");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_array_covariance() {
+        // string[] should not be assignable to (string | number)[] in strict mode
+        // but we're in non-strict, so this works
+        let errors = check("const x: string[] = [\"a\"]; const y: (string | number)[] = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_tuple_exact_length() {
+        let errors = check("const x: [number, string] = [1];");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_tuple_type_mismatch() {
+        let errors = check("const x: [number, string] = [1, 2];");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_tuple_correct() {
+        let errors = check("const x: [number, string] = [1, \"hello\"];");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_tuple_to_array() {
+        // Tuple [number, number] should be assignable to number[]
+        let errors = check("const x: [number, number] = [1, 2]; const y: number[] = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_return_covariance() {
+        // () => string is assignable to () => string | number
+        let errors = check(r#"
+            const f: () => string = () => "hello";
+            const g: () => string | number = f;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_param_contravariance() {
+        // (x: string | number) => void is assignable to (x: string) => void
+        let errors = check(r#"
+            const f: (x: string | number) => void = (x) => {};
+            const g: (x: string) => void = f;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_fewer_params_ok() {
+        // () => void is assignable to (x: number) => void (callback compatibility)
+        let errors = check(r#"
+            const f: () => void = () => {};
+            const g: (x: number) => void = f;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_more_params_error() {
+        // (x: number, y: number) => void is NOT assignable to (x: number) => void
+        let errors = check(r#"
+            const f: (x: number, y: number) => void = (x, y) => {};
+            const g: (x: number) => void = f;
+        "#);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_any_accepts_anything() {
+        let errors = check("const x: any = { foo: 1, bar: \"test\" };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_any_assignable_to_anything() {
+        let errors = check("const x: any = 1; const y: string = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_accepts_anything() {
+        let errors = check("const x: unknown = { foo: 1 };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_never_assignable_to_anything() {
+        let errors = check(r#"
+            function fail(): never { throw new Error(); }
+            const x: string = fail();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_void_function() {
+        let errors = check("function f(): void { return; }");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_ternary_inference() {
+        let errors = check("const x = true ? 1 : \"hello\"; const y: string | number = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_logical_and_inference() {
+        // a && b returns b's type if a is truthy
+        let errors = check("const x = true && 42; const y: number = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_logical_or_inference() {
+        let errors = check("const x = false || \"fallback\"; const y: boolean | string = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_nullish_coalescing_inference() {
+        let errors = check("const x = null ?? \"default\"; const y: null | string = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arithmetic_inference() {
+        let errors = check("const x = 1 + 2 * 3 - 4 / 2; const y: number = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_string_concat_inference() {
+        let errors = check("const x = \"hello\" + \" \" + \"world\"; const y: string = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_comparison_inference() {
+        let errors = check("const x = 1 < 2; const y: boolean = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_typeof_inference() {
+        let errors = check("const x = typeof 42; const y: string = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_unary_not_inference() {
+        let errors = check("const x = !true; const y: boolean = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_unary_minus_inference() {
+        let errors = check("const x = -42; const y: number = x;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_nested_object_inference() {
+        let errors = check(r#"
+            const obj = {
+                user: {
+                    name: "alice",
+                    age: 30
+                },
+                active: true
+            };
+            const name: string = obj.user.name;
+            const age: number = obj.user.age;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_array_of_objects_inference() {
+        let errors = check(r#"
+            const users = [
+                { name: "alice", age: 30 },
+                { name: "bob", age: 25 }
+            ];
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_returning_object() {
+        let errors = check(r#"
+            function createUser(name: string, age: number) {
+                return { name, age };
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_call_with_literal_args() {
+        let errors = check(r#"
+            function greet(name: string, age: number): string {
+                return name;
+            }
+            const result = greet("alice", 30);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_call_with_variable_args() {
+        let errors = check(r#"
+            function add(a: number, b: number): number {
+                return a + b;
+            }
+            const x = 1;
+            const y = 2;
+            const sum = add(x, y);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_call_with_wrong_literal_type() {
+        let errors = check(r#"
+            function square(n: number): number {
+                return n * n;
+            }
+            const result = square("hello");
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345);
+    }
+
+    #[test]
+    fn test_callback_function() {
+        let errors = check(r#"
+            function map(arr: number[], fn: (x: number) => number): number[] {
+                return arr;
+            }
+            const doubled = map([1, 2, 3], (x: number) => x * 2);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_as_type() {
+        let errors = check(r#"
+            interface User {
+                name: string;
+                age: number;
+            }
+            const user: User = { name: "alice", age: 30 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_missing_property() {
+        let errors = check(r#"
+            interface User {
+                name: string;
+                age: number;
+            }
+            const user: User = { name: "alice" };
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2741);
+    }
+
+    #[test]
+    fn test_interface_optional_property() {
+        let errors = check(r#"
+            interface User {
+                name: string;
+                age?: number;
+            }
+            const user: User = { name: "alice" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_type_alias() {
+        let errors = check(r#"
+            type StringOrNumber = string | number;
+            const x: StringOrNumber = 42;
+            const y: StringOrNumber = "hello";
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_empty_object_literal() {
+        let errors = check("const x: {} = {};");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_object_with_only_optional_properties() {
+        let errors = check("const x: { a?: number; b?: string } = {};");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_deeply_nested_property_access() {
+        let errors = check(r#"
+            const obj = { a: { b: { c: { d: 42 } } } };
+            const val: number = obj.a.b.c.d;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_array_index_access() {
+        let errors = check(r#"
+            const arr = [1, 2, 3];
+            const first = arr[0];
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_spread_operator_in_array() {
+        let errors = check(r#"
+            const a = [1, 2];
+            const b = [...a, 3, 4];
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_template_literal() {
+        let errors = check(r#"
+            const name = "world";
+            const greeting: string = `Hello, ${name}!`;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_function_expression_body() {
+        let errors = check("const double = (x: number) => x * 2;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_function_block_body() {
+        let errors = check(r#"
+            const double = (x: number) => {
+                return x * 2;
+            };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_iife() {
+        let errors = check("const x = ((n: number) => n * 2)(5);");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_recursive_function() {
+        let errors = check(r#"
+            function factorial(n: number): number {
+                if (n <= 1) return 1;
+                return n * factorial(n - 1);
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_mutually_recursive_functions() {
+        let errors = check(r#"
+            function isEven(n: number): boolean {
+                if (n === 0) return true;
+                return isOdd(n - 1);
+            }
+            function isOdd(n: number): boolean {
+                if (n === 0) return false;
+                return isEven(n - 1);
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_const_assertion_behavior() {
+        // const gets literal type, let gets widened
+        let errors = check(r#"
+            const x = "hello";
+            let y = "hello";
+            const a: "hello" = x;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_statements_multiple_errors() {
+        let errors = check(r#"
+            const x: number = "wrong";
+            const y: string = 123;
+            const z: boolean = "also wrong";
+        "#);
+        assert_eq!(errors.len(), 3);
+    }
+
+    #[test]
+    fn test_void_vs_undefined() {
+        let errors = check(r#"
+            function f(): void {}
+            function g(): undefined { return undefined; }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_bigint_literal() {
+        let errors = check("const x = 9007199254740991n;");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_expression() {
+        let errors = check("const x = (1, 2, 3);");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_new_expression() {
+        let errors = check("const date = new Date();");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_for_loop_scope() {
+        let errors = check(r#"
+            for (let i = 0; i < 10; i++) {
+                const x = i;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_while_loop() {
+        let errors = check(r#"
+            let x = 0;
+            while (x < 10) {
+                x = x + 1;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_if_else() {
+        let errors = check(r#"
+            const x = 5;
+            if (x > 0) {
+                const positive = true;
+            } else {
+                const negative = true;
+            }
+        "#);
         assert!(errors.is_empty());
     }
 }

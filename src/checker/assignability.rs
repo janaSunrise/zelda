@@ -12,8 +12,25 @@ use crate::types::Type;
 use super::Checker;
 
 impl<'a> Checker<'a> {
+    /// Resolve a TypeRef to its underlying type by looking it up in the type namespace.
+    fn resolve_type_ref(&self, name: &str) -> Option<Type> {
+        self.symbols.lookup_type(name).map(|s| s.ty.clone())
+    }
+
     /// Check if source type is assignable to target type.
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
+        // Resolve TypeRefs to their underlying types
+        let source = if let Type::TypeRef { name, .. } = source {
+            self.resolve_type_ref(name).unwrap_or_else(|| source.clone())
+        } else {
+            source.clone()
+        };
+        let target = if let Type::TypeRef { name, .. } = target {
+            self.resolve_type_ref(name).unwrap_or_else(|| target.clone())
+        } else {
+            target.clone()
+        };
+
         // Same type
         if source == target {
             return true;
@@ -57,48 +74,49 @@ impl<'a> Checker<'a> {
         }
 
         // Literal types are assignable to their base types
-        match (source, target) {
+        match (&source, &target) {
             (Type::StringLiteral(_), Type::String) => return true,
             (Type::NumberLiteral(_), Type::Number) => return true,
             (Type::BooleanLiteral(_), Type::Boolean) => return true,
             _ => {}
         }
 
-        // Union target: source must be assignable to at least one branch
-        if let Type::Union(target_types) = target {
-            return target_types
-                .iter()
-                .any(|t| self.is_assignable(source, t));
-        }
-
         // Union source: all branches must be assignable to target
-        if let Type::Union(source_types) = source {
+        // Check this BEFORE union target to handle Union to Union correctly
+        if let Type::Union(source_types) = &source {
             return source_types
                 .iter()
-                .all(|s| self.is_assignable(s, target));
+                .all(|s| self.is_assignable(s, &target));
+        }
+
+        // Union target: source must be assignable to at least one branch
+        if let Type::Union(target_types) = &target {
+            return target_types
+                .iter()
+                .any(|t| self.is_assignable(&source, t));
         }
 
         // Intersection source: if any member is assignable, the whole is
-        if let Type::Intersection(source_types) = source {
+        if let Type::Intersection(source_types) = &source {
             return source_types
                 .iter()
-                .any(|s| self.is_assignable(s, target));
+                .any(|s| self.is_assignable(s, &target));
         }
 
         // Intersection target: must be assignable to all members
-        if let Type::Intersection(target_types) = target {
+        if let Type::Intersection(target_types) = &target {
             return target_types
                 .iter()
-                .all(|t| self.is_assignable(source, t));
+                .all(|t| self.is_assignable(&source, t));
         }
 
         // Array types - covariant
-        if let (Type::Array(source_elem), Type::Array(target_elem)) = (source, target) {
+        if let (Type::Array(source_elem), Type::Array(target_elem)) = (&source, &target) {
             return self.is_assignable(source_elem, target_elem);
         }
 
         // Tuple types - element-wise compatibility
-        if let (Type::Tuple(source_types), Type::Tuple(target_types)) = (source, target) {
+        if let (Type::Tuple(source_types), Type::Tuple(target_types)) = (&source, &target) {
             if source_types.len() != target_types.len() {
                 return false;
             }
@@ -109,7 +127,7 @@ impl<'a> Checker<'a> {
         }
 
         // Tuple assignable to array - all elements must match
-        if let (Type::Tuple(source_types), Type::Array(target_elem)) = (source, target) {
+        if let (Type::Tuple(source_types), Type::Array(target_elem)) = (&source, &target) {
             return source_types
                 .iter()
                 .all(|s| self.is_assignable(s, target_elem));
@@ -125,7 +143,7 @@ impl<'a> Checker<'a> {
                 properties: target_props,
                 ..
             },
-        ) = (source, target)
+        ) = (&source, &target)
         {
             return self.is_object_assignable(source_props, target_props);
         }
@@ -142,7 +160,7 @@ impl<'a> Checker<'a> {
                 return_type: target_return,
                 ..
             },
-        ) = (source, target)
+        ) = (&source, &target)
         {
             return self.is_function_assignable(
                 source_params,

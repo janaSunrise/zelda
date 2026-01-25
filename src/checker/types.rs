@@ -64,8 +64,141 @@ impl<'a> Checker<'a> {
             // Parenthesized types
             TSType::TSParenthesizedType(paren) => self.resolve_type(&paren.type_annotation),
 
+            // Object type literals: { a: number; b?: string }
+            TSType::TSTypeLiteral(lit) => self.resolve_type_literal(lit),
+
+            // Tuple types: [number, string]
+            TSType::TSTupleType(tuple) => {
+                let types = tuple
+                    .element_types
+                    .iter()
+                    .map(|elem| self.resolve_tuple_element(elem))
+                    .collect();
+                Type::Tuple(types)
+            }
+
+            // Function types: (a: number) => string
+            TSType::TSFunctionType(func) => self.resolve_function_type(func),
+
             _ => Type::Any,
         }
+    }
+
+    /// Resolve a type literal (object type) to our Type representation.
+    fn resolve_type_literal(&self, lit: &TSTypeLiteral) -> Type {
+        let mut properties = Vec::new();
+
+        for member in &lit.members {
+            match member {
+                TSSignature::TSPropertySignature(prop) => {
+                    if let Some(name) = self.get_ts_property_key_name(&prop.key) {
+                        let ty = prop
+                            .type_annotation
+                            .as_ref()
+                            .map(|ann| self.resolve_type(&ann.type_annotation))
+                            .unwrap_or(Type::Any);
+                        let optional = prop.optional;
+                        properties.push(crate::types::Property {
+                            name,
+                            ty,
+                            optional,
+                            readonly: prop.readonly,
+                        });
+                    }
+                }
+                TSSignature::TSMethodSignature(method) => {
+                    if let Some(name) = self.get_ts_property_key_name(&method.key) {
+                        // Build function type from method signature
+                        let params = self.resolve_formal_parameters(&method.params);
+                        let return_type = method
+                            .return_type
+                            .as_ref()
+                            .map(|ann| self.resolve_type(&ann.type_annotation))
+                            .unwrap_or(Type::Void);
+                        let ty = Type::Function {
+                            params,
+                            return_type: Box::new(return_type),
+                            type_params: vec![],
+                        };
+                        properties.push(crate::types::Property {
+                            name,
+                            ty,
+                            optional: method.optional,
+                            readonly: false,
+                        });
+                    }
+                }
+                // TODO: Index signatures
+                _ => {}
+            }
+        }
+
+        Type::Object {
+            properties,
+            index_signature: None,
+        }
+    }
+
+    /// Get property key name from TSPropertyKey.
+    fn get_ts_property_key_name(&self, key: &PropertyKey) -> Option<String> {
+        match key {
+            PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+            PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+            PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Resolve a tuple element type.
+    fn resolve_tuple_element(&self, elem: &TSTupleElement) -> Type {
+        match elem {
+            TSTupleElement::TSOptionalType(opt) => self.resolve_type(&opt.type_annotation),
+            TSTupleElement::TSRestType(rest) => self.resolve_type(&rest.type_annotation),
+            _ => {
+                if let Some(ty) = elem.as_ts_type() {
+                    self.resolve_type(ty)
+                } else {
+                    Type::Any
+                }
+            }
+        }
+    }
+
+    /// Resolve a function type.
+    fn resolve_function_type(&self, func: &TSFunctionType) -> Type {
+        let params = self.resolve_formal_parameters(&func.params);
+        let return_type = self.resolve_type(&func.return_type.type_annotation);
+
+        Type::Function {
+            params,
+            return_type: Box::new(return_type),
+            type_params: vec![],
+        }
+    }
+
+    /// Resolve formal parameters to our Param representation.
+    fn resolve_formal_parameters(&self, params: &FormalParameters) -> Vec<crate::types::Param> {
+        params
+            .items
+            .iter()
+            .map(|p| {
+                let name = match &p.pattern {
+                    BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                let ty = p
+                    .type_annotation
+                    .as_ref()
+                    .map(|ann| self.resolve_type(&ann.type_annotation))
+                    .unwrap_or(Type::Any);
+                crate::types::Param {
+                    name,
+                    ty,
+                    optional: p.optional,
+                    rest: false,
+                }
+            })
+            .collect()
     }
 
     /// Widen literal types to their base types.
