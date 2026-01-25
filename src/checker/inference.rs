@@ -317,22 +317,38 @@ impl<'a> Checker<'a> {
     }
 
     /// Infer type of computed member access (obj[expr]).
+    ///
+    /// Handles:
+    /// - String literal key: `obj["prop"]` - property access
+    /// - Array indexing: `arr[0]` - returns element type
+    /// - Tuple indexing: `tuple[0]` - returns specific element or union
+    /// - Index signature: `obj[key]` where key matches index signature key type
     fn infer_computed_member_expression(&self, member: &ComputedMemberExpression) -> Type {
         let object_type = self.infer_expression(&member.object);
         let index_type = self.infer_expression(&member.expression);
 
+        // Resolve TypeRef first
+        let resolved_type = if let Type::TypeRef { name, .. } = &object_type {
+            self.symbols
+                .lookup_type(name)
+                .map(|s| s.ty.clone())
+                .unwrap_or_else(|| object_type.clone())
+        } else {
+            object_type.clone()
+        };
+
         // If indexing with string literal, treat as property access
-        if let Type::StringLiteral(prop_name) = index_type {
-            return self.get_property_type(&object_type, &prop_name);
+        if let Type::StringLiteral(prop_name) = &index_type {
+            return self.get_property_type(&resolved_type, prop_name);
         }
 
         // Array indexing
-        if let Type::Array(element_type) = object_type {
-            return *element_type;
+        if let Type::Array(element_type) = &resolved_type {
+            return (**element_type).clone();
         }
 
         // Tuple indexing with number literal
-        if let Type::Tuple(types) = &object_type {
+        if let Type::Tuple(types) = &resolved_type {
             if let Type::NumberLiteral(n) = index_type {
                 let idx = n as usize;
                 if idx < types.len() {
@@ -343,17 +359,66 @@ impl<'a> Checker<'a> {
             return self.unify_types(types.clone());
         }
 
+        // Object with index signature
+        if let Type::Object { index_signature, .. } = &resolved_type {
+            if let Some(idx_sig) = index_signature {
+                // Check if index type is compatible with index signature key type
+                let key_matches = match (&index_type, &*idx_sig.key_type) {
+                    // String index - accepts string and string literal
+                    (Type::String, Type::String) => true,
+                    (Type::StringLiteral(_), Type::String) => true,
+                    // Number index - accepts number and number literal
+                    (Type::Number, Type::Number) => true,
+                    (Type::NumberLiteral(_), Type::Number) => true,
+                    // Number can also access string index (numbers coerce to strings)
+                    (Type::Number, Type::String) => true,
+                    (Type::NumberLiteral(_), Type::String) => true,
+                    _ => false,
+                };
+                if key_matches {
+                    return (*idx_sig.value_type).clone();
+                }
+            }
+        }
+
         Type::Any
     }
 
     /// Get property type from an object type.
+    ///
+    /// Resolution order:
+    /// 1. Resolve TypeRef to its underlying type
+    /// 2. Look for an explicit property with the given name
+    /// 3. If not found and there's a string index signature, return its value type
+    /// 4. Fall back to Any
     pub(super) fn get_property_type(&self, object_type: &Type, prop_name: &str) -> Type {
-        match object_type {
-            Type::Object { properties, .. } => properties
-                .iter()
-                .find(|p| p.name == prop_name)
-                .map(|p| p.ty.clone())
-                .unwrap_or(Type::Any),
+        // Resolve TypeRef first
+        let resolved_type = if let Type::TypeRef { name, .. } = object_type {
+            self.symbols
+                .lookup_type(name)
+                .map(|s| s.ty.clone())
+                .unwrap_or_else(|| object_type.clone())
+        } else {
+            object_type.clone()
+        };
+
+        match &resolved_type {
+            Type::Object {
+                properties,
+                index_signature,
+            } => {
+                // First, look for an explicit property
+                if let Some(prop) = properties.iter().find(|p| p.name == prop_name) {
+                    return prop.ty.clone();
+                }
+                // Fall back to index signature if present (string key)
+                if let Some(idx_sig) = index_signature {
+                    if matches!(*idx_sig.key_type, Type::String) {
+                        return (*idx_sig.value_type).clone();
+                    }
+                }
+                Type::Any
+            }
             Type::Any => Type::Any,
             Type::Unknown => Type::Any, // Property access on unknown is unsafe
             _ => Type::Any,

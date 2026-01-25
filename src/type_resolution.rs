@@ -1,6 +1,6 @@
 use oxc_ast::ast::*;
 
-use crate::types::{Param, Property, Type, TypeParam};
+use crate::types::{IndexSignature, Param, Property, Type, TypeParam};
 
 /// Convert an oxc TSType AST node to our Type representation.
 pub fn resolve_ts_type(ts_type: &TSType) -> Type {
@@ -116,6 +116,7 @@ pub fn resolve_function_type(func: &TSFunctionType) -> Type {
 /// Resolve a type literal (object type).
 pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
     let mut properties = Vec::new();
+    let mut index_signature = None;
 
     for member in &lit.members {
         match member {
@@ -156,14 +157,24 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
                     properties.push(property);
                 }
             }
-            // TODO: Index signatures
+            TSSignature::TSIndexSignature(idx) => {
+                // Index signature: [key: string]: T or [key: number]: T
+                if let Some(param) = idx.parameters.first() {
+                    let key_type = resolve_ts_type(&param.type_annotation.type_annotation);
+                    let value_type = resolve_ts_type(&idx.type_annotation.type_annotation);
+                    index_signature = Some(IndexSignature {
+                        key_type: Box::new(key_type),
+                        value_type: Box::new(value_type),
+                    });
+                }
+            }
             _ => {}
         }
     }
 
     Type::Object {
         properties,
-        index_signature: None,
+        index_signature,
     }
 }
 
@@ -258,35 +269,66 @@ pub fn build_function_type(func: &Function) -> Type {
 
 /// Build an object type from an interface declaration.
 pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
-    let properties: Vec<Property> = decl
-        .body
-        .body
-        .iter()
-        .filter_map(|member| {
-            if let TSSignature::TSPropertySignature(prop) = member {
-                let name = get_property_key_name(&prop.key)?;
-                let ty = prop
-                    .type_annotation
-                    .as_ref()
-                    .map(|ann| resolve_ts_type(&ann.type_annotation))
-                    .unwrap_or(Type::Any);
-                let mut property = Property::new(name, ty);
-                if prop.optional {
-                    property = property.optional();
+    let mut properties = Vec::new();
+    let mut index_signature = None;
+
+    for member in &decl.body.body {
+        match member {
+            TSSignature::TSPropertySignature(prop) => {
+                if let Some(name) = get_property_key_name(&prop.key) {
+                    let ty = prop
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| resolve_ts_type(&ann.type_annotation))
+                        .unwrap_or(Type::Any);
+                    let mut property = Property::new(name, ty);
+                    if prop.optional {
+                        property = property.optional();
+                    }
+                    if prop.readonly {
+                        property = property.readonly();
+                    }
+                    properties.push(property);
                 }
-                if prop.readonly {
-                    property = property.readonly();
-                }
-                Some(property)
-            } else {
-                None
             }
-        })
-        .collect();
+            TSSignature::TSMethodSignature(method) => {
+                if let Some(name) = get_property_key_name(&method.key) {
+                    let params = resolve_formal_parameters(&method.params);
+                    let return_type = method
+                        .return_type
+                        .as_ref()
+                        .map(|ann| resolve_ts_type(&ann.type_annotation))
+                        .unwrap_or(Type::Void);
+                    let ty = Type::Function {
+                        params,
+                        return_type: Box::new(return_type),
+                        type_params: vec![],
+                    };
+                    let mut property = Property::new(name, ty);
+                    if method.optional {
+                        property = property.optional();
+                    }
+                    properties.push(property);
+                }
+            }
+            TSSignature::TSIndexSignature(idx) => {
+                // Index signature: [key: string]: T or [key: number]: T
+                if let Some(param) = idx.parameters.first() {
+                    let key_type = resolve_ts_type(&param.type_annotation.type_annotation);
+                    let value_type = resolve_ts_type(&idx.type_annotation.type_annotation);
+                    index_signature = Some(IndexSignature {
+                        key_type: Box::new(key_type),
+                        value_type: Box::new(value_type),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
 
     Type::Object {
         properties,
-        index_signature: None,
+        index_signature,
     }
 }
 

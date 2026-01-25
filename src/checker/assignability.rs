@@ -137,15 +137,20 @@ impl<'a> Checker<'a> {
         if let (
             Type::Object {
                 properties: source_props,
-                ..
+                index_signature: source_idx,
             },
             Type::Object {
                 properties: target_props,
-                ..
+                index_signature: target_idx,
             },
         ) = (source, target)
         {
-            return self.is_object_assignable(source_props, target_props);
+            return self.is_object_assignable(
+                source_props,
+                source_idx.as_ref(),
+                target_props,
+                target_idx.as_ref(),
+            );
         }
 
         // Function types - contravariant params, covariant return
@@ -175,26 +180,80 @@ impl<'a> Checker<'a> {
 
     /// Check structural compatibility of object types.
     ///
-    /// Target's required properties must all exist in source with compatible types.
+    /// Rules:
+    /// 1. Target's required properties must exist in source with compatible types
+    ///    (or be satisfied by source's index signature)
+    /// 2. If target has an index signature, all source properties must be compatible
+    ///    with the index signature's value type
+    /// 3. Index signature compatibility: source index signature value type must be
+    ///    assignable to target index signature value type
     fn is_object_assignable(
         &self,
         source_props: &[crate::types::Property],
+        source_idx: Option<&crate::types::IndexSignature>,
         target_props: &[crate::types::Property],
+        target_idx: Option<&crate::types::IndexSignature>,
     ) -> bool {
+        // Check that all required target properties are satisfied
         for target_prop in target_props {
             if target_prop.optional {
                 continue;
             }
+
+            // First, look for an explicit source property
             let source_prop = source_props.iter().find(|p| p.name == target_prop.name);
             match source_prop {
-                None => return false,
                 Some(sp) => {
                     if !self.is_assignable(&sp.ty, &target_prop.ty) {
                         return false;
                     }
                 }
+                None => {
+                    // No explicit property - check if source's index signature can satisfy it
+                    if let Some(idx_sig) = source_idx {
+                        // String index signatures can satisfy any property
+                        if matches!(*idx_sig.key_type, Type::String) {
+                            if !self.is_assignable(&idx_sig.value_type, &target_prop.ty) {
+                                return false;
+                            }
+                        } else {
+                            // Number index can't satisfy string property names
+                            return false;
+                        }
+                    } else {
+                        // No source property and no index signature
+                        return false;
+                    }
+                }
             }
         }
+
+        // If target has an index signature, all source properties must be compatible
+        if let Some(target_idx_sig) = target_idx {
+            // Check all source properties against target's index signature
+            for source_prop in source_props {
+                // Only check properties that match the index key type
+                let key_matches = match &*target_idx_sig.key_type {
+                    Type::String => true, // String index applies to all properties
+                    Type::Number => source_prop.name.parse::<f64>().is_ok(), // Number index only for numeric keys
+                    _ => false,
+                };
+
+                if key_matches {
+                    if !self.is_assignable(&source_prop.ty, &target_idx_sig.value_type) {
+                        return false;
+                    }
+                }
+            }
+
+            // If source has an index signature, its value type must be compatible
+            if let Some(source_idx_sig) = source_idx {
+                if !self.is_assignable(&source_idx_sig.value_type, &target_idx_sig.value_type) {
+                    return false;
+                }
+            }
+        }
+
         true
     }
 

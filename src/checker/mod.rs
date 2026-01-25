@@ -451,6 +451,16 @@ impl<'a> Checker<'a> {
 
     /// Check if a type has a property with the given name.
     fn has_property(&self, ty: &Type, prop_name: &str) -> bool {
+        // Resolve TypeRef first
+        let resolved = if let Type::TypeRef { name, .. } = ty {
+            self.symbols
+                .lookup_type(name)
+                .map(|s| s.ty.clone())
+        } else {
+            None
+        };
+        let ty = resolved.as_ref().unwrap_or(ty);
+
         match ty {
             Type::Object { properties, index_signature } => {
                 // Check direct properties
@@ -673,14 +683,39 @@ impl<'a> Checker<'a> {
         }
 
         // Check for excess properties (only if no index signature)
-        if index_signature.is_none() {
-            let expected_prop_names: std::collections::HashSet<&str> =
-                expected_props.iter().map(|p| p.name.as_str()).collect();
+        // If index signature exists, verify value types match
+        let expected_prop_names: std::collections::HashSet<&str> =
+            expected_props.iter().map(|p| p.name.as_str()).collect();
 
-            for (prop_name, prop_span) in &literal_props {
-                if !expected_prop_names.contains(prop_name.as_str()) {
-                    self.errors
-                        .push(TypeError::excess_property(prop_name, expected, *prop_span));
+        for prop in &obj.properties {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                if let Some(name) = match &p.key {
+                    PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+                    PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                    PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                    _ => None,
+                } {
+                    // Property not in expected_props - either excess or needs index sig check
+                    if !expected_prop_names.contains(name.as_str()) {
+                        if let Some(idx_sig) = index_signature {
+                            // Index signature exists - check value type compatibility
+                            let value_type = self.infer_expression(&p.value);
+                            if !self.is_assignable(&value_type, &idx_sig.value_type) {
+                                self.errors.push(TypeError::not_assignable(
+                                    &value_type,
+                                    &idx_sig.value_type,
+                                    p.span,
+                                ));
+                            }
+                        } else {
+                            // No index signature - excess property error
+                            self.errors.push(TypeError::excess_property(
+                                &name,
+                                expected,
+                                p.span,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1833,6 +1868,156 @@ mod tests {
                 } while (x < 10);
                 return x;
             }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_basic() {
+        let errors = check("const obj: { [key: string]: number } = { a: 1, b: 2 };");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_value_type_mismatch() {
+        let errors = check("const obj: { [key: string]: number } = { a: \"wrong\" };");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_index_signature_property_access() {
+        let errors = check(r#"
+            const obj: { [key: string]: number } = { a: 1 };
+            const x: number = obj.anyProp;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_property_access_wrong_type() {
+        let errors = check(r#"
+            const obj: { [key: string]: number } = { a: 1 };
+            const x: string = obj.anyProp;
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_index_signature_with_explicit_property() {
+        let errors = check(r#"
+            const obj: { name: string; [key: string]: string } = { name: "test", extra: "ok" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_explicit_property_mismatch() {
+        let errors = check(r#"
+            const obj: { name: string; [key: string]: string } = { name: 42 };
+        "#);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_index_signature_computed_access() {
+        let errors = check(r#"
+            const obj: { [key: string]: number } = { a: 1 };
+            const key: string = "test";
+            const val = obj[key];
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_number_key() {
+        let errors = check(r#"
+            const arr: { [index: number]: string } = { 0: "first", 1: "second" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_empty_object() {
+        let errors = check("const obj: { [key: string]: number } = {};");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_with_index_signature() {
+        let errors = check(r#"
+            interface StringMap {
+                [key: string]: string;
+            }
+            const map: StringMap = { hello: "world", foo: "bar" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_index_signature_property_access() {
+        let errors = check(r#"
+            interface NumberDict {
+                [key: string]: number;
+            }
+            function f(d: NumberDict): number {
+                return d.anyKey;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_mixed_explicit_and_index() {
+        let errors = check(r#"
+            interface Config {
+                name: string;
+                [key: string]: string;
+            }
+            const cfg: Config = { name: "app", version: "1.0" };
+            const n: string = cfg.name;
+            const v: string = cfg.version;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_excess_property_with_index() {
+        let errors = check(r#"
+            const obj: { known: number; [key: string]: number } = {
+                known: 1,
+                extra: 2,
+                another: 3
+            };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_nested_object() {
+        let errors = check(r#"
+            interface UserMap {
+                [id: string]: { name: string; age: number };
+            }
+            const users: UserMap = {
+                user1: { name: "Alice", age: 30 },
+                user2: { name: "Bob", age: 25 }
+            };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_index_signature_function_value() {
+        let errors = check(r#"
+            interface Handlers {
+                [event: string]: () => void;
+            }
+            const h: Handlers = {
+                click: () => {},
+                hover: () => {}
+            };
         "#);
         assert!(errors.is_empty());
     }
