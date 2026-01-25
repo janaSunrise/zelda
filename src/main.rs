@@ -1,7 +1,8 @@
-mod binder;  // binder/ directory
-mod checker; // checker/ directory
+mod binder;
+mod checker;
 mod errors;
 mod symbols;
+mod type_resolution;
 mod types;
 
 use std::path::PathBuf;
@@ -38,15 +39,11 @@ enum Commands {
 #[error("{message}")]
 struct ZeldaError {
     message: String,
-
     #[source_code]
     src: NamedSource<Arc<String>>,
-
     #[label("{label}")]
     span: SourceSpan,
-
     label: String,
-
     #[help]
     help: Option<String>,
 }
@@ -99,7 +96,7 @@ fn check_file(path: &PathBuf) -> Result<usize> {
     let mut binder = Binder::new();
     binder.bind_program(&program);
 
-    let mut checker = Checker::new(&binder.symbols);
+    let mut checker = Checker::new(&mut binder.symbols);
     checker.check_program(&program);
 
     let mut error_count = 0;

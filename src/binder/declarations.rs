@@ -92,6 +92,26 @@ impl Binder {
         }
     }
 
+    /// Bind a catch clause parameter.
+    ///
+    /// Catch parameters: `catch (e)` or `catch (e: Error)`.
+    pub(super) fn bind_catch_parameter(&mut self, param: &CatchParameter) {
+        if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
+            let name = ident.name.as_str();
+            let span = ident.span;
+            // Catch parameters are typically `unknown` or `any` in TypeScript
+            let ty = param
+                .type_annotation
+                .as_ref()
+                .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                .unwrap_or(Type::Unknown);
+
+            if let Err(err) = self.symbols.define(name, ty, SymbolKind::Parameter, span) {
+                self.errors.push(err.into());
+            }
+        }
+    }
+
     /// Bind a class declaration.
     ///
     /// Classes exist in both value and type namespaces:
@@ -203,7 +223,9 @@ impl Binder {
             let name = ident.name.as_str();
             let span = ident.span;
             let ty = self.build_function_type(func);
-            let _ = self.symbols.define(name, ty, SymbolKind::Function, span);
+            if let Err(err) = self.symbols.define(name, ty, SymbolKind::Function, span) {
+                self.errors.push(err.into());
+            }
         }
 
         for param in &func.params.items {

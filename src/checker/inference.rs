@@ -20,22 +20,38 @@ impl<'a> Checker<'a> {
             Expression::NullLiteral(_) => Type::Null,
             Expression::BigIntLiteral(_) => Type::Number,
 
-            // Identifiers - look up in symbol table
-            Expression::Identifier(ident) => self
-                .symbols
-                .lookup(ident.name.as_str())
-                .map(|s| s.ty.clone())
-                .unwrap_or(Type::Any),
+            // Identifiers: check narrowing context first, then symbol table
+            Expression::Identifier(ident) => {
+                // Check narrowing context first for narrowed types
+                if let Some(narrowed) = self.narrowing.get_narrowed(ident.name.as_str()) {
+                    return narrowed.clone();
+                }
+                // Fall back to symbol table
+                self.symbols
+                    .lookup(ident.name.as_str())
+                    .map(|s| s.ty.clone())
+                    .unwrap_or(Type::Any)
+            }
 
             // Compound expressions
             Expression::ArrayExpression(arr) => self.infer_array_literal(arr),
             Expression::ObjectExpression(obj) => self.infer_object_literal(obj),
             Expression::ArrowFunctionExpression(arrow) => self.infer_arrow_function(arrow),
             Expression::FunctionExpression(func) => self.infer_function_expression(func),
-            Expression::CallExpression(call) => self.infer_call_expression(call),
+            Expression::CallExpression(call) => {
+                let callee_type = self.infer_expression(&call.callee);
+                if let Type::Function { return_type, .. } = callee_type {
+                    *return_type
+                } else {
+                    Type::Any
+                }
+            }
 
             // Member access
-            Expression::StaticMemberExpression(member) => self.infer_member_expression(member),
+            Expression::StaticMemberExpression(member) => {
+                let object_type = self.infer_expression(&member.object);
+                self.get_property_type(&object_type, member.property.name.as_str())
+            }
             Expression::ComputedMemberExpression(member) => {
                 self.infer_computed_member_expression(member)
             }
@@ -70,7 +86,16 @@ impl<'a> Checker<'a> {
             Expression::TaggedTemplateExpression(_) => Type::Any, // Depends on tag function
 
             // New expression
-            Expression::NewExpression(new_expr) => self.infer_new_expression(new_expr),
+            Expression::NewExpression(new_expr) => {
+                if let Expression::Identifier(ident) = &new_expr.callee {
+                    Type::TypeRef {
+                        name: ident.name.to_string(),
+                        type_args: vec![],
+                    }
+                } else {
+                    Type::Any
+                }
+            }
 
             // Await unwraps Promise
             Expression::AwaitExpression(await_expr) => {
@@ -214,14 +239,14 @@ impl<'a> Checker<'a> {
                 let ty = p
                     .type_annotation
                     .as_ref()
-                    .map(|ann| self.resolve_type(&ann.type_annotation))
+                    .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                     .unwrap_or(Type::Any);
                 Param::new(name, ty)
             })
             .collect();
 
         let return_type = if let Some(ann) = &arrow.return_type {
-            self.resolve_type(&ann.type_annotation)
+            self.resolve_ts_type(&ann.type_annotation)
         } else {
             // Infer from body
             if arrow.expression {
@@ -264,14 +289,14 @@ impl<'a> Checker<'a> {
                 let ty = p
                     .type_annotation
                     .as_ref()
-                    .map(|ann| self.resolve_type(&ann.type_annotation))
+                    .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                     .unwrap_or(Type::Any);
                 Param::new(name, ty)
             })
             .collect();
 
         let return_type = if let Some(ann) = &func.return_type {
-            self.resolve_type(&ann.type_annotation)
+            self.resolve_ts_type(&ann.type_annotation)
         } else if let Some(body) = &func.body {
             let returns = self.collect_return_types(body);
             if returns.is_empty() {
@@ -289,30 +314,6 @@ impl<'a> Checker<'a> {
             return_type: Box::new(return_type),
             type_params: vec![],
         }
-    }
-
-    /// Infer type of call expression.
-    ///
-    /// Returns the function's return type, or `any` if not callable.
-    fn infer_call_expression(&self, call: &CallExpression) -> Type {
-        let callee_type = self.infer_expression(&call.callee);
-
-        if let Type::Function { return_type, .. } = callee_type {
-            *return_type
-        } else if matches!(callee_type, Type::Any) {
-            Type::Any
-        } else {
-            // Calling non-function
-            Type::Any
-        }
-    }
-
-    /// Infer type of static member access (obj.prop).
-    fn infer_member_expression(&self, member: &StaticMemberExpression) -> Type {
-        let object_type = self.infer_expression(&member.object);
-        let prop_name = member.property.name.as_str();
-
-        self.get_property_type(&object_type, prop_name)
     }
 
     /// Infer type of computed member access (obj[expr]).
@@ -417,19 +418,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Infer type of new expression.
-    fn infer_new_expression(&self, new_expr: &NewExpression) -> Type {
-        // For now, return the callee as a type reference
-        if let Expression::Identifier(ident) = &new_expr.callee {
-            Type::TypeRef {
-                name: ident.name.to_string(),
-                type_args: vec![],
-            }
-        } else {
-            Type::Any
-        }
-    }
-
     /// Check if a type is string-like.
     fn is_string_like(&self, ty: &Type) -> bool {
         matches!(ty, Type::String | Type::StringLiteral(_))
@@ -439,7 +427,7 @@ impl<'a> Checker<'a> {
     fn unwrap_promise(&self, ty: Type) -> Type {
         if let Type::TypeRef { name, type_args } = ty {
             if name == "Promise" && !type_args.is_empty() {
-                return type_args.into_iter().next().unwrap();
+                return type_args.into_iter().next().expect("checked !is_empty()");
             }
             Type::TypeRef { name, type_args }
         } else {

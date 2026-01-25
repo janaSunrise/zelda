@@ -67,9 +67,13 @@ impl Binder {
             // Control flow (creates scopes, checks expressions)
             Statement::BlockStatement(block) => self.bind_block_statement(block),
             Statement::IfStatement(if_stmt) => self.bind_if_statement(if_stmt),
-            Statement::WhileStatement(while_stmt) => {
-                self.bind_statement(&while_stmt.body);
-            }
+            Statement::WhileStatement(while_stmt) => self.bind_while_statement(while_stmt),
+            Statement::DoWhileStatement(do_while) => self.bind_do_while_statement(do_while),
+
+            Statement::SwitchStatement(switch_stmt) => self.bind_switch_statement(switch_stmt),
+            Statement::ForInStatement(for_in) => self.bind_for_in_statement(for_in),
+            Statement::ForOfStatement(for_of) => self.bind_for_of_statement(for_of),
+            Statement::TryStatement(try_stmt) => self.bind_try_statement(try_stmt),
             Statement::ForStatement(for_stmt) => self.bind_for_statement(for_stmt),
 
             // Expressions
@@ -102,6 +106,20 @@ impl Binder {
         }
     }
 
+    fn bind_while_statement(&mut self, while_stmt: &WhileStatement) {
+        self.symbols.push_scope(ScopeKind::Block);
+        self.bind_expression(&while_stmt.test);
+        self.bind_statement(&while_stmt.body);
+        self.symbols.pop_scope();
+    }
+
+    fn bind_do_while_statement(&mut self, do_while: &DoWhileStatement) {
+        self.symbols.push_scope(ScopeKind::Block);
+        self.bind_statement(&do_while.body);
+        self.bind_expression(&do_while.test);
+        self.symbols.pop_scope();
+    }
+
     /// For loops create a block scope for their initializer.
     /// `for (let i = 0; ...)` - the `i` is scoped to the loop.
     fn bind_for_statement(&mut self, for_stmt: &ForStatement) {
@@ -131,6 +149,102 @@ impl Binder {
         self.bind_statement(&for_stmt.body);
 
         self.symbols.pop_scope();
+    }
+
+    fn bind_switch_statement(&mut self, switch_stmt: &SwitchStatement) {
+        self.bind_expression(&switch_stmt.discriminant);
+        for case in &switch_stmt.cases {
+            self.symbols.push_scope(ScopeKind::Block);
+            if let Some(test) = &case.test {
+                self.bind_expression(test);
+            }
+            for stmt in &case.consequent {
+                self.bind_statement(stmt);
+            }
+            self.symbols.pop_scope();
+        }
+    }
+
+    fn bind_for_in_statement(&mut self, for_in: &ForInStatement) {
+        self.symbols.push_scope(ScopeKind::Block);
+        match &for_in.left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                self.bind_variable_declaration(decl);
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(ident) => {
+                if self.symbols.lookup(ident.name.as_str()).is_none()
+                    && !is_builtin_global(ident.name.as_str())
+                {
+                    self.errors.push(BindingError::UndefinedSymbol(
+                        UndefinedSymbolError {
+                            name: ident.name.to_string(),
+                            span: ident.span,
+                            is_type: false,
+                        },
+                    ));
+                }
+            }
+            _ => {}
+        }
+        self.bind_expression(&for_in.right);
+        self.bind_statement(&for_in.body);
+        self.symbols.pop_scope();
+    }
+
+    fn bind_for_of_statement(&mut self, for_of: &ForOfStatement) {
+        self.symbols.push_scope(ScopeKind::Block);
+        match &for_of.left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                self.bind_variable_declaration(decl);
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(ident) => {
+                if self.symbols.lookup(ident.name.as_str()).is_none()
+                    && !is_builtin_global(ident.name.as_str())
+                {
+                    self.errors.push(BindingError::UndefinedSymbol(
+                        UndefinedSymbolError {
+                            name: ident.name.to_string(),
+                            span: ident.span,
+                            is_type: false,
+                        },
+                    ));
+                }
+            }
+            _ => {}
+        }
+        self.bind_expression(&for_of.right);
+        self.bind_statement(&for_of.body);
+        self.symbols.pop_scope();
+    }
+
+    fn bind_try_statement(&mut self, try_stmt: &TryStatement) {
+        // Try block
+        self.symbols.push_scope(ScopeKind::Block);
+        for stmt in &try_stmt.block.body {
+            self.bind_statement(stmt);
+        }
+        self.symbols.pop_scope();
+
+        // Catch handler
+        if let Some(handler) = &try_stmt.handler {
+            self.symbols.push_scope(ScopeKind::Block);
+            if let Some(param) = &handler.param {
+                self.bind_catch_parameter(param);
+            }
+            for stmt in &handler.body.body {
+                self.bind_statement(stmt);
+            }
+            self.symbols.pop_scope();
+        }
+
+        // Finally block
+        if let Some(finalizer) = &try_stmt.finalizer {
+            self.symbols.push_scope(ScopeKind::Block);
+            for stmt in &finalizer.body {
+                self.bind_statement(stmt);
+            }
+            self.symbols.pop_scope();
+        }
     }
 }
 
@@ -317,6 +431,153 @@ mod tests {
         assert_eq!(binder.errors.len(), 1);
         match &binder.errors[0] {
             BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_while_loop_scope() {
+        let binder = parse_and_bind(
+            r#"
+            while (true) {
+                let x = 1;
+            }
+            const y = x;
+            "#,
+        );
+        // x should not be visible outside the while loop
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_do_while_scope() {
+        let binder = parse_and_bind(
+            r#"
+            do {
+                let x = 1;
+            } while (true);
+            const y = x;
+            "#,
+        );
+        // x should not be visible outside the do-while loop
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_switch_scope() {
+        let binder = parse_and_bind(
+            r#"
+            switch (1) {
+                case 1:
+                    let x = 1;
+                    break;
+            }
+            const y = x;
+            "#,
+        );
+        // x should not be visible outside the switch
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_for_in_scope() {
+        let binder = parse_and_bind(
+            r#"
+            for (let k in {}) {
+                let x = 1;
+            }
+            const y = x;
+            "#,
+        );
+        // x should not be visible outside the for-in loop
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_for_of_scope() {
+        let binder = parse_and_bind(
+            r#"
+            for (let item of [1, 2, 3]) {
+                let x = item;
+            }
+            const y = x;
+            "#,
+        );
+        // x should not be visible outside the for-of loop
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_try_catch_scope() {
+        let binder = parse_and_bind(
+            r#"
+            try {
+                let x = 1;
+            } catch (e) {
+                let y = 2;
+            }
+            const z = x;
+            "#,
+        );
+        // x should not be visible outside the try block
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "x"),
+            _ => panic!("Expected UndefinedSymbol error"),
+        }
+    }
+
+    #[test]
+    fn test_catch_parameter_visible_in_catch() {
+        let binder = parse_and_bind(
+            r#"
+            try {
+                throw new Error();
+            } catch (e) {
+                const x = e;
+            }
+            "#,
+        );
+        // Catch parameter should be visible in catch block
+        assert!(binder.errors.is_empty());
+    }
+
+    #[test]
+    fn test_finally_scope() {
+        let binder = parse_and_bind(
+            r#"
+            try {
+                let x = 1;
+            } finally {
+                let y = 2;
+            }
+            const z = y;
+            "#,
+        );
+        // y should not be visible outside the finally block
+        assert_eq!(binder.errors.len(), 1);
+        match &binder.errors[0] {
+            BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "y"),
             _ => panic!("Expected UndefinedSymbol error"),
         }
     }

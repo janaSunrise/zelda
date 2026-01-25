@@ -138,8 +138,9 @@ impl SymbolTable {
     }
 
     pub fn pop_scope(&mut self) {
-        if let Some(parent) = self.scopes[self.current_scope.0].parent {
-            self.current_scope = parent;
+        match self.scopes[self.current_scope.0].parent {
+            Some(parent) => self.current_scope = parent,
+            None => panic!("pop_scope called at global scope - binder bug"),
         }
     }
 

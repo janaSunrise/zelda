@@ -6,13 +6,16 @@
 
 mod assignability;
 mod inference;
+mod narrowing;
 mod types;
+
+use narrowing::{apply_guard, extract_type_guard, NarrowingContext};
 
 use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 
 use crate::errors;
-use crate::symbols::SymbolTable;
+use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
 use crate::types::Type;
 
 #[derive(Debug, Clone)]
@@ -94,16 +97,19 @@ impl TypeError {
 /// - Bidirectional type checking (synthesis + checking)
 /// - Structural type compatibility
 /// - Type widening for mutable bindings
+/// - Type narrowing for control flow analysis
 pub struct Checker<'a> {
-    pub symbols: &'a SymbolTable,
+    pub symbols: &'a mut SymbolTable,
     pub errors: Vec<TypeError>,
+    narrowing: NarrowingContext,
 }
 
 impl<'a> Checker<'a> {
-    pub fn new(symbols: &'a SymbolTable) -> Self {
+    pub fn new(symbols: &'a mut SymbolTable) -> Self {
         Self {
             symbols,
             errors: Vec::new(),
+            narrowing: NarrowingContext::new(),
         }
     }
 
@@ -133,9 +139,29 @@ impl<'a> Checker<'a> {
             }
             Statement::IfStatement(if_stmt) => {
                 self.check_expression(&if_stmt.test);
+
+                // Extract and apply type guard for true branch
+                let guard = extract_type_guard(&if_stmt.test);
+                if let Some(extracted) = &guard {
+                    if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
+                        let narrowed = apply_guard(&original_type, &extracted.guard, extracted.negated);
+                        self.narrowing.narrow(extracted.variable.clone(), narrowed);
+                    }
+                }
+
                 self.check_statement(&if_stmt.consequent);
+                self.narrowing.clear(); // Reset after true branch
+
                 if let Some(alt) = &if_stmt.alternate {
+                    // Apply negated guard for else branch
+                    if let Some(extracted) = &guard {
+                        if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
+                            let narrowed = apply_guard(&original_type, &extracted.guard, !extracted.negated);
+                            self.narrowing.narrow(extracted.variable.clone(), narrowed);
+                        }
+                    }
                     self.check_statement(alt);
+                    self.narrowing.clear(); // Reset after else branch
                 }
             }
             Statement::WhileStatement(while_stmt) => {
@@ -156,6 +182,54 @@ impl<'a> Checker<'a> {
                 }
                 self.check_statement(&for_stmt.body);
             }
+
+            Statement::DoWhileStatement(do_while) => {
+                self.check_statement(&do_while.body);
+                self.check_expression(&do_while.test);
+            }
+
+            Statement::SwitchStatement(switch_stmt) => {
+                self.check_expression(&switch_stmt.discriminant);
+                for case in &switch_stmt.cases {
+                    if let Some(test) = &case.test {
+                        self.check_expression(test);
+                    }
+                    for stmt in &case.consequent {
+                        self.check_statement(stmt);
+                    }
+                }
+            }
+
+            Statement::ForInStatement(for_in) => {
+                self.check_expression(&for_in.right);
+                self.check_statement(&for_in.body);
+            }
+
+            Statement::ForOfStatement(for_of) => {
+                self.check_expression(&for_of.right);
+                self.check_statement(&for_of.body);
+            }
+
+            Statement::TryStatement(try_stmt) => {
+                for stmt in &try_stmt.block.body {
+                    self.check_statement(stmt);
+                }
+                if let Some(handler) = &try_stmt.handler {
+                    for stmt in &handler.body.body {
+                        self.check_statement(stmt);
+                    }
+                }
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    for stmt in &finalizer.body {
+                        self.check_statement(stmt);
+                    }
+                }
+            }
+
+            Statement::ThrowStatement(throw_stmt) => {
+                self.check_expression(&throw_stmt.argument);
+            }
+
             _ => {}
         }
     }
@@ -439,7 +513,7 @@ impl<'a> Checker<'a> {
 
                 // If there's a type annotation, check compatibility
                 if let Some(annotation) = &declarator.type_annotation {
-                    let declared_type = self.resolve_type(&annotation.type_annotation);
+                    let declared_type = self.resolve_ts_type(&annotation.type_annotation);
 
                     // Check for object literal specific errors (missing/excess properties)
                     if let Expression::ObjectExpression(obj) = init {
@@ -559,7 +633,12 @@ impl<'a> Checker<'a> {
         let mut literal_props: Vec<(String, Span)> = Vec::new();
         for prop in &obj.properties {
             if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                if let Some(name) = self.get_property_key_name(&p.key) {
+                if let Some(name) = match &p.key {
+                    PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+                    PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                    PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                    _ => None,
+                } {
                     literal_props.push((name.clone(), p.span));
 
                     // Check property type compatibility
@@ -607,24 +686,39 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Get the name from a property key.
-    fn get_property_key_name(&self, key: &PropertyKey) -> Option<String> {
-        match key {
-            PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-            PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-            PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
-            _ => None,
-        }
+    /// Look up a variable's type from the symbol table.
+    fn lookup_variable_type(&self, name: &str) -> Option<Type> {
+        self.symbols.lookup(name).map(|s| s.ty.clone())
     }
 
     /// Check a function declaration for return type compatibility.
     fn check_function_declaration(&mut self, func: &Function) {
         if let Some(body) = &func.body {
+            // Push function scope to match binder's scope structure
+            self.symbols.push_scope(ScopeKind::Function);
+
+            // Re-bind parameters in this scope for the checker
+            for param in &func.params.items {
+                if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
+                    let ty = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| crate::type_resolution::resolve_ts_type(&ann.type_annotation))
+                        .unwrap_or(Type::Any);
+                    let _ = self.symbols.define(
+                        ident.name.as_str(),
+                        ty,
+                        SymbolKind::Parameter,
+                        ident.span,
+                    );
+                }
+            }
+
             // Get declared return type
             let declared_return = func
                 .return_type
                 .as_ref()
-                .map(|ann| self.resolve_type(&ann.type_annotation));
+                .map(|ann| self.resolve_ts_type(&ann.type_annotation));
 
             // Collect return types from body
             let return_types = self.collect_return_types(body);
@@ -640,7 +734,11 @@ impl<'a> Checker<'a> {
 
                 // Check for missing return in non-void functions
                 // A function needs a return if its return type is not void/undefined/any/never
-                if self.requires_return(declared) && return_types.is_empty() {
+                let requires_return = !matches!(
+                    declared,
+                    Type::Void | Type::Undefined | Type::Any | Type::Never
+                );
+                if requires_return && return_types.is_empty() {
                     self.errors.push(TypeError::missing_return(func.span));
                 }
             }
@@ -649,15 +747,10 @@ impl<'a> Checker<'a> {
             for stmt in &body.statements {
                 self.check_statement(stmt);
             }
-        }
-    }
 
-    /// Check if a return type requires an explicit return statement.
-    fn requires_return(&self, return_type: &Type) -> bool {
-        !matches!(
-            return_type,
-            Type::Void | Type::Undefined | Type::Any | Type::Never
-        )
+            // Pop function scope
+            self.symbols.pop_scope();
+        }
     }
 
     /// Collect all return statement types from a function body.
@@ -699,8 +792,33 @@ impl<'a> Checker<'a> {
             Statement::WhileStatement(while_stmt) => {
                 self.collect_returns_from_statement(&while_stmt.body, returns);
             }
+            Statement::DoWhileStatement(do_while) => {
+                self.collect_returns_from_statement(&do_while.body, returns);
+            }
             Statement::ForStatement(for_stmt) => {
                 self.collect_returns_from_statement(&for_stmt.body, returns);
+            }
+            Statement::ForInStatement(for_in) => {
+                self.collect_returns_from_statement(&for_in.body, returns);
+            }
+            Statement::ForOfStatement(for_of) => {
+                self.collect_returns_from_statement(&for_of.body, returns);
+            }
+            Statement::SwitchStatement(switch_stmt) => {
+                for case in &switch_stmt.cases {
+                    for stmt in &case.consequent {
+                        self.collect_returns_from_statement(stmt, returns);
+                    }
+                }
+            }
+            Statement::TryStatement(try_stmt) => {
+                self.collect_returns_from_statements(&try_stmt.block.body, returns);
+                if let Some(handler) = &try_stmt.handler {
+                    self.collect_returns_from_statements(&handler.body.body, returns);
+                }
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    self.collect_returns_from_statements(&finalizer.body, returns);
+                }
             }
             _ => {}
         }
@@ -725,7 +843,7 @@ mod tests {
         let mut binder = Binder::new();
         binder.bind_program(&result.program);
 
-        let mut checker = Checker::new(&binder.symbols);
+        let mut checker = Checker::new(&mut binder.symbols);
         checker.check_program(&result.program);
 
         checker.errors
@@ -1581,6 +1699,139 @@ mod tests {
                 const positive = true;
             } else {
                 const negative = true;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_typeof_narrowing_string() {
+        let errors = check(r#"
+            function f(x: string | number) {
+                if (typeof x === "string") {
+                    const y: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_typeof_narrowing_number() {
+        let errors = check(r#"
+            function f(x: string | number) {
+                if (typeof x === "number") {
+                    const y: number = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_null_check_narrowing() {
+        let errors = check(r#"
+            function f(x: string | null) {
+                if (x !== null) {
+                    const y: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_undefined_check_narrowing() {
+        let errors = check(r#"
+            function f(x: string | undefined) {
+                if (x !== undefined) {
+                    const y: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_narrowing_not_applied_outside_if() {
+        let errors = check(r#"
+            function f(x: string | number) {
+                if (typeof x === "string") {
+                    const y: string = x;
+                }
+                const z: string = x;
+            }
+        "#);
+        // z assignment should fail because x is still string | number outside if
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_switch_statement() {
+        let errors = check(r#"
+            function f(x: number): string {
+                switch (x) {
+                    case 1:
+                        return "one";
+                    case 2:
+                        return "two";
+                    default:
+                        return "other";
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_try_catch() {
+        let errors = check(r#"
+            function f(): number {
+                try {
+                    return 1;
+                } catch (e) {
+                    return 0;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_for_in_loop() {
+        let errors = check(r#"
+            function f(obj: { a: number; b: number }): void {
+                for (const key in obj) {
+                    const x: string = key;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_for_of_loop() {
+        let errors = check(r#"
+            function f(arr: number[]): number {
+                let sum = 0;
+                for (const item of arr) {
+                    sum = sum + item;
+                }
+                return sum;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_do_while_loop() {
+        let errors = check(r#"
+            function f(): number {
+                let x = 0;
+                do {
+                    x = x + 1;
+                } while (x < 10);
+                return x;
             }
         "#);
         assert!(errors.is_empty());

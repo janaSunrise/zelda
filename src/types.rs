@@ -1,4 +1,6 @@
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -47,6 +49,110 @@ pub enum Type {
         constraint: Option<Box<Type>>,
         default: Option<Box<Type>>,
     },
+}
+
+/// We can't derive `Eq` because `f64` doesn't implement it (NaN != NaN violates reflexivity).
+/// This is safe for our use case since TypeScript number literals are always concrete values
+/// and we never construct NaN literals in the type system.
+impl Eq for Type {}
+
+/// We can't derive `Hash` because `f64` doesn't implement it. Different bit patterns
+/// (like +0.0 vs -0.0) would need special handling, and NaN has no meaningful hash.
+/// We solve this by converting f64 to its raw bits via `to_bits()`, giving us a
+/// consistent u64 that we can hash normally.
+impl Hash for Type {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Type::String | Type::Number | Type::Boolean | Type::Null
+            | Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::Never => {}
+            Type::StringLiteral(s) => s.hash(state),
+            Type::NumberLiteral(n) => n.to_bits().hash(state),
+            Type::BooleanLiteral(b) => b.hash(state),
+            Type::Array(elem) => elem.hash(state),
+            Type::Tuple(types) => types.hash(state),
+            Type::Union(types) => types.hash(state),
+            Type::Intersection(types) => types.hash(state),
+            Type::Object { properties, index_signature } => {
+                properties.hash(state);
+                index_signature.hash(state);
+            }
+            Type::Function { params, return_type, type_params } => {
+                params.hash(state);
+                return_type.hash(state);
+                type_params.hash(state);
+            }
+            Type::TypeRef { name, type_args } => {
+                name.hash(state);
+                type_args.hash(state);
+            }
+            Type::TypeParameter { name, constraint, default } => {
+                name.hash(state);
+                constraint.hash(state);
+                default.hash(state);
+            }
+        }
+    }
+}
+
+/// We can't derive `Ord` because `f64` only implements `PartialOrd`. NaN is unordered
+/// (NaN < x, NaN > x, and NaN == x are all false). We use `total_cmp()` which defines
+/// a total ordering: -NaN < -∞ < ... < -0 < +0 < ... < +∞ < +NaN.
+impl PartialOrd for Type {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// See `PartialOrd` above, this uses `total_cmp()` for the `NumberLiteral` variant.
+impl Ord for Type {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_disc = std::mem::discriminant(self);
+        let other_disc = std::mem::discriminant(other);
+
+        // First compare by discriminant
+        match format!("{:?}", self_disc).cmp(&format!("{:?}", other_disc)) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // Then compare by content
+        match (self, other) {
+            (Type::String, Type::String) => Ordering::Equal,
+            (Type::Number, Type::Number) => Ordering::Equal,
+            (Type::Boolean, Type::Boolean) => Ordering::Equal,
+            (Type::Null, Type::Null) => Ordering::Equal,
+            (Type::Undefined, Type::Undefined) => Ordering::Equal,
+            (Type::Void, Type::Void) => Ordering::Equal,
+            (Type::Any, Type::Any) => Ordering::Equal,
+            (Type::Unknown, Type::Unknown) => Ordering::Equal,
+            (Type::Never, Type::Never) => Ordering::Equal,
+            (Type::StringLiteral(a), Type::StringLiteral(b)) => a.cmp(b),
+            (Type::NumberLiteral(a), Type::NumberLiteral(b)) => a.total_cmp(b),
+            (Type::BooleanLiteral(a), Type::BooleanLiteral(b)) => a.cmp(b),
+            (Type::Array(a), Type::Array(b)) => a.cmp(b),
+            (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
+            (Type::Union(a), Type::Union(b)) => a.cmp(b),
+            (Type::Intersection(a), Type::Intersection(b)) => a.cmp(b),
+            (Type::Object { properties: pa, index_signature: ia },
+             Type::Object { properties: pb, index_signature: ib }) => {
+                pa.cmp(pb).then_with(|| ia.cmp(ib))
+            }
+            (Type::Function { params: pa, return_type: ra, type_params: ta },
+             Type::Function { params: pb, return_type: rb, type_params: tb }) => {
+                pa.cmp(pb).then_with(|| ra.cmp(rb)).then_with(|| ta.cmp(tb))
+            }
+            (Type::TypeRef { name: na, type_args: aa },
+             Type::TypeRef { name: nb, type_args: ab }) => {
+                na.cmp(nb).then_with(|| aa.cmp(ab))
+            }
+            (Type::TypeParameter { name: na, constraint: ca, default: da },
+             Type::TypeParameter { name: nb, constraint: cb, default: db }) => {
+                na.cmp(nb).then_with(|| ca.cmp(cb)).then_with(|| da.cmp(db))
+            }
+            _ => Ordering::Equal, // Same discriminant, shouldn't happen
+        }
+    }
 }
 
 impl Type {
@@ -262,7 +368,7 @@ impl fmt::Display for Type {
 }
 
 /// Property in an object type: { name: string, age?: number }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Property {
     pub name: String,
     pub ty: Type,
@@ -292,7 +398,7 @@ impl Property {
 }
 
 /// Parameter in a function type: (x: number, ...rest: string[]) => void
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Param {
     pub name: String,
     pub ty: Type,
@@ -322,7 +428,7 @@ impl Param {
 }
 
 /// Type parameter in a generic: <T extends Constraint = Default>
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParam {
     pub name: String,
     pub constraint: Option<Box<Type>>,
@@ -350,7 +456,7 @@ impl TypeParam {
 }
 
 /// Index signature: { [key: string]: number }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndexSignature {
     pub key_type: Box<Type>,
     pub value_type: Box<Type>,
