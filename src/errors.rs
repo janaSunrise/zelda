@@ -33,7 +33,8 @@ impl Diagnostic {
 
 pub const EXPECTED: Diagnostic = Diagnostic::new(1005, "'{0}' expected.");
 pub const SUPER_IN_NON_DERIVED: Diagnostic = Diagnostic::new(1013, "'super' can only be referenced in a derived class.");
-pub const DUPLICATE_IDENTIFIER_1: Diagnostic = Diagnostic::new(1014, "Duplicate identifier '{0}'.");
+pub const REST_PARAM_MUST_BE_LAST: Diagnostic = Diagnostic::new(1014, "A rest parameter must be last in a parameter list.");
+pub const REQUIRED_AFTER_OPTIONAL: Diagnostic = Diagnostic::new(1016, "A required parameter cannot follow an optional parameter.");
 pub const CONTINUE_OUTSIDE_LOOP: Diagnostic = Diagnostic::new(1104, "A 'continue' statement can only be used within an enclosing iteration statement.");
 pub const BREAK_OUTSIDE_LOOP: Diagnostic = Diagnostic::new(1105, "A 'break' statement can only be used within an enclosing iteration or switch statement.");
 pub const RETURN_OUTSIDE_FUNCTION: Diagnostic = Diagnostic::new(1108, "A 'return' statement can only be used within a function body.");

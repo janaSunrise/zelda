@@ -224,7 +224,7 @@ impl<'a> Checker<'a> {
 
     /// Infer type of arrow function.
     fn infer_arrow_function(&self, arrow: &ArrowFunctionExpression) -> Type {
-        let params: Vec<Param> = arrow
+        let mut params: Vec<Param> = arrow
             .params
             .items
             .iter()
@@ -238,9 +238,27 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                     .unwrap_or(Type::Any);
-                Param::new(name, ty)
+                let mut param = Param::new(name, ty);
+                if p.optional {
+                    param = param.optional();
+                }
+                param
             })
             .collect();
+
+        // Handle rest parameter
+        if let Some(rest_param) = &arrow.params.rest {
+            let name = match &rest_param.rest.argument {
+                BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                _ => "args".to_string(),
+            };
+            let ty = rest_param
+                .type_annotation
+                .as_ref()
+                .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                .unwrap_or(Type::Array(Box::new(Type::Any)));
+            params.push(Param::new(name, ty).rest());
+        }
 
         let return_type = if let Some(ann) = &arrow.return_type {
             self.resolve_ts_type(&ann.type_annotation)
@@ -274,7 +292,7 @@ impl<'a> Checker<'a> {
 
     /// Infer type of function expression.
     fn infer_function_expression(&self, func: &Function) -> Type {
-        let params: Vec<Param> = func
+        let mut params: Vec<Param> = func
             .params
             .items
             .iter()
@@ -288,9 +306,27 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                     .unwrap_or(Type::Any);
-                Param::new(name, ty)
+                let mut param = Param::new(name, ty);
+                if p.optional {
+                    param = param.optional();
+                }
+                param
             })
             .collect();
+
+        // Handle rest parameter
+        if let Some(rest_param) = &func.params.rest {
+            let name = match &rest_param.rest.argument {
+                BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                _ => "args".to_string(),
+            };
+            let ty = rest_param
+                .type_annotation
+                .as_ref()
+                .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                .unwrap_or(Type::Array(Box::new(Type::Any)));
+            params.push(Param::new(name, ty).rest());
+        }
 
         let return_type = if let Some(ann) = &func.return_type {
             self.resolve_ts_type(&ann.type_annotation)

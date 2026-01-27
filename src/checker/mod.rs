@@ -420,8 +420,12 @@ impl<'a> Checker<'a> {
                 .collect();
 
             let arg_count = call.arguments.len();
-            let required_params = instantiated_params.iter().filter(|p| !p.optional).count();
-            let total_params = instantiated_params.len();
+            // Rest params don't count as required - they accept 0 or more args
+            let required_params = instantiated_params
+                .iter()
+                .filter(|p| !p.optional && !p.rest)
+                .count();
+            let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
 
             // Check argument count
             if arg_count < required_params {
@@ -430,26 +434,45 @@ impl<'a> Checker<'a> {
                     arg_count,
                     call.span,
                 ));
-            } else if arg_count > total_params {
+            } else if !has_rest && arg_count > instantiated_params.len() {
                 // Too many arguments (and no rest param)
-                let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
-                if !has_rest {
-                    self.errors.push(TypeError::wrong_argument_count(
-                        total_params,
-                        arg_count,
-                        call.span,
-                    ));
-                }
+                self.errors.push(TypeError::wrong_argument_count(
+                    instantiated_params.len(),
+                    arg_count,
+                    call.span,
+                ));
             }
 
             // Check argument types against instantiated parameter types
+            // Special handling for rest parameters: arguments beyond normal params
+            // are checked against the element type of the rest param array
+            let non_rest_param_count = if has_rest {
+                instantiated_params.len() - 1
+            } else {
+                instantiated_params.len()
+            };
+
             for (i, arg) in call.arguments.iter().enumerate() {
-                if i >= instantiated_params.len() {
-                    break; // Rest params or extra args handled above
-                }
                 if let Some(expr) = arg.as_expression() {
                     let arg_type = self.infer_expression(expr);
-                    let param_type = &instantiated_params[i].ty;
+
+                    let param_type = if i < non_rest_param_count {
+                        // Regular parameter
+                        &instantiated_params[i].ty
+                    } else if has_rest {
+                        // Rest parameter - check against element type of the array
+                        let rest_param = instantiated_params.last().unwrap();
+                        if let Type::Array(elem_type) = &rest_param.ty {
+                            elem_type.as_ref()
+                        } else {
+                            // Rest param should always be array type
+                            &rest_param.ty
+                        }
+                    } else {
+                        // No more params and no rest - already handled by arg count check
+                        break;
+                    };
+
                     if !self.is_assignable(&arg_type, param_type) {
                         self.errors.push(TypeError::argument_not_assignable(
                             &arg_type,
@@ -837,6 +860,9 @@ impl<'a> Checker<'a> {
 
     /// Check a function declaration for return type compatibility.
     fn check_function_declaration(&mut self, func: &Function) {
+        // Validate parameter order (even for functions without body)
+        self.validate_function_parameters(&func.params);
+
         if let Some(body) = &func.body {
             // Push function scope to match binder's scope structure
             self.symbols.push_scope(ScopeKind::Function);
@@ -859,13 +885,22 @@ impl<'a> Checker<'a> {
             }
 
             // Re-bind parameters in this scope for the checker
+            // For optional parameters, the type inside the function is T | undefined
             for param in &func.params.items {
                 if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
-                    let ty = param
+                    let base_ty = param
                         .type_annotation
                         .as_ref()
                         .map(|ann| crate::type_resolution::resolve_ts_type(&ann.type_annotation))
                         .unwrap_or(Type::Any);
+
+                    // Optional parameters have type T | undefined inside the function
+                    let ty = if param.optional {
+                        Type::union(vec![base_ty, Type::Undefined])
+                    } else {
+                        base_ty
+                    };
+
                     let _ = self.symbols.define(
                         ident.name.as_str(),
                         ty,
@@ -912,6 +947,30 @@ impl<'a> Checker<'a> {
             // Pop function scope
             self.symbols.pop_scope();
         }
+    }
+
+    /// Validate function parameter order:
+    /// - Required parameters cannot follow optional parameters (TS1016)
+    /// - Rest parameter must be last (TS1014)
+    fn validate_function_parameters(&mut self, params: &FormalParameters) {
+        let mut seen_optional = false;
+
+        // In oxc, rest parameter is stored separately in params.rest, not in items
+        // So we only need to check that required params don't follow optional ones
+        for param in &params.items {
+            if param.optional {
+                seen_optional = true;
+            } else if seen_optional {
+                // Required parameter after optional - TS1016
+                self.errors.push(TypeError::new(
+                    errors::REQUIRED_AFTER_OPTIONAL.format(&[]),
+                    param.span,
+                    errors::REQUIRED_AFTER_OPTIONAL.code,
+                ));
+            }
+        }
+        // Note: Rest parameter validation (must be last) is handled by the parser
+        // If items appear after rest, it's a parser error, not a checker error
     }
 
     /// Collect all return statement types from a function body.
@@ -2789,6 +2848,205 @@ mod tests {
             }
             const result = wrap("hello");
         "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_call_without_arg() {
+        let errors = check("function f(x?: number) {} f();");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_call_with_arg() {
+        let errors = check("function f(x?: number) {} f(42);");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_call_with_undefined() {
+        let errors = check("function f(x?: number) {} f(undefined);");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_wrong_type() {
+        let errors = check(r#"function f(x?: number) {} f("hello");"#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345);
+    }
+
+    #[test]
+    fn test_required_param_after_optional_error() {
+        let errors = check("function f(x?: number, y: string) {}");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 1016);
+    }
+
+    #[test]
+    fn test_multiple_optional_params() {
+        let errors = check("function f(x?: number, y?: string) {} f(); f(1); f(1, 'a');");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_type_is_union_with_undefined() {
+        let errors = check(r#"
+            function f(x?: number) {
+                let y: number | undefined = x;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_optional_param_strict_mode_deferred() {
+        let errors = check(r#"
+            function f(x?: number): number {
+                return x;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_rest_param_basic() {
+        let errors = check("function f(...args: number[]) {} f(1, 2, 3);");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_rest_param_empty() {
+        let errors = check("function f(...args: number[]) {} f();");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_rest_param_wrong_type() {
+        let errors = check(r#"function f(...args: number[]) {} f(1, "hello", 3);"#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345);
+    }
+
+    #[test]
+    fn test_rest_param_must_be_last() {
+        // Parser enforces rest param must be last - syntax error, not type error
+    }
+
+    #[test]
+    fn test_rest_param_with_regular_params() {
+        let errors = check("function f(x: number, ...rest: string[]) {} f(1, 'a', 'b');");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_rest_param_spread_call() {
+        let errors = check(r#"
+            function f(...args: number[]) {}
+            const arr = [1, 2, 3];
+            f(...arr);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_contextual_typing() {
+        let errors = check(r#"
+            const f: (x: number) => number = x => x + 1;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_explicit_types() {
+        let errors = check(r#"
+            const f = (x: number): number => x + 1;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_expression_body_call() {
+        let errors = check(r#"
+            const f = (x: number) => x * 2;
+            const result: number = f(5);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_block_body_call() {
+        let errors = check(r#"
+            const f = (x: number): number => {
+                return x * 2;
+            };
+            const result: number = f(5);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_method_shorthand_in_object() {
+        let errors = check(r#"
+            const obj = {
+                greet(name: string): string {
+                    return "Hello " + name;
+                }
+            };
+            const result: string = obj.greet("World");
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_method_shorthand_equivalent() {
+        let errors = check(r#"
+            const obj1 = { foo(): number { return 1; } };
+            const obj2 = { foo: function(): number { return 1; } };
+            const x: number = obj1.foo();
+            const y: number = obj2.foo();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_with_rest_param() {
+        let errors = check(r#"
+            const sum = (...nums: number[]): number => {
+                let total = 0;
+                return total;
+            };
+            sum(1, 2, 3);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_function_expression_with_rest_param() {
+        let errors = check(r#"
+            const sum = function(...nums: number[]): number {
+                return 0;
+            };
+            sum(1, 2, 3);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_with_optional_param() {
+        let errors = check(r#"
+            const greet = (name?: string): string => {
+                return "Hello";
+            };
+            greet();
+            greet("World");
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_combined_optional_and_rest_params() {
+        let errors = check("function f(required: string, optional?: number, ...rest: boolean[]) {} f(\"hello\"); f(\"hello\", 42); f(\"hello\", 42, true, false);");
         assert!(errors.is_empty());
     }
 }

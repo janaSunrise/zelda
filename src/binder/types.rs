@@ -167,7 +167,7 @@ impl Binder {
     }
 
     fn infer_arrow_function_type(&self, arrow: &ArrowFunctionExpression) -> Type {
-        let params: Vec<Param> = arrow
+        let mut params: Vec<Param> = arrow
             .params
             .items
             .iter()
@@ -177,9 +177,27 @@ impl Binder {
                     _ => "_".to_string(),
                 };
                 let ty = self.resolve_type_annotation_oxc(&p.type_annotation);
-                Param::new(name, ty)
+                let mut param = Param::new(name, ty);
+                if p.optional {
+                    param = param.optional();
+                }
+                param
             })
             .collect();
+
+        // Handle rest parameter
+        if let Some(rest_param) = &arrow.params.rest {
+            let name = match &rest_param.rest.argument {
+                BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                _ => "args".to_string(),
+            };
+            let ty = rest_param
+                .type_annotation
+                .as_ref()
+                .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                .unwrap_or(Type::Array(Box::new(Type::Any)));
+            params.push(Param::new(name, ty).rest());
+        }
 
         let return_type = arrow
             .return_type

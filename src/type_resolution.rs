@@ -216,7 +216,7 @@ pub fn get_property_key_name(key: &PropertyKey) -> Option<String> {
 
 /// Build a function type from a Function AST node.
 pub fn build_function_type(func: &Function) -> Type {
-    let params: Vec<Param> = func
+    let mut params: Vec<Param> = func
         .params
         .items
         .iter()
@@ -237,6 +237,26 @@ pub fn build_function_type(func: &Function) -> Type {
             param
         })
         .collect();
+
+    // Handle rest parameter (...args)
+    // In oxc, rest parameter is stored separately in params.rest
+    // FormalParameterRest has: span, rest (BindingRestElement), type_annotation
+    // BindingRestElement has: span, argument (BindingPattern)
+    if let Some(rest_param) = &func.params.rest {
+        let name = match &rest_param.rest.argument {
+            BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+            _ => "args".to_string(),
+        };
+        // Rest parameter type should be the array type (e.g., number[])
+        let ty = rest_param
+            .type_annotation
+            .as_ref()
+            .map(|ann| resolve_ts_type(&ann.type_annotation))
+            .unwrap_or(Type::Array(Box::new(Type::Any)));
+
+        let param = Param::new(name, ty).rest();
+        params.push(param);
+    }
 
     let return_type = func
         .return_type
