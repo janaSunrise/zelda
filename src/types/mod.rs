@@ -1,3 +1,30 @@
+//! Type system definitions for the Zelda TypeScript type checker.
+//!
+//! This module provides:
+//! - [`Type`]: The core type enum representing all TypeScript types
+//! - [`TypeArena`] and [`TypeId`]: Type interning for efficient storage and comparison
+//! - Supporting structures: [`Property`], [`Param`], [`TypeParam`], [`IndexSignature`]
+//! - AST to Type resolution functions in the `resolution` submodule
+//!
+//! # Type Interning
+//!
+//! For performance-critical code paths (like assignability checking), use the
+//! `TypeArena` to intern types and work with lightweight `TypeId` handles:
+//!
+//! ```ignore
+//! let mut arena = TypeArena::new();
+//! let string_id = arena.primitives().string;
+//! let obj_id = arena.intern(Type::object(vec![Property::new("x", Type::Number)]));
+//!
+//! // TypeId comparisons are O(1)
+//! assert_ne!(string_id, obj_id);
+//! ```
+
+mod arena;
+pub mod resolution;
+
+pub use arena::{PrimitiveTypes, TypeArena, TypeId};
+
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -80,8 +107,15 @@ impl Hash for Type {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            Type::String | Type::Number | Type::Boolean | Type::Null
-            | Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::Never => {}
+            Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::Null
+            | Type::Undefined
+            | Type::Void
+            | Type::Any
+            | Type::Unknown
+            | Type::Never => {}
             Type::StringLiteral(s) => s.hash(state),
             Type::NumberLiteral(n) => n.to_bits().hash(state),
             Type::BooleanLiteral(b) => b.hash(state),
@@ -89,18 +123,31 @@ impl Hash for Type {
             Type::Tuple(types) => types.hash(state),
             Type::Union(types) => types.hash(state),
             Type::Intersection(types) => types.hash(state),
-            Type::Object { properties, index_signature, extends, type_params } => {
+            Type::Object {
+                properties,
+                index_signature,
+                extends,
+                type_params,
+            } => {
                 properties.hash(state);
                 index_signature.hash(state);
                 extends.hash(state);
                 type_params.hash(state);
             }
-            Type::Function { params, return_type, type_params } => {
+            Type::Function {
+                params,
+                return_type,
+                type_params,
+            } => {
                 params.hash(state);
                 return_type.hash(state);
                 type_params.hash(state);
             }
-            Type::ClassConstructor { params, type_params, static_members } => {
+            Type::ClassConstructor {
+                params,
+                type_params,
+                static_members,
+            } => {
                 params.hash(state);
                 type_params.hash(state);
                 static_members.hash(state);
@@ -109,7 +156,11 @@ impl Hash for Type {
                 name.hash(state);
                 type_args.hash(state);
             }
-            Type::TypeParameter { name, constraint, default } => {
+            Type::TypeParameter {
+                name,
+                constraint,
+                default,
+            } => {
                 name.hash(state);
                 constraint.hash(state);
                 default.hash(state);
@@ -118,9 +169,41 @@ impl Hash for Type {
     }
 }
 
+impl Type {
+    /// Returns a numeric discriminant for ordering purposes.
+    ///
+    /// This replaces the previous `format!("{:?}", discriminant)` hack with
+    /// an explicit ordering that's both faster and more predictable.
+    fn discriminant_order(&self) -> u8 {
+        match self {
+            Type::String => 0,
+            Type::Number => 1,
+            Type::Boolean => 2,
+            Type::Null => 3,
+            Type::Undefined => 4,
+            Type::Void => 5,
+            Type::Any => 6,
+            Type::Unknown => 7,
+            Type::Never => 8,
+            Type::StringLiteral(_) => 9,
+            Type::NumberLiteral(_) => 10,
+            Type::BooleanLiteral(_) => 11,
+            Type::Array(_) => 12,
+            Type::Tuple(_) => 13,
+            Type::Union(_) => 14,
+            Type::Intersection(_) => 15,
+            Type::Object { .. } => 16,
+            Type::Function { .. } => 17,
+            Type::ClassConstructor { .. } => 18,
+            Type::TypeRef { .. } => 19,
+            Type::TypeParameter { .. } => 20,
+        }
+    }
+}
+
 /// We can't derive `Ord` because `f64` only implements `PartialOrd`. NaN is unordered
 /// (NaN < x, NaN > x, and NaN == x are all false). We use `total_cmp()` which defines
-/// a total ordering: -NaN < -∞ < ... < -0 < +0 < ... < +∞ < +NaN.
+/// a total ordering: -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN.
 impl PartialOrd for Type {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -130,11 +213,8 @@ impl PartialOrd for Type {
 /// See `PartialOrd` above, this uses `total_cmp()` for the `NumberLiteral` variant.
 impl Ord for Type {
     fn cmp(&self, other: &Self) -> Ordering {
-        let self_disc = std::mem::discriminant(self);
-        let other_disc = std::mem::discriminant(other);
-
-        // First compare by discriminant
-        match format!("{:?}", self_disc).cmp(&format!("{:?}", other_disc)) {
+        // First compare by discriminant using explicit ordering
+        match self.discriminant_order().cmp(&other.discriminant_order()) {
             Ordering::Equal => {}
             ord => return ord,
         }
@@ -157,26 +237,79 @@ impl Ord for Type {
             (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
             (Type::Union(a), Type::Union(b)) => a.cmp(b),
             (Type::Intersection(a), Type::Intersection(b)) => a.cmp(b),
-            (Type::Object { properties: pa, index_signature: ia, extends: ea, type_params: ta },
-             Type::Object { properties: pb, index_signature: ib, extends: eb, type_params: tb }) => {
-                pa.cmp(pb).then_with(|| ia.cmp(ib)).then_with(|| ea.cmp(eb)).then_with(|| ta.cmp(tb))
-            }
-            (Type::Function { params: pa, return_type: ra, type_params: ta },
-             Type::Function { params: pb, return_type: rb, type_params: tb }) => {
-                pa.cmp(pb).then_with(|| ra.cmp(rb)).then_with(|| ta.cmp(tb))
-            }
-            (Type::TypeRef { name: na, type_args: aa },
-             Type::TypeRef { name: nb, type_args: ab }) => {
-                na.cmp(nb).then_with(|| aa.cmp(ab))
-            }
-            (Type::TypeParameter { name: na, constraint: ca, default: da },
-             Type::TypeParameter { name: nb, constraint: cb, default: db }) => {
-                na.cmp(nb).then_with(|| ca.cmp(cb)).then_with(|| da.cmp(db))
-            }
-            (Type::ClassConstructor { params: pa, type_params: ta, static_members: sa },
-             Type::ClassConstructor { params: pb, type_params: tb, static_members: sb }) => {
-                pa.cmp(pb).then_with(|| ta.cmp(tb)).then_with(|| sa.cmp(sb))
-            }
+            (
+                Type::Object {
+                    properties: pa,
+                    index_signature: ia,
+                    extends: ea,
+                    type_params: ta,
+                },
+                Type::Object {
+                    properties: pb,
+                    index_signature: ib,
+                    extends: eb,
+                    type_params: tb,
+                },
+            ) => pa
+                .cmp(pb)
+                .then_with(|| ia.cmp(ib))
+                .then_with(|| ea.cmp(eb))
+                .then_with(|| ta.cmp(tb)),
+            (
+                Type::Function {
+                    params: pa,
+                    return_type: ra,
+                    type_params: ta,
+                },
+                Type::Function {
+                    params: pb,
+                    return_type: rb,
+                    type_params: tb,
+                },
+            ) => pa
+                .cmp(pb)
+                .then_with(|| ra.cmp(rb))
+                .then_with(|| ta.cmp(tb)),
+            (
+                Type::TypeRef {
+                    name: na,
+                    type_args: aa,
+                },
+                Type::TypeRef {
+                    name: nb,
+                    type_args: ab,
+                },
+            ) => na.cmp(nb).then_with(|| aa.cmp(ab)),
+            (
+                Type::TypeParameter {
+                    name: na,
+                    constraint: ca,
+                    default: da,
+                },
+                Type::TypeParameter {
+                    name: nb,
+                    constraint: cb,
+                    default: db,
+                },
+            ) => na
+                .cmp(nb)
+                .then_with(|| ca.cmp(cb))
+                .then_with(|| da.cmp(db)),
+            (
+                Type::ClassConstructor {
+                    params: pa,
+                    type_params: ta,
+                    static_members: sa,
+                },
+                Type::ClassConstructor {
+                    params: pb,
+                    type_params: tb,
+                    static_members: sb,
+                },
+            ) => pa
+                .cmp(pb)
+                .then_with(|| ta.cmp(tb))
+                .then_with(|| sa.cmp(sb)),
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
     }
@@ -202,7 +335,6 @@ impl Type {
         }
     }
 
-    /// Create a generic object type (for generic interfaces).
     pub fn generic_object(
         type_params: Vec<TypeParam>,
         properties: Vec<Property>,
@@ -258,7 +390,12 @@ impl Type {
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
-            Type::String | Type::Number | Type::Boolean | Type::Null | Type::Undefined | Type::Void
+            Type::String
+                | Type::Number
+                | Type::Boolean
+                | Type::Null
+                | Type::Undefined
+                | Type::Void
         )
     }
 
@@ -474,7 +611,11 @@ impl fmt::Display for Type {
                 write!(f, ") => {}", return_type)
             }
 
-            Type::ClassConstructor { params, type_params, static_members } => {
+            Type::ClassConstructor {
+                params,
+                type_params,
+                static_members,
+            } => {
                 write!(f, "typeof class")?;
                 if !type_params.is_empty() {
                     write!(f, "<")?;
@@ -496,8 +637,15 @@ impl fmt::Display for Type {
                     }
                     write!(f, " }}")?;
                 }
-                write!(f, " (constructor: ({}) => instance)",
-                    params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect::<Vec<_>>().join(", "))
+                write!(
+                    f,
+                    " (constructor: ({}) => instance)",
+                    params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name, p.ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
 
             Type::TypeRef { name, type_args } => {
@@ -596,9 +744,9 @@ impl Param {
 /// Type parameter in a generic: <T extends Constraint = Default>
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParam {
-    pub name: String, // T
-    pub constraint: Option<Box<Type>>, // extends SomeType
-    pub default: Option<Box<Type>>, // = DefaultType
+    pub name: String,                   // T
+    pub constraint: Option<Box<Type>>,  // extends SomeType
+    pub default: Option<Box<Type>>,     // = DefaultType
 }
 
 impl TypeParam {
@@ -840,5 +988,25 @@ mod tests {
         } else {
             panic!("Expected Union");
         }
+    }
+
+    #[test]
+    fn test_discriminant_order_is_consistent() {
+        // Verify discriminant ordering matches the enum order
+        assert!(Type::String.discriminant_order() < Type::Number.discriminant_order());
+        assert!(Type::Number.discriminant_order() < Type::Boolean.discriminant_order());
+        assert!(Type::Never.discriminant_order() < Type::StringLiteral("".into()).discriminant_order());
+        assert!(Type::BooleanLiteral(true).discriminant_order() < Type::Array(Box::new(Type::String)).discriminant_order());
+    }
+
+    #[test]
+    fn test_type_ordering_works() {
+        let mut types = vec![
+            Type::Number,
+            Type::String,
+            Type::Boolean,
+        ];
+        types.sort();
+        assert_eq!(types, vec![Type::String, Type::Number, Type::Boolean]);
     }
 }

@@ -3,7 +3,7 @@
 use oxc_allocator::Box as OxcBox;
 use oxc_ast::ast::*;
 
-use crate::type_resolution;
+use crate::types::resolution;
 use crate::types::{Param, Property, Type};
 
 use super::Binder;
@@ -36,17 +36,17 @@ impl Binder {
 
     /// Convert oxc's TSType AST node to our Type representation.
     pub(super) fn resolve_ts_type(&self, ts_type: &TSType) -> Type {
-        type_resolution::resolve_ts_type(ts_type)
+        resolution::resolve_ts_type(ts_type)
     }
 
     /// Build a function type from a Function AST node.
     pub(super) fn build_function_type(&self, func: &Function) -> Type {
-        type_resolution::build_function_type(func)
+        resolution::build_function_type(func)
     }
 
     /// Build an object type from an interface declaration.
     pub(super) fn build_interface_type(&self, decl: &TSInterfaceDeclaration) -> Type {
-        type_resolution::build_interface_type(decl)
+        resolution::build_interface_type(decl)
     }
 
     /// Infer expression type for initializers (quick inference during binding).
@@ -126,7 +126,7 @@ impl Binder {
             }
             // Class expression returns ClassConstructor type
             Expression::ClassExpression(class) => {
-                let (instance_type, constructor_type, static_type) = type_resolution::build_class_type(class);
+                let (instance_type, constructor_type, static_type) = resolution::build_class_type(class);
 
                 // Extract type params from instance_type
                 let class_type_params = if let Type::Object { type_params, .. } = &instance_type {
@@ -167,7 +167,7 @@ impl Binder {
         for prop in &obj.properties {
             match prop {
                 ObjectPropertyKind::ObjectProperty(p) => {
-                    if let Some(name) = type_resolution::get_property_key_name(&p.key) {
+                    if let Some(name) = resolution::get_property_key_name(&p.key) {
                         let ty = self.infer_expression_type(&p.value);
                         // Widen literal types in object properties
                         let ty = self.widen_type(ty);
@@ -308,6 +308,6 @@ impl Binder {
 
     /// Widen literal types to their base types.
     pub(super) fn widen_type(&self, ty: Type) -> Type {
-        type_resolution::widen_type(ty)
+        resolution::widen_type(ty)
     }
 }

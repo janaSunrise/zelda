@@ -2,7 +2,6 @@ mod binder;
 mod checker;
 mod errors;
 mod symbols;
-mod type_resolution;
 mod types;
 
 use std::path::PathBuf;

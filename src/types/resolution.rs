@@ -1,6 +1,10 @@
+//! AST to Type resolution.
+//!
+//! This module converts oxc TypeScript AST nodes to our Type representation.
+
 use oxc_ast::ast::*;
 
-use crate::types::{IndexSignature, Param, Property, Type, TypeParam};
+use super::{IndexSignature, Param, Property, Type, TypeParam};
 
 /// Convert an oxc TSType AST node to our Type representation.
 pub fn resolve_ts_type(ts_type: &TSType) -> Type {
@@ -101,7 +105,6 @@ pub fn resolve_tuple_element(elem: &TSTupleElement) -> Type {
     }
 }
 
-/// Resolve a function type.
 pub fn resolve_function_type(func: &TSFunctionType) -> Type {
     let params = resolve_formal_parameters(&func.params);
     let return_type = resolve_ts_type(&func.return_type.type_annotation);
@@ -113,7 +116,6 @@ pub fn resolve_function_type(func: &TSFunctionType) -> Type {
     }
 }
 
-/// Resolve a type literal (object type).
 pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
     let mut properties = Vec::new();
     let mut index_signature = None;
@@ -180,7 +182,6 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
     }
 }
 
-/// Resolve formal parameters to our Param representation.
 pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
     params
         .items
@@ -204,7 +205,6 @@ pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
         .collect()
 }
 
-/// Get the name from a property key.
 pub fn get_property_key_name(key: &PropertyKey) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),

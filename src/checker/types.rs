@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use oxc_ast::ast::*;
 
-use crate::type_resolution;
+use crate::types::resolution;
 use crate::types::{IndexSignature, Param, Property, Type, TypeParam};
 
 use super::Checker;
@@ -12,12 +12,12 @@ use super::Checker;
 impl<'a> Checker<'a> {
     /// Resolve a type annotation to our Type representation.
     pub(super) fn resolve_ts_type(&self, ts_type: &TSType) -> Type {
-        type_resolution::resolve_ts_type(ts_type)
+        resolution::resolve_ts_type(ts_type)
     }
 
     /// Widen literal types to their base types.
     pub fn widen_type(&self, ty: Type) -> Type {
-        type_resolution::widen_type(ty)
+        resolution::widen_type(ty)
     }
 
     /// Create a union of two types.

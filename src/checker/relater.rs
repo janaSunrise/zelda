@@ -1,11 +1,6 @@
-//! Type assignability checking.
+//! Type relation checking (assignability and compatibility).
 //!
-//! Determines if a source type can be assigned to a target type.
-//! Uses structural typing with special rules for:
-//! - Unions and intersections
-//! - Literal types and their base types
-//! - Object structural compatibility
-//! - Function variance (covariant return, contravariant params)
+//! It determines if types are assignable and structurally compatible.
 
 use crate::types::{Property, Type};
 
@@ -89,7 +84,6 @@ impl<'a> Checker<'a> {
         all_props
     }
 
-    /// Check if source type is assignable to target type.
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
         // Handle TypeRef resolution with type argument instantiation
         if let Type::TypeRef { name, type_args } = source {

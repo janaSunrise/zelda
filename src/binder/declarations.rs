@@ -8,7 +8,7 @@
 use oxc_ast::ast::*;
 
 use crate::symbols::{ScopeKind, SymbolKind};
-use crate::type_resolution;
+use crate::types::resolution;
 use crate::types::Type;
 
 use super::Binder;
@@ -44,7 +44,7 @@ impl Binder {
 
             // For class expressions, also register instance type in type namespace
             if let Some(Expression::ClassExpression(class)) = &declarator.init {
-                let (instance_type, _, _) = type_resolution::build_class_type(class);
+                let (instance_type, _, _) = resolution::build_class_type(class);
                 if let Err(err) = self.symbols.define_type(name, instance_type, SymbolKind::Class, span) {
                     self.errors.push(err.into());
                 }
@@ -104,8 +104,8 @@ impl Binder {
                 let span = param.name.span;
 
                 // Build the TypeParameter type
-                let constraint = param.constraint.as_ref().map(|c| type_resolution::resolve_ts_type(c));
-                let default = param.default.as_ref().map(|d| type_resolution::resolve_ts_type(d));
+                let constraint = param.constraint.as_ref().map(|c| resolution::resolve_ts_type(c));
+                let default = param.default.as_ref().map(|d| resolution::resolve_ts_type(d));
 
                 let ty = Type::TypeParameter {
                     name: name.to_string(),
@@ -164,7 +164,7 @@ impl Binder {
             let span = ident.span;
 
             // Build the class type (instance type, constructor type, and static type)
-            let (instance_type, constructor_type, static_type) = type_resolution::build_class_type(decl);
+            let (instance_type, constructor_type, static_type) = resolution::build_class_type(decl);
 
             // Extract type params from instance_type
             let class_type_params = if let Type::Object { type_params, .. } = &instance_type {

@@ -1,10 +1,13 @@
-//! Type narrowing for control flow analysis.
+//! Control flow analysis for type narrowing.
 //!
-//! Type narrowing allows the type checker to refine types based on:
+//! This module handles control flow-based type refinement:
 //! - typeof checks: `typeof x === "string"` narrows to string
 //! - null/undefined checks: `x !== null` removes null from union
 //! - instanceof checks: `x instanceof Foo` narrows to Foo
 //! - truthiness checks: `if (x)` removes null/undefined
+//!
+//! The `NarrowingContext` tracks narrowed types within a scope. When entering
+//! conditional branches (if/else), types are refined based on the condition.
 
 use std::collections::HashMap;
 
