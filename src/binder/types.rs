@@ -137,6 +137,7 @@ impl Binder {
             properties,
             index_signature: None,
             extends: vec![],
+            type_params: vec![],
         }
     }
 

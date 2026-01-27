@@ -176,6 +176,7 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
         properties,
         index_signature,
         extends: vec![],
+        type_params: vec![],
     }
 }
 
@@ -273,6 +274,28 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
     let mut properties = Vec::new();
     let mut index_signature = None;
 
+    // Extract type parameters for generic interfaces
+    let type_params: Vec<TypeParam> = decl
+        .type_parameters
+        .as_ref()
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|p| {
+                    let mut tp = TypeParam::new(p.name.name.to_string());
+                    if let Some(constraint) = &p.constraint {
+                        tp = tp.with_constraint(resolve_ts_type(constraint));
+                    }
+                    if let Some(default) = &p.default {
+                        tp = tp.with_default(resolve_ts_type(default));
+                    }
+                    tp
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let extends: Vec<Type> = decl
         .extends
         .iter()
@@ -348,6 +371,7 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
         properties,
         index_signature,
         extends,
+        type_params,
     }
 }
 
@@ -371,6 +395,7 @@ pub fn widen_type(ty: Type) -> Type {
             properties,
             index_signature,
             extends,
+            type_params,
         } => Type::Object {
             properties: properties
                 .into_iter()
@@ -381,6 +406,7 @@ pub fn widen_type(ty: Type) -> Type {
                 .collect(),
             index_signature,
             extends,
+            type_params,
         },
         other => other,
     }

@@ -8,6 +8,7 @@
 use oxc_ast::ast::*;
 
 use crate::symbols::{ScopeKind, SymbolKind};
+use crate::type_resolution;
 use crate::types::Type;
 
 use super::Binder;
@@ -51,9 +52,10 @@ impl Binder {
     ///
     /// 1. Add function to current scope (before body, for recursion)
     /// 2. Push new function scope
-    /// 3. Add parameters to function scope
-    /// 4. Bind body statements
-    /// 5. Pop back to parent scope
+    /// 3. Add type parameters to type namespace (for generics)
+    /// 4. Add parameters to function scope
+    /// 5. Bind body statements
+    /// 6. Pop back to parent scope
     pub(super) fn bind_function_declaration(&mut self, decl: &Function) {
         if let Some(ident) = &decl.id {
             let name = ident.name.as_str();
@@ -67,6 +69,9 @@ impl Binder {
 
         self.symbols.push_scope(ScopeKind::Function);
 
+        // Bind type parameters to type namespace within function scope
+        self.bind_type_parameters(&decl.type_parameters);
+
         for param in &decl.params.items {
             self.bind_formal_parameter(param);
         }
@@ -78,6 +83,34 @@ impl Binder {
         }
 
         self.symbols.pop_scope();
+    }
+
+    /// Bind type parameters to the type namespace.
+    ///
+    /// For a function like `function id<T>(x: T): T`, this registers `T` as a
+    /// type in the current scope so that parameter types like `T` can be resolved.
+    fn bind_type_parameters(&mut self, type_params: &Option<oxc_allocator::Box<TSTypeParameterDeclaration>>) {
+        if let Some(params) = type_params {
+            for param in &params.params {
+                let name = param.name.name.as_str();
+                let span = param.name.span;
+
+                // Build the TypeParameter type
+                let constraint = param.constraint.as_ref().map(|c| type_resolution::resolve_ts_type(c));
+                let default = param.default.as_ref().map(|d| type_resolution::resolve_ts_type(d));
+
+                let ty = Type::TypeParameter {
+                    name: name.to_string(),
+                    constraint: constraint.map(Box::new),
+                    default: default.map(Box::new),
+                };
+
+                // Register in type namespace
+                if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, span) {
+                    self.errors.push(err.into());
+                }
+            }
+        }
     }
 
     fn bind_formal_parameter(&mut self, param: &FormalParameter) {
@@ -201,6 +234,9 @@ impl Binder {
     pub(super) fn bind_arrow_function(&mut self, arrow: &ArrowFunctionExpression) {
         self.symbols.push_scope(ScopeKind::Function);
 
+        // Bind type parameters for generic arrow functions
+        self.bind_type_parameters(&arrow.type_parameters);
+
         for param in &arrow.params.items {
             self.bind_formal_parameter(param);
         }
@@ -218,6 +254,9 @@ impl Binder {
     /// `const f = function foo() { foo(); }` - `foo` is only visible inside.
     pub(super) fn bind_function_expression(&mut self, func: &Function) {
         self.symbols.push_scope(ScopeKind::Function);
+
+        // Bind type parameters for generic function expressions
+        self.bind_type_parameters(&func.type_parameters);
 
         if let Some(ident) = &func.id {
             let name = ident.name.as_str();

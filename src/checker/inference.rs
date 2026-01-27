@@ -39,12 +39,7 @@ impl<'a> Checker<'a> {
             Expression::ArrowFunctionExpression(arrow) => self.infer_arrow_function(arrow),
             Expression::FunctionExpression(func) => self.infer_function_expression(func),
             Expression::CallExpression(call) => {
-                let callee_type = self.infer_expression(&call.callee);
-                if let Type::Function { return_type, .. } = callee_type {
-                    *return_type
-                } else {
-                    Type::Any
-                }
+                self.infer_call_expression(call)
             }
 
             // Member access
@@ -223,6 +218,7 @@ impl<'a> Checker<'a> {
             properties,
             index_signature: None,
             extends: vec![],
+            type_params: vec![],
         }
     }
 
@@ -389,9 +385,10 @@ impl<'a> Checker<'a> {
     ///
     /// Resolution order:
     /// 1. Resolve TypeRef to its underlying type
-    /// 2. Look for an explicit property with the given name
-    /// 3. If not found and there's a string index signature, return its value type
-    /// 4. Fall back to Any
+    /// 2. For TypeParameter with constraint, use the constraint type
+    /// 3. Look for an explicit property with the given name
+    /// 4. If not found and there's a string index signature, return its value type
+    /// 5. Fall back to Any
     pub(super) fn get_property_type(&self, object_type: &Type, prop_name: &str) -> Type {
         // Resolve TypeRef first
         let resolved_type = if let Type::TypeRef { name, .. } = object_type {
@@ -401,6 +398,13 @@ impl<'a> Checker<'a> {
                 .unwrap_or_else(|| object_type.clone())
         } else {
             object_type.clone()
+        };
+
+        // For TypeParameter with a constraint, use the constraint for property lookup
+        let resolved_type = if let Type::TypeParameter { constraint: Some(constraint), .. } = &resolved_type {
+            (**constraint).clone()
+        } else {
+            resolved_type
         };
 
         match &resolved_type {
@@ -496,6 +500,56 @@ impl<'a> Checker<'a> {
             Type::TypeRef { name, type_args }
         } else {
             ty
+        }
+    }
+
+    /// Infer the return type of a function call, handling generic type inference.
+    fn infer_call_expression(&self, call: &CallExpression) -> Type {
+        let callee_type = self.infer_expression(&call.callee);
+
+        if let Type::Function { params, return_type, type_params } = callee_type {
+            // If no type parameters, just return the return type
+            if type_params.is_empty() {
+                return *return_type;
+            }
+
+            // Collect argument types
+            let arg_types: Vec<Type> = call
+                .arguments
+                .iter()
+                .filter_map(|arg| arg.as_expression())
+                .map(|expr| self.infer_expression(expr))
+                .collect();
+
+            // Get explicit type arguments from the call if present
+            let explicit_type_args: Vec<Type> = call
+                .type_arguments
+                .as_ref()
+                .map(|args| {
+                    args.params
+                        .iter()
+                        .map(|t| self.resolve_ts_type(t))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Build substitution map
+            let substitutions = if !explicit_type_args.is_empty() {
+                // Use explicit type arguments
+                self.build_substitution_map(&type_params, &explicit_type_args)
+            } else {
+                // Infer type arguments from argument types
+                self.infer_type_args_from_call(&type_params, &params, &arg_types)
+            };
+
+            // Substitute type parameters in the return type
+            if substitutions.is_empty() {
+                *return_type
+            } else {
+                self.substitute_type_params(&return_type, &substitutions)
+            }
+        } else {
+            Type::Any
         }
     }
 }

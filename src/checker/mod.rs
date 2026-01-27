@@ -97,6 +97,14 @@ impl TypeError {
             errors::CANNOT_FIND_NAME.code,
         )
     }
+
+    pub fn constraint_violation(type_arg: &Type, constraint: &Type, span: Span) -> Self {
+        Self::new(
+            errors::CONSTRAINT_NOT_SATISFIED.format(&[&type_arg.to_string(), &constraint.to_string()]),
+            span,
+            errors::CONSTRAINT_NOT_SATISFIED.code,
+        )
+    }
 }
 
 /// The type checker verifies type correctness of the program.
@@ -347,10 +355,73 @@ impl<'a> Checker<'a> {
         let callee_type = self.infer_expression(&call.callee);
 
         // Only check if it's a function type
-        if let Type::Function { params, .. } = callee_type {
+        if let Type::Function { params, type_params, .. } = callee_type {
+            // Collect argument types for type inference
+            let arg_types: Vec<Type> = call
+                .arguments
+                .iter()
+                .filter_map(|arg| arg.as_expression())
+                .map(|expr| self.infer_expression(expr))
+                .collect();
+
+            // Get explicit type arguments from the call if present
+            let explicit_type_args: Vec<Type> = call
+                .type_arguments
+                .as_ref()
+                .map(|args| {
+                    args.params
+                        .iter()
+                        .map(|t| self.resolve_ts_type(t))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Build substitution map for generic functions
+            let substitutions = if !type_params.is_empty() {
+                if !explicit_type_args.is_empty() {
+                    // Use explicit type arguments
+                    self.build_substitution_map(&type_params, &explicit_type_args)
+                } else {
+                    // Infer type arguments from argument types
+                    self.infer_type_args_from_call(&type_params, &params, &arg_types)
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            // Check constraints for each type argument
+            for tp in &type_params {
+                if let Some(constraint) = &tp.constraint {
+                    if let Some(type_arg) = substitutions.get(&tp.name) {
+                        if !self.satisfies_constraint(type_arg, constraint) {
+                            self.errors.push(TypeError::constraint_violation(
+                                type_arg,
+                                constraint,
+                                call.span,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Substitute type parameters in parameter types for checking
+            let instantiated_params: Vec<crate::types::Param> = params
+                .iter()
+                .map(|p| crate::types::Param {
+                    name: p.name.clone(),
+                    ty: if substitutions.is_empty() {
+                        p.ty.clone()
+                    } else {
+                        self.substitute_type_params(&p.ty, &substitutions)
+                    },
+                    optional: p.optional,
+                    rest: p.rest,
+                })
+                .collect();
+
             let arg_count = call.arguments.len();
-            let required_params = params.iter().filter(|p| !p.optional).count();
-            let total_params = params.len();
+            let required_params = instantiated_params.iter().filter(|p| !p.optional).count();
+            let total_params = instantiated_params.len();
 
             // Check argument count
             if arg_count < required_params {
@@ -361,7 +432,7 @@ impl<'a> Checker<'a> {
                 ));
             } else if arg_count > total_params {
                 // Too many arguments (and no rest param)
-                let has_rest = params.last().map(|p| p.rest).unwrap_or(false);
+                let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
                 if !has_rest {
                     self.errors.push(TypeError::wrong_argument_count(
                         total_params,
@@ -371,14 +442,14 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // Check argument types
+            // Check argument types against instantiated parameter types
             for (i, arg) in call.arguments.iter().enumerate() {
-                if i >= params.len() {
+                if i >= instantiated_params.len() {
                     break; // Rest params or extra args handled above
                 }
                 if let Some(expr) = arg.as_expression() {
                     let arg_type = self.infer_expression(expr);
-                    let param_type = &params[i].ty;
+                    let param_type = &instantiated_params[i].ty;
                     if !self.is_assignable(&arg_type, param_type) {
                         self.errors.push(TypeError::argument_not_assignable(
                             &arg_type,
@@ -465,16 +536,28 @@ impl<'a> Checker<'a> {
     fn has_property(&self, ty: &Type, prop_name: &str) -> bool {
         // Resolve TypeRef first
         let resolved = if let Type::TypeRef { name, .. } = ty {
-            self.symbols
-                .lookup_type(name)
-                .map(|s| s.ty.clone())
+            self.symbols.lookup_type(name).map(|s| s.ty.clone())
         } else {
             None
         };
         let ty = resolved.as_ref().unwrap_or(ty);
 
+        // For TypeParameter with a constraint, use the constraint
+        let resolved_constraint = if let Type::TypeParameter { constraint: Some(constraint), .. } = ty {
+            // If the constraint is a TypeRef, resolve it
+            let resolved_constraint = if let Type::TypeRef { name, .. } = constraint.as_ref() {
+                self.symbols.lookup_type(name).map(|s| s.ty.clone()).unwrap_or_else(|| (**constraint).clone())
+            } else {
+                (**constraint).clone()
+            };
+            Some(resolved_constraint)
+        } else {
+            None
+        };
+        let ty = resolved_constraint.as_ref().unwrap_or(ty);
+
         match ty {
-            Type::Object { properties, index_signature, extends } => {
+            Type::Object { properties, index_signature, extends, .. } => {
                 let all_props = self.resolve_object_properties(properties, extends);
                 if all_props.iter().any(|p| p.name == prop_name) {
                     return true;
@@ -640,11 +723,9 @@ impl<'a> Checker<'a> {
         expected: &Type,
         span: Span,
     ) {
-        // Resolve TypeRef to actual type
-        let resolved = if let Type::TypeRef { name, .. } = expected {
-            self.symbols
-                .lookup_type(name)
-                .map(|s| s.ty.clone())
+        // Resolve TypeRef to actual type, instantiating generic types
+        let resolved = if let Type::TypeRef { name, type_args } = expected {
+            self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or_else(|| expected.clone())
         } else {
             expected.clone()
@@ -654,6 +735,7 @@ impl<'a> Checker<'a> {
             properties: expected_props,
             index_signature,
             extends,
+            ..
         } = &resolved
         else {
             let source = self.infer_object_literal(obj);
@@ -758,6 +840,23 @@ impl<'a> Checker<'a> {
         if let Some(body) = &func.body {
             // Push function scope to match binder's scope structure
             self.symbols.push_scope(ScopeKind::Function);
+
+            // Bind type parameters to type namespace for generic functions
+            if let Some(type_params) = &func.type_parameters {
+                for param in &type_params.params {
+                    let name = param.name.name.as_str();
+                    let constraint = param.constraint.as_ref().map(|c| crate::type_resolution::resolve_ts_type(c));
+                    let default = param.default.as_ref().map(|d| crate::type_resolution::resolve_ts_type(d));
+
+                    let ty = Type::TypeParameter {
+                        name: name.to_string(),
+                        constraint: constraint.map(Box::new),
+                        default: default.map(Box::new),
+                    };
+
+                    let _ = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, param.name.span);
+                }
+            }
 
             // Re-bind parameters in this scope for the checker
             for param in &func.params.items {
@@ -2461,6 +2560,234 @@ mod tests {
             }
             type UserAlias = User;
             const u: UserAlias = { name: "Bob" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // ========================================================================
+    // Milestone 9: Generics
+    // ========================================================================
+
+    // M9.1: Parse Generic Type Parameters
+    // ------------------------------------
+
+    #[test]
+    fn test_generic_function_declaration_basic() {
+        // Basic generic function should parse without errors
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_function_with_multiple_type_params() {
+        // Test that multiple type parameters are parsed and the function body
+        // can reference them. The actual tuple inference is tested separately.
+        let errors = check(r#"
+            function makePair<A, B>(a: A, b: B): { first: A; second: B } {
+                return { first: a, second: b };
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_interface_basic() {
+        let errors = check(r#"
+            interface Box<T> {
+                value: T;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_type_alias_basic() {
+        let errors = check(r#"
+            type Pair<A, B> = { first: A; second: B };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // M9.2: Instantiate Generic Types
+    // --------------------------------
+
+    #[test]
+    fn test_generic_function_explicit_type_arg() {
+        // Calling generic function with explicit type argument
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+            const result: number = identity<number>(42);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_function_explicit_type_arg_mismatch() {
+        // Type argument says string, but passing number - should error
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+            const result = identity<string>(42);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345); // Argument of type 'X' is not assignable to parameter of type 'Y'
+    }
+
+    #[test]
+    fn test_generic_interface_instantiation() {
+        let errors = check(r#"
+            interface Box<T> {
+                value: T;
+            }
+            const numBox: Box<number> = { value: 42 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_interface_instantiation_error() {
+        let errors = check(r#"
+            interface Box<T> {
+                value: T;
+            }
+            const numBox: Box<number> = { value: "hello" };
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322); // Type 'X' is not assignable to type 'Y'
+    }
+
+    // M9.3: Infer Type Arguments
+    // ---------------------------
+
+    #[test]
+    fn test_generic_function_type_inference_simple() {
+        // identity(42) should infer T = number
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+            const result: number = identity(42);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_function_type_inference_string() {
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+            const result: string = identity("hello");
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_function_type_inference_mismatch() {
+        // identity(42) infers T = number, but assigning to string should error
+        let errors = check(r#"
+            function identity<T>(x: T): T {
+                return x;
+            }
+            const result: string = identity(42);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_generic_function_type_inference_multiple_args() {
+        // Infer from multiple arguments
+        let errors = check(r#"
+            function first<T>(a: T, b: T): T {
+                return a;
+            }
+            const result: number = first(1, 2);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // M9.4: Generic Constraints
+    // --------------------------
+
+    #[test]
+    fn test_generic_constraint_basic() {
+        let errors = check(r#"
+            function getLength<T extends { length: number }>(x: T): number {
+                return x.length;
+            }
+            const len = getLength("hello");
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_constraint_violation() {
+        let errors = check(r#"
+            function getLength<T extends { length: number }>(x: T): number {
+                return x.length;
+            }
+            const len = getLength(42);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2344); // Type does not satisfy constraint
+    }
+
+    #[test]
+    fn test_generic_constraint_with_explicit_type_arg() {
+        // Explicit type arg that doesn't satisfy constraint
+        let errors = check(r#"
+            interface HasLength {
+                length: number;
+            }
+            function getLength<T extends HasLength>(x: T): number {
+                return x.length;
+            }
+            const len = getLength<number>(42);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2344);
+    }
+
+    // M9.5: Generic Defaults
+    // -----------------------
+
+    #[test]
+    fn test_generic_default_type() {
+        let errors = check(r#"
+            interface Container<T = string> {
+                value: T;
+            }
+            const c: Container = { value: "hello" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_default_type_override() {
+        let errors = check(r#"
+            interface Container<T = string> {
+                value: T;
+            }
+            const c: Container<number> = { value: 42 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_function_default() {
+        let errors = check(r#"
+            function wrap<T = string>(x: T): { value: T } {
+                return { value: x };
+            }
+            const result = wrap("hello");
         "#);
         assert!(errors.is_empty());
     }

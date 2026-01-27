@@ -262,6 +262,13 @@ identity(42); // T: number
 identity("hello"); // T: string
 ```
 
+The type checker needs to:
+1. Parse the type parameter <T>
+2. Substitute T with concrete types (number, string)
+3. Infer what T should be from call arguments
+4. Validate constraints (T extends SomeType)
+5. Apply defaults when type arguments aren't provided
+
 Constraints limit what types can be substituted.
 
 ```ts

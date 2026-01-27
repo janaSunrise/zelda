@@ -13,8 +13,41 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     /// Resolve a TypeRef to its underlying type by looking it up in the type namespace.
+    /// If the resolved type is generic and type arguments are provided, instantiate it.
     fn resolve_type_ref(&self, name: &str) -> Option<Type> {
         self.symbols.lookup_type(name).map(|s| s.ty.clone())
+    }
+
+    /// Resolve a TypeRef with type arguments, instantiating generic types.
+    ///
+    /// For `Box<number>` where Box is `{ value: T }`, this returns `{ value: number }`.
+    /// For `Container` where Container has default `<T = string>`, this applies the defaults.
+    pub(super) fn resolve_type_ref_with_args(&self, name: &str, type_args: &[Type]) -> Option<Type> {
+        let symbol = self.symbols.lookup_type(name)?;
+        let base_type = symbol.ty.clone();
+
+        // Extract type parameters from the base type and instantiate
+        match &base_type {
+            Type::Object { type_params, .. } if !type_params.is_empty() => {
+                // Build substitution map - this handles both explicit args and defaults
+                let subs = self.build_substitution_map(type_params, type_args);
+                if subs.is_empty() {
+                    // No substitutions possible (no args and no defaults)
+                    Some(base_type)
+                } else {
+                    Some(self.substitute_type_params(&base_type, &subs))
+                }
+            }
+            Type::Function { type_params, .. } if !type_params.is_empty() => {
+                let subs = self.build_substitution_map(type_params, type_args);
+                if subs.is_empty() {
+                    Some(base_type)
+                } else {
+                    Some(self.substitute_type_params(&base_type, &subs))
+                }
+            }
+            _ => Some(base_type),
+        }
     }
 
     /// Resolve all properties of an object type, including inherited properties from extends.
@@ -58,14 +91,14 @@ impl<'a> Checker<'a> {
 
     /// Check if source type is assignable to target type.
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
-        // Handle TypeRef resolution, only clone when actually needed
-        if let Type::TypeRef { name, .. } = source {
-            if let Some(resolved) = self.resolve_type_ref(name) {
+        // Handle TypeRef resolution with type argument instantiation
+        if let Type::TypeRef { name, type_args } = source {
+            if let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
                 return self.is_assignable(&resolved, target);
             }
         }
-        if let Type::TypeRef { name, .. } = target {
-            if let Some(resolved) = self.resolve_type_ref(name) {
+        if let Type::TypeRef { name, type_args } = target {
+            if let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
                 return self.is_assignable(source, &resolved);
             }
         }
@@ -178,11 +211,13 @@ impl<'a> Checker<'a> {
                 properties: source_props,
                 index_signature: source_idx,
                 extends: source_extends,
+                ..
             },
             Type::Object {
                 properties: target_props,
                 index_signature: target_idx,
                 extends: target_extends,
+                ..
             },
         ) = (source, target)
         {
@@ -194,6 +229,35 @@ impl<'a> Checker<'a> {
                 &resolved_target_props,
                 target_idx.as_ref(),
             );
+        }
+
+        // Primitive types with built-in properties (for constraint checking)
+        // string has: length: number, plus string methods
+        // Array has: length: number, plus array methods
+        if let Type::Object { properties: target_props, .. } = target {
+            let source_has_props = match source {
+                Type::String | Type::StringLiteral(_) => {
+                    // String has length and various string methods
+                    target_props.iter().all(|p| {
+                        (p.name == "length" && self.is_assignable(&Type::Number, &p.ty))
+                            || self.has_string_property(&p.name)
+                    })
+                }
+                Type::Array(elem) => {
+                    // Array has length and various array methods
+                    target_props.iter().all(|p| {
+                        if p.name == "length" {
+                            self.is_assignable(&Type::Number, &p.ty)
+                        } else {
+                            self.has_array_property(&p.name, elem)
+                        }
+                    })
+                }
+                _ => false,
+            };
+            if source_has_props {
+                return true;
+            }
         }
 
         // Function types - contravariant params, covariant return
@@ -298,6 +362,72 @@ impl<'a> Checker<'a> {
         }
 
         true
+    }
+
+    /// Check if a property name is a built-in string property.
+    fn has_string_property(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "length"
+                | "charAt"
+                | "charCodeAt"
+                | "concat"
+                | "includes"
+                | "endsWith"
+                | "startsWith"
+                | "indexOf"
+                | "lastIndexOf"
+                | "match"
+                | "replace"
+                | "search"
+                | "slice"
+                | "split"
+                | "substring"
+                | "toLowerCase"
+                | "toUpperCase"
+                | "trim"
+                | "trimStart"
+                | "trimEnd"
+                | "padStart"
+                | "padEnd"
+                | "repeat"
+                | "at"
+        )
+    }
+
+    /// Check if a property name is a built-in array property.
+    fn has_array_property(&self, name: &str, _elem_type: &Type) -> bool {
+        matches!(
+            name,
+            "length"
+                | "push"
+                | "pop"
+                | "shift"
+                | "unshift"
+                | "slice"
+                | "splice"
+                | "concat"
+                | "join"
+                | "map"
+                | "filter"
+                | "reduce"
+                | "forEach"
+                | "find"
+                | "findIndex"
+                | "includes"
+                | "indexOf"
+                | "every"
+                | "some"
+                | "sort"
+                | "reverse"
+                | "fill"
+                | "flat"
+                | "flatMap"
+                | "at"
+                | "entries"
+                | "keys"
+                | "values"
+        )
     }
 
     /// Check function type compatibility.

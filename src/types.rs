@@ -33,6 +33,8 @@ pub enum Type {
         /// Base interfaces/types this interface extends (stored as TypeRefs).
         /// Empty for plain object types. Resolved during type checking.
         extends: Vec<Type>,
+        /// Type parameters for generic interfaces: interface Box<T> { ... }
+        type_params: Vec<TypeParam>,
     },
     Function {
         params: Vec<Param>,
@@ -76,10 +78,11 @@ impl Hash for Type {
             Type::Tuple(types) => types.hash(state),
             Type::Union(types) => types.hash(state),
             Type::Intersection(types) => types.hash(state),
-            Type::Object { properties, index_signature, extends } => {
+            Type::Object { properties, index_signature, extends, type_params } => {
                 properties.hash(state);
                 index_signature.hash(state);
                 extends.hash(state);
+                type_params.hash(state);
             }
             Type::Function { params, return_type, type_params } => {
                 params.hash(state);
@@ -138,9 +141,9 @@ impl Ord for Type {
             (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
             (Type::Union(a), Type::Union(b)) => a.cmp(b),
             (Type::Intersection(a), Type::Intersection(b)) => a.cmp(b),
-            (Type::Object { properties: pa, index_signature: ia, extends: ea },
-             Type::Object { properties: pb, index_signature: ib, extends: eb }) => {
-                pa.cmp(pb).then_with(|| ia.cmp(ib)).then_with(|| ea.cmp(eb))
+            (Type::Object { properties: pa, index_signature: ia, extends: ea, type_params: ta },
+             Type::Object { properties: pb, index_signature: ib, extends: eb, type_params: tb }) => {
+                pa.cmp(pb).then_with(|| ia.cmp(ib)).then_with(|| ea.cmp(eb)).then_with(|| ta.cmp(tb))
             }
             (Type::Function { params: pa, return_type: ra, type_params: ta },
              Type::Function { params: pb, return_type: rb, type_params: tb }) => {
@@ -165,6 +168,7 @@ impl Type {
             properties,
             index_signature: None,
             extends: vec![],
+            type_params: vec![],
         }
     }
 
@@ -174,6 +178,21 @@ impl Type {
             properties,
             index_signature: None,
             extends,
+            type_params: vec![],
+        }
+    }
+
+    /// Create a generic object type (for generic interfaces).
+    pub fn generic_object(
+        type_params: Vec<TypeParam>,
+        properties: Vec<Property>,
+        extends: Vec<Type>,
+    ) -> Self {
+        Self::Object {
+            properties,
+            index_signature: None,
+            extends,
+            type_params,
         }
     }
 
@@ -353,7 +372,25 @@ impl fmt::Display for Type {
                 properties,
                 index_signature,
                 extends: _, // Not shown, resolved at type-check time
+                type_params,
             } => {
+                // Show type parameters if present
+                if !type_params.is_empty() {
+                    write!(f, "<")?;
+                    for (i, tp) in type_params.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", tp.name)?;
+                        if let Some(constraint) = &tp.constraint {
+                            write!(f, " extends {}", constraint)?;
+                        }
+                        if let Some(default) = &tp.default {
+                            write!(f, " = {}", default)?;
+                        }
+                    }
+                    write!(f, ">")?;
+                }
                 write!(f, "{{ ")?;
                 let mut first = true;
                 for prop in properties {
@@ -513,9 +550,9 @@ impl Param {
 /// Type parameter in a generic: <T extends Constraint = Default>
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParam {
-    pub name: String,
-    pub constraint: Option<Box<Type>>,
-    pub default: Option<Box<Type>>,
+    pub name: String, // T
+    pub constraint: Option<Box<Type>>, // extends SomeType
+    pub default: Option<Box<Type>>, // = DefaultType
 }
 
 impl TypeParam {
@@ -699,6 +736,7 @@ mod tests {
                 value_type: Box::new(Type::Number),
             }),
             extends: vec![],
+            type_params: vec![],
         };
         assert_eq!(obj.to_string(), "{ [key: string]: number }");
     }
