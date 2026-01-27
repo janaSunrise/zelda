@@ -42,6 +42,17 @@ pub enum Type {
         type_params: Vec<TypeParam>,
     },
 
+    /// Class constructor type - stored in value namespace for classes.
+    /// Contains constructor signature AND static members.
+    ClassConstructor {
+        /// Constructor parameters for `new ClassName(args)`
+        params: Vec<Param>,
+        /// Type parameters for generic classes
+        type_params: Vec<TypeParam>,
+        /// Static properties and methods accessible via `ClassName.member`
+        static_members: Vec<Property>,
+    },
+
     // Named type reference with `type`: Array<string>, Map<K,V>, User, etc.
     TypeRef {
         name: String,
@@ -88,6 +99,11 @@ impl Hash for Type {
                 params.hash(state);
                 return_type.hash(state);
                 type_params.hash(state);
+            }
+            Type::ClassConstructor { params, type_params, static_members } => {
+                params.hash(state);
+                type_params.hash(state);
+                static_members.hash(state);
             }
             Type::TypeRef { name, type_args } => {
                 name.hash(state);
@@ -156,6 +172,10 @@ impl Ord for Type {
             (Type::TypeParameter { name: na, constraint: ca, default: da },
              Type::TypeParameter { name: nb, constraint: cb, default: db }) => {
                 na.cmp(nb).then_with(|| ca.cmp(cb)).then_with(|| da.cmp(db))
+            }
+            (Type::ClassConstructor { params: pa, type_params: ta, static_members: sa },
+             Type::ClassConstructor { params: pb, type_params: tb, static_members: sb }) => {
+                pa.cmp(pb).then_with(|| ta.cmp(tb)).then_with(|| sa.cmp(sb))
             }
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
@@ -452,6 +472,32 @@ impl fmt::Display for Type {
                     write!(f, ": {}", param.ty)?;
                 }
                 write!(f, ") => {}", return_type)
+            }
+
+            Type::ClassConstructor { params, type_params, static_members } => {
+                write!(f, "typeof class")?;
+                if !type_params.is_empty() {
+                    write!(f, "<")?;
+                    for (i, tp) in type_params.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", tp.name)?;
+                    }
+                    write!(f, ">")?;
+                }
+                if !static_members.is_empty() {
+                    write!(f, " {{ ")?;
+                    for (i, prop) in static_members.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, "; ")?;
+                        }
+                        write!(f, "static {}: {}", prop.name, prop.ty)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                write!(f, " (constructor: ({}) => instance)",
+                    params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect::<Vec<_>>().join(", "))
             }
 
             Type::TypeRef { name, type_args } => {

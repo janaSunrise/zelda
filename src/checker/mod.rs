@@ -105,6 +105,14 @@ impl TypeError {
             errors::CONSTRAINT_NOT_SATISFIED.code,
         )
     }
+
+    pub fn incorrectly_implements(class_name: &str, interface_name: &str, span: Span) -> Self {
+        Self::new(
+            errors::INCORRECTLY_IMPLEMENTS.format(&[class_name, interface_name]),
+            span,
+            errors::INCORRECTLY_IMPLEMENTS.code,
+        )
+    }
 }
 
 /// The type checker verifies type correctness of the program.
@@ -118,6 +126,8 @@ pub struct Checker<'a> {
     pub symbols: &'a mut SymbolTable,
     pub errors: Vec<TypeError>,
     narrowing: NarrowingContext,
+    /// Current class name for super call checking (Some when inside a class)
+    current_class: Option<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -126,6 +136,7 @@ impl<'a> Checker<'a> {
             symbols,
             errors: Vec::new(),
             narrowing: NarrowingContext::new(),
+            current_class: None,
         }
     }
 
@@ -250,6 +261,10 @@ impl<'a> Checker<'a> {
                 self.check_interface_declaration(decl);
             }
 
+            Statement::ClassDeclaration(class) => {
+                self.check_class_declaration(class);
+            }
+
             _ => {}
         }
     }
@@ -318,13 +333,7 @@ impl<'a> Checker<'a> {
                 self.check_expression(&await_expr.argument);
             }
             Expression::NewExpression(new_expr) => {
-                // Check constructor arguments similar to call expressions
-                self.check_expression(&new_expr.callee);
-                for arg in &new_expr.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        self.check_expression(expr);
-                    }
-                }
+                self.check_new_expression(new_expr);
             }
             Expression::StaticMemberExpression(member) => {
                 self.check_expression(&member.object);
@@ -343,12 +352,20 @@ impl<'a> Checker<'a> {
 
     /// Check a function call for argument count and type errors.
     fn check_call_expression(&mut self, call: &CallExpression) {
-        // First check sub-expressions
-        self.check_expression(&call.callee);
+        // First check sub-expressions (but skip Super since it's not a regular expression)
+        if !matches!(call.callee, Expression::Super(_)) {
+            self.check_expression(&call.callee);
+        }
         for arg in &call.arguments {
             if let Some(expr) = arg.as_expression() {
                 self.check_expression(expr);
             }
+        }
+
+        // Handle super() call specially
+        if let Expression::Super(_) = &call.callee {
+            self.check_super_call(call);
+            return;
         }
 
         // Get the callee type
@@ -485,9 +502,252 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check a super() call in a derived class constructor.
+    fn check_super_call(&mut self, call: &CallExpression) {
+        // Get current class and its parent
+        let class_name = match &self.current_class {
+            Some(name) => name.clone(),
+            None => return, // super() outside class - ignore (other error)
+        };
+
+        // Look up the class type and its extends clause
+        let class_type = self.symbols.lookup_type(&class_name).map(|s| s.ty.clone());
+        let parent_class_name = match class_type {
+            Some(Type::Object { extends, .. }) if !extends.is_empty() => {
+                if let Type::TypeRef { name, .. } = &extends[0] {
+                    name.clone()
+                } else {
+                    return;
+                }
+            }
+            _ => return, // No parent class
+        };
+
+        // Get parent's constructor type
+        let parent_constructor = self.symbols.lookup(&parent_class_name).map(|s| s.ty.clone());
+
+        let params = match parent_constructor {
+            Some(Type::ClassConstructor { params, .. }) => params,
+            Some(Type::Function { params, .. }) => params, // For backward compatibility
+            _ => return,
+        };
+
+        // Check argument types
+        let arg_count = call.arguments.len();
+        let required_params = params.iter().filter(|p| !p.optional && !p.rest).count();
+        let has_rest = params.last().map(|p| p.rest).unwrap_or(false);
+
+        // Check argument count
+        if arg_count < required_params {
+            self.errors.push(TypeError::wrong_argument_count(
+                required_params,
+                arg_count,
+                call.span,
+            ));
+        } else if !has_rest && arg_count > params.len() {
+            self.errors.push(TypeError::wrong_argument_count(
+                params.len(),
+                arg_count,
+                call.span,
+            ));
+        }
+
+        // Check argument types
+        let non_rest_param_count = if has_rest { params.len() - 1 } else { params.len() };
+
+        for (i, arg) in call.arguments.iter().enumerate() {
+            if let Some(expr) = arg.as_expression() {
+                let arg_type = self.infer_expression(expr);
+
+                let param_type = if i < non_rest_param_count {
+                    &params[i].ty
+                } else if has_rest {
+                    let rest_param = params.last().unwrap();
+                    if let Type::Array(elem_type) = &rest_param.ty {
+                        elem_type.as_ref()
+                    } else {
+                        &rest_param.ty
+                    }
+                } else {
+                    break;
+                };
+
+                if !self.is_assignable(&arg_type, param_type) {
+                    self.errors.push(TypeError::argument_not_assignable(
+                        &arg_type,
+                        param_type,
+                        expr.span(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Check a new expression for constructor argument count and type errors.
+    fn check_new_expression(&mut self, new_expr: &NewExpression) {
+        // First check sub-expressions
+        self.check_expression(&new_expr.callee);
+        for arg in &new_expr.arguments {
+            if let Some(expr) = arg.as_expression() {
+                self.check_expression(expr);
+            }
+        }
+
+        // Get the constructor type from the value namespace
+        let constructor_type = if let Expression::Identifier(ident) = &new_expr.callee {
+            self.symbols.lookup(ident.name.as_str()).map(|s| s.ty.clone())
+        } else {
+            None
+        };
+
+        // Extract params and type_params from either Function or ClassConstructor
+        let (params, type_params) = match constructor_type {
+            Some(Type::Function { params, type_params, .. }) => (params, type_params),
+            Some(Type::ClassConstructor { params, type_params, .. }) => (params, type_params),
+            _ => return,
+        };
+
+        // Collect argument types
+        let arg_types: Vec<Type> = new_expr
+            .arguments
+            .iter()
+            .filter_map(|arg| arg.as_expression())
+            .map(|expr| self.infer_expression(expr))
+            .collect();
+
+        // Get explicit type arguments if present
+        let explicit_type_args: Vec<Type> = new_expr
+            .type_arguments
+            .as_ref()
+            .map(|args| {
+                args.params
+                    .iter()
+                    .map(|t| self.resolve_ts_type(t))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Build substitution map for generic constructors
+        let substitutions = if !type_params.is_empty() {
+            if !explicit_type_args.is_empty() {
+                self.build_substitution_map(&type_params, &explicit_type_args)
+            } else {
+                self.infer_type_args_from_call(&type_params, &params, &arg_types)
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Check type parameter constraints
+        for tp in &type_params {
+            if let Some(constraint) = &tp.constraint {
+                if let Some(type_arg) = substitutions.get(&tp.name) {
+                    if !self.satisfies_constraint(type_arg, constraint) {
+                        self.errors.push(TypeError::constraint_violation(
+                            type_arg,
+                            constraint,
+                            new_expr.span,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Instantiate parameter types
+        let instantiated_params: Vec<crate::types::Param> = params
+            .iter()
+            .map(|p| crate::types::Param {
+                name: p.name.clone(),
+                ty: if substitutions.is_empty() {
+                    p.ty.clone()
+                } else {
+                    self.substitute_type_params(&p.ty, &substitutions)
+                },
+                optional: p.optional,
+                rest: p.rest,
+            })
+            .collect();
+
+        let arg_count = new_expr.arguments.len();
+        let required_params = instantiated_params
+            .iter()
+            .filter(|p| !p.optional && !p.rest)
+            .count();
+        let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
+
+        // Check argument count
+        if arg_count < required_params {
+            self.errors.push(TypeError::wrong_argument_count(
+                required_params,
+                arg_count,
+                new_expr.span,
+            ));
+        } else if !has_rest && arg_count > instantiated_params.len() {
+            self.errors.push(TypeError::wrong_argument_count(
+                instantiated_params.len(),
+                arg_count,
+                new_expr.span,
+            ));
+        }
+
+        // Check argument types
+        let non_rest_param_count = if has_rest {
+            instantiated_params.len() - 1
+        } else {
+            instantiated_params.len()
+        };
+
+        for (i, arg) in new_expr.arguments.iter().enumerate() {
+            if let Some(expr) = arg.as_expression() {
+                let arg_type = self.infer_expression(expr);
+
+                let param_type = if i < non_rest_param_count {
+                    &instantiated_params[i].ty
+                } else if has_rest {
+                    let rest_param = instantiated_params.last().unwrap();
+                    if let Type::Array(elem_type) = &rest_param.ty {
+                        elem_type.as_ref()
+                    } else {
+                        &rest_param.ty
+                    }
+                } else {
+                    break;
+                };
+
+                if !self.is_assignable(&arg_type, param_type) {
+                    self.errors.push(TypeError::argument_not_assignable(
+                        &arg_type,
+                        param_type,
+                        expr.span(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Check an assignment expression for type compatibility.
     fn check_assignment_expression(&mut self, assign: &AssignmentExpression) {
         self.check_expression(&assign.right);
+
+        // Check property existence for member expression targets
+        match &assign.left {
+            AssignmentTarget::StaticMemberExpression(member) => {
+                let object_type = self.infer_expression(&member.object);
+                let prop_name = member.property.name.as_str();
+
+                // Skip checking for `any` and `unknown` types
+                if !matches!(object_type, Type::Any | Type::Unknown) {
+                    if !self.has_property(&object_type, prop_name) {
+                        self.errors.push(TypeError::property_not_found(
+                            prop_name,
+                            &object_type,
+                            member.span,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
 
         // Get the target type
         let target_type = match &assign.left {
@@ -614,6 +874,10 @@ impl<'a> Checker<'a> {
                 // Property must exist on at least one intersection member
                 types.iter().any(|t| self.has_property(t, prop_name))
             }
+            Type::ClassConstructor { static_members, .. } => {
+                // Class constructor has static members accessible via ClassName.member
+                static_members.iter().any(|p| p.name == prop_name)
+            }
             Type::Any | Type::Unknown => true,
             _ => false,
         }
@@ -732,6 +996,90 @@ impl<'a> Checker<'a> {
                 self.errors.push(TypeError::undefined_type(&name, heritage.span));
             }
         }
+    }
+
+    /// Check a class declaration for type errors.
+    ///
+    /// Validates:
+    /// 1. Class correctly implements all interfaces in its implements clause
+    fn check_class_declaration(&mut self, class: &Class) {
+        let class_name = class.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+
+        // Get the class's instance type
+        let class_type = self.symbols.lookup_type(class_name).map(|s| s.ty.clone());
+
+        let class_type = match class_type {
+            Some(ty) => ty,
+            None => return,
+        };
+
+        // Check implements clause
+        for heritage in &class.implements {
+            let interface_name = match &heritage.expression {
+                TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
+                TSTypeName::QualifiedName(qual) => qual.right.name.to_string(),
+                TSTypeName::ThisExpression(_) => continue,
+            };
+
+            // Get the interface type
+            let interface_type = self.symbols.lookup_type(&interface_name).map(|s| s.ty.clone());
+
+            if let Some(interface_type) = interface_type {
+                // Check that class implements all required members
+                if let Type::Object { properties: interface_props, .. } = &interface_type {
+                    let class_props = if let Type::Object { properties, extends, .. } = &class_type {
+                        self.resolve_object_properties(properties, extends)
+                    } else {
+                        vec![]
+                    };
+
+                    let class_prop_names: std::collections::HashSet<&str> =
+                        class_props.iter().map(|p| p.name.as_str()).collect();
+
+                    for interface_prop in interface_props {
+                        // Check if property exists in class
+                        if !interface_prop.optional && !class_prop_names.contains(interface_prop.name.as_str()) {
+                            self.errors.push(TypeError::incorrectly_implements(
+                                class_name,
+                                &interface_name,
+                                class.span,
+                            ));
+                            break; // One error per interface is enough
+                        }
+
+                        // Check type compatibility if property exists
+                        if let Some(class_prop) = class_props.iter().find(|p| p.name == interface_prop.name) {
+                            if !self.is_assignable(&class_prop.ty, &interface_prop.ty) {
+                                self.errors.push(TypeError::incorrectly_implements(
+                                    class_name,
+                                    &interface_name,
+                                    class.span,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Set class context for super call checking
+        let prev_class = self.current_class.take();
+        self.current_class = Some(class_name.to_string());
+
+        // Check class body (methods, etc.)
+        for element in &class.body.body {
+            if let ClassElement::MethodDefinition(method) = element {
+                if let Some(body) = &method.value.body {
+                    for stmt in &body.statements {
+                        self.check_statement(stmt);
+                    }
+                }
+            }
+        }
+
+        // Restore previous context
+        self.current_class = prev_class;
     }
 
     /// Check an object literal against an expected type.
@@ -3047,6 +3395,545 @@ mod tests {
     #[test]
     fn test_combined_optional_and_rest_params() {
         let errors = check("function f(required: string, optional?: number, ...rest: boolean[]) {} f(\"hello\"); f(\"hello\", 42); f(\"hello\", 42, true, false);");
+        assert!(errors.is_empty());
+    }
+
+    // ======================================================================
+    // Milestone 11: Classes
+    // ======================================================================
+
+    #[test]
+    fn test_class_basic_instantiation() {
+        // Basic class with property and instantiation with `new`
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+            }
+            const p = new Point();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_instance_property_access() {
+        // Access properties on class instance
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+            }
+            const p = new Point();
+            const x: number = p.x;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_instance_property_not_found() {
+        // Error when accessing non-existent property
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+            }
+            const p = new Point();
+            const z = p.z;
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339); // Property 'z' does not exist
+    }
+
+    #[test]
+    fn test_class_constructor_with_params() {
+        // Class with constructor that takes parameters
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+                constructor(x: number, y: number) {
+                    this.x = x;
+                    this.y = y;
+                }
+            }
+            const p = new Point(1, 2);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_constructor_wrong_arg_count() {
+        // Error when passing wrong number of args to constructor
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+                constructor(x: number, y: number) {
+                    this.x = x;
+                    this.y = y;
+                }
+            }
+            const p = new Point(1);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2554); // Expected N arguments, but got M
+    }
+
+    #[test]
+    fn test_class_constructor_wrong_arg_type() {
+        // Error when passing wrong type to constructor
+        let errors = check(r#"
+            class Point {
+                x: number;
+                y: number;
+                constructor(x: number, y: number) {
+                    this.x = x;
+                    this.y = y;
+                }
+            }
+            const p = new Point("hello", 2);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345); // Argument of type 'X' not assignable to 'Y'
+    }
+
+    #[test]
+    fn test_class_method_call() {
+        // Call method on class instance
+        let errors = check(r#"
+            class Calculator {
+                add(a: number, b: number): number {
+                    return a + b;
+                }
+            }
+            const calc = new Calculator();
+            const result: number = calc.add(1, 2);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_method_wrong_arg_type() {
+        // Error when calling method with wrong argument type
+        let errors = check(r#"
+            class Calculator {
+                add(a: number, b: number): number {
+                    return a + b;
+                }
+            }
+            const calc = new Calculator();
+            const result = calc.add("hello", 2);
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345);
+    }
+
+    #[test]
+    fn test_class_as_type_annotation() {
+        // Use class name as type annotation
+        let errors = check(r#"
+            class User {
+                name: string;
+            }
+            const user: User = new User();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_type_mismatch() {
+        // Error when assigning wrong type to class-typed variable
+        let errors = check(r#"
+            class User {
+                name: string;
+            }
+            const user: User = { name: "alice" };
+        "#);
+        // Object literal should be assignable to class type (structural typing)
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_extends_basic() {
+        // Derived class inherits properties from base
+        let errors = check(r#"
+            class Animal {
+                name: string;
+            }
+            class Dog extends Animal {
+                breed: string;
+            }
+            const dog = new Dog();
+            const name: string = dog.name;
+            const breed: string = dog.breed;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_extends_method() {
+        // Derived class inherits methods from base
+        let errors = check(r#"
+            class Animal {
+                speak(): string {
+                    return "...";
+                }
+            }
+            class Dog extends Animal {
+                bark(): string {
+                    return "woof";
+                }
+            }
+            const dog = new Dog();
+            const sound1: string = dog.speak();
+            const sound2: string = dog.bark();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_extends_property_not_on_base() {
+        // Error when accessing derived property on base type
+        let errors = check(r#"
+            class Animal {
+                name: string;
+            }
+            class Dog extends Animal {
+                breed: string;
+            }
+            const animal = new Animal();
+            const breed = animal.breed;
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339); // Property does not exist
+    }
+
+    #[test]
+    fn test_class_assignable_to_base() {
+        // Derived class is assignable to base class type
+        let errors = check(r#"
+            class Animal {
+                name: string;
+            }
+            class Dog extends Animal {
+                breed: string;
+            }
+            const dog = new Dog();
+            const animal: Animal = dog;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_class_basic() {
+        // Generic class with type parameter
+        let errors = check(r#"
+            class Box<T> {
+                value: T;
+            }
+            const box = new Box<number>();
+            const val: number = box.value;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_class_constraint_satisfied() {
+        // Generic class with constraint that is satisfied
+        let errors = check(r#"
+            class Container<T extends { length: number }> {
+                item: T;
+            }
+            const c = new Container<string>();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_class_constraint_violated() {
+        // Error when constraint is not satisfied
+        let errors = check(r#"
+            class Container<T extends { length: number }> {
+                item: T;
+            }
+            const c = new Container<number>();
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2344); // Type does not satisfy constraint
+    }
+
+    // ======================================================================
+    // M11: Static Members
+    // ======================================================================
+
+    #[test]
+    fn test_static_property_access() {
+        // Access static property via ClassName.prop
+        let errors = check(r#"
+            class Counter {
+                static count: number;
+            }
+            const c: number = Counter.count;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_static_method_call() {
+        // Call static method via ClassName.method()
+        let errors = check(r#"
+            class Factory {
+                static create(): string {
+                    return "instance";
+                }
+            }
+            const s: string = Factory.create();
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_static_property_not_on_instance() {
+        // Error when accessing static property on instance
+        let errors = check(r#"
+            class Counter {
+                static count: number;
+            }
+            const c = new Counter();
+            const x = c.count;
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339); // Property does not exist
+    }
+
+    #[test]
+    fn test_static_property_not_found() {
+        // Error when accessing non-existent static property
+        let errors = check(r#"
+            class Counter {
+                static count: number;
+            }
+            const x = Counter.nonexistent;
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    // ======================================================================
+    // M11: Class Implements Interface
+    // ======================================================================
+
+    #[test]
+    fn test_class_implements_interface() {
+        // Class correctly implements interface
+        let errors = check(r#"
+            interface Printable {
+                print(): void;
+            }
+            class Document implements Printable {
+                print(): void {}
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_class_implements_missing_method() {
+        // Error when class is missing interface method
+        let errors = check(r#"
+            interface Printable {
+                print(): void;
+            }
+            class Document implements Printable {
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2420); // Class incorrectly implements interface
+    }
+
+    #[test]
+    fn test_class_implements_missing_property() {
+        // Error when class is missing interface property
+        let errors = check(r#"
+            interface Named {
+                name: string;
+            }
+            class Person implements Named {
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2420);
+    }
+
+    #[test]
+    fn test_class_implements_multiple_interfaces() {
+        // Class implements multiple interfaces
+        let errors = check(r#"
+            interface Named {
+                name: string;
+            }
+            interface Aged {
+                age: number;
+            }
+            class Person implements Named, Aged {
+                name: string;
+                age: number;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // ======================================================================
+    // M11: Parameter Properties
+    // ======================================================================
+
+    #[test]
+    fn test_parameter_property_public() {
+        // Parameter property with public modifier creates instance property
+        let errors = check(r#"
+            class Point {
+                constructor(public x: number, public y: number) {}
+            }
+            const p = new Point(1, 2);
+            const x: number = p.x;
+            const y: number = p.y;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_parameter_property_readonly() {
+        // Parameter property with readonly modifier
+        let errors = check(r#"
+            class Point {
+                constructor(readonly x: number) {}
+            }
+            const p = new Point(1);
+            const x: number = p.x;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // ======================================================================
+    // M11: this Type in Methods
+    // ======================================================================
+
+    #[test]
+    fn test_this_type_in_method() {
+        // 'this' in method refers to instance type
+        let errors = check(r#"
+            class Counter {
+                count: number;
+                increment(): void {
+                    this.count = this.count + 1;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_this_property_not_found() {
+        // Error when accessing non-existent property via this
+        let errors = check(r#"
+            class Counter {
+                count: number;
+                increment(): void {
+                    this.nonexistent = 1;
+                }
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    // ======================================================================
+    // M11: super() Calls
+    // ======================================================================
+
+    #[test]
+    fn test_super_call_in_derived_constructor() {
+        // super() call in derived class constructor
+        let errors = check(r#"
+            class Animal {
+                constructor(public name: string) {}
+            }
+            class Dog extends Animal {
+                constructor(name: string, public breed: string) {
+                    super(name);
+                }
+            }
+            const d = new Dog("Rex", "German Shepherd");
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_super_call_wrong_args() {
+        // Error when super() called with wrong argument types
+        let errors = check(r#"
+            class Animal {
+                constructor(public name: string) {}
+            }
+            class Dog extends Animal {
+                constructor() {
+                    super(42);
+                }
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2345); // Argument not assignable
+    }
+
+    // ======================================================================
+    // M11: super Property Access
+    // ======================================================================
+
+    #[test]
+    fn test_super_property_access() {
+        // Access base class method via super
+        let errors = check(r#"
+            class Animal {
+                speak(): string {
+                    return "...";
+                }
+            }
+            class Dog extends Animal {
+                speak(): string {
+                    return super.speak() + " woof";
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    // ======================================================================
+    // M11: Class Expressions
+    // ======================================================================
+
+    #[test]
+    fn test_class_expression() {
+        // Anonymous class expression
+        let errors = check(r#"
+            const MyClass = class {
+                value: number;
+            };
+            const obj = new MyClass();
+            const v: number = obj.value;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_named_class_expression() {
+        // Named class expression
+        let errors = check(r#"
+            const MyClass = class InnerName {
+                value: number;
+            };
+            const obj = new MyClass();
+            const v: number = obj.value;
+        "#);
         assert!(errors.is_empty());
     }
 }

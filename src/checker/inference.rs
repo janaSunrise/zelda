@@ -80,12 +80,18 @@ impl<'a> Checker<'a> {
             Expression::TemplateLiteral(_) => Type::String,
             Expression::TaggedTemplateExpression(_) => Type::Any, // Depends on tag function
 
-            // New expression
+            // New expression returns the class instance type with type arguments
             Expression::NewExpression(new_expr) => {
                 if let Expression::Identifier(ident) = &new_expr.callee {
+                    // Capture explicit type arguments if provided
+                    let type_args = new_expr
+                        .type_arguments
+                        .as_ref()
+                        .map(|args| args.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                        .unwrap_or_default();
                     Type::TypeRef {
                         name: ident.name.to_string(),
-                        type_args: vec![],
+                        type_args,
                     }
                 } else {
                     Type::Any
@@ -100,7 +106,17 @@ impl<'a> Checker<'a> {
 
             // Other
             Expression::YieldExpression(_) => Type::Any,
-            Expression::ThisExpression(_) => Type::Any, // TODO: proper this typing
+            Expression::ThisExpression(_) => {
+                // Return the current class's instance type
+                if let Some(class_name) = &self.current_class {
+                    self.symbols
+                        .lookup_type(class_name)
+                        .map(|s| s.ty.clone())
+                        .unwrap_or(Type::Any)
+                } else {
+                    Type::Any
+                }
+            }
             Expression::ParenthesizedExpression(paren) => self.infer_expression(&paren.expression),
 
             // Sequence expression returns last
@@ -426,11 +442,9 @@ impl<'a> Checker<'a> {
     /// 4. If not found and there's a string index signature, return its value type
     /// 5. Fall back to Any
     pub(super) fn get_property_type(&self, object_type: &Type, prop_name: &str) -> Type {
-        // Resolve TypeRef first
-        let resolved_type = if let Type::TypeRef { name, .. } = object_type {
-            self.symbols
-                .lookup_type(name)
-                .map(|s| s.ty.clone())
+        // Resolve TypeRef first, with type argument instantiation for generics
+        let resolved_type = if let Type::TypeRef { name, type_args } = object_type {
+            self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or_else(|| object_type.clone())
         } else {
             object_type.clone()
@@ -456,6 +470,13 @@ impl<'a> Checker<'a> {
                     if matches!(*idx_sig.key_type, Type::String) {
                         return (*idx_sig.value_type).clone();
                     }
+                }
+                Type::Any
+            }
+            Type::ClassConstructor { static_members, .. } => {
+                // Access static members via ClassName.member
+                if let Some(prop) = static_members.iter().find(|p| p.name == prop_name) {
+                    return prop.ty.clone();
                 }
                 Type::Any
             }

@@ -41,6 +41,14 @@ impl Binder {
             if let Err(err) = self.symbols.define(name, ty, SymbolKind::Variable, span) {
                 self.errors.push(err.into());
             }
+
+            // For class expressions, also register instance type in type namespace
+            if let Some(Expression::ClassExpression(class)) = &declarator.init {
+                let (instance_type, _, _) = type_resolution::build_class_type(class);
+                if let Err(err) = self.symbols.define_type(name, instance_type, SymbolKind::Class, span) {
+                    self.errors.push(err.into());
+                }
+            }
         }
 
         if let Some(init) = &declarator.init {
@@ -148,18 +156,51 @@ impl Binder {
     /// Bind a class declaration.
     ///
     /// Classes exist in both value and type namespaces:
-    /// - Value: the constructor function `Foo`
-    /// - Type: the instance type `Foo`
+    /// - Value: ClassConstructor type (constructor params + static members)
+    /// - Type: the instance type (Object with properties and methods)
     pub(super) fn bind_class_declaration(&mut self, decl: &Class) {
         if let Some(ident) = &decl.id {
             let name = ident.name.as_str();
             let span = ident.span;
-            let ty = Type::type_ref(name, vec![]);
 
-            if let Err(err) = self.symbols.define(name, ty.clone(), SymbolKind::Class, span) {
+            // Build the class type (instance type, constructor type, and static type)
+            let (instance_type, constructor_type, static_type) = type_resolution::build_class_type(decl);
+
+            // Extract type params from instance_type
+            let class_type_params = if let Type::Object { type_params, .. } = &instance_type {
+                type_params.clone()
+            } else {
+                vec![]
+            };
+
+            // Extract static members from static_type
+            let static_members = if let Type::Object { properties, .. } = static_type {
+                properties
+            } else {
+                vec![]
+            };
+
+            // Value namespace: ClassConstructor with constructor params and static members
+            let value_type = if let Some(Type::Function { params, type_params, .. }) = constructor_type {
+                Type::ClassConstructor {
+                    params,
+                    type_params,
+                    static_members,
+                }
+            } else {
+                // No explicit constructor - default constructor with no parameters
+                Type::ClassConstructor {
+                    params: vec![],
+                    type_params: class_type_params,
+                    static_members,
+                }
+            };
+
+            if let Err(err) = self.symbols.define(name, value_type, SymbolKind::Class, span) {
                 self.errors.push(err.into());
             }
-            if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::Class, span) {
+            // Type namespace: the instance type (Object with properties)
+            if let Err(err) = self.symbols.define_type(name, instance_type, SymbolKind::Class, span) {
                 self.errors.push(err.into());
             }
         }

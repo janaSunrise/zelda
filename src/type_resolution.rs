@@ -395,6 +395,173 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
     }
 }
 
+/// Build an object type from a class declaration.
+///
+/// Returns three types:
+/// - instance_type: The type of instances (properties and methods)
+/// - constructor_type: The type of the constructor function
+/// - static_type: Object type with static properties and methods
+pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
+    let mut properties = Vec::new();
+    let mut static_properties = Vec::new();
+    let mut constructor_type = None;
+
+    // Extract type parameters for generic classes
+    let type_params: Vec<TypeParam> = decl
+        .type_parameters
+        .as_ref()
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|p| {
+                    let mut tp = TypeParam::new(p.name.name.to_string());
+                    if let Some(constraint) = &p.constraint {
+                        tp = tp.with_constraint(resolve_ts_type(constraint));
+                    }
+                    if let Some(default) = &p.default {
+                        tp = tp.with_default(resolve_ts_type(default));
+                    }
+                    tp
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Build extends list from super class
+    let extends: Vec<Type> = if let Some(super_expr) = &decl.super_class {
+        if let Expression::Identifier(ident) = super_expr {
+            let type_args: Vec<Type> = decl
+                .super_type_arguments
+                .as_ref()
+                .map(|args| args.params.iter().map(resolve_ts_type).collect())
+                .unwrap_or_default();
+            vec![Type::TypeRef {
+                name: ident.name.to_string(),
+                type_args,
+            }]
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    // Process class elements
+    for element in &decl.body.body {
+        match element {
+            ClassElement::PropertyDefinition(prop) => {
+                if let Some(name) = get_property_key_name(&prop.key) {
+                    let ty = prop
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| resolve_ts_type(&ann.type_annotation))
+                        .unwrap_or(Type::Any);
+                    let mut property = Property::new(name, ty);
+                    if prop.optional {
+                        property = property.optional();
+                    }
+                    if prop.readonly {
+                        property = property.readonly();
+                    }
+                    // Separate static vs instance properties
+                    if prop.r#static {
+                        static_properties.push(property);
+                    } else {
+                        properties.push(property);
+                    }
+                }
+            }
+            ClassElement::MethodDefinition(method) => {
+                // Handle constructor specially
+                if method.kind == MethodDefinitionKind::Constructor {
+                    let func = &method.value;
+                    let params: Vec<Param> = func
+                        .params
+                        .items
+                        .iter()
+                        .map(|p| {
+                            let name = match &p.pattern {
+                                BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                                _ => "_".to_string(),
+                            };
+                            let ty = p
+                                .type_annotation
+                                .as_ref()
+                                .map(|ann| resolve_ts_type(&ann.type_annotation))
+                                .unwrap_or(Type::Any);
+                            let mut param = Param::new(name, ty);
+                            if p.optional {
+                                param = param.optional();
+                            }
+                            param
+                        })
+                        .collect();
+
+                    // Handle parameter properties (public/private/protected/readonly on params)
+                    for p in &func.params.items {
+                        // Parameter property if it has accessibility modifier or readonly
+                        let is_param_property = p.accessibility.is_some() || p.readonly;
+                        if is_param_property {
+                            if let BindingPattern::BindingIdentifier(ident) = &p.pattern {
+                                let name = ident.name.to_string();
+                                let ty = p
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(|ann| resolve_ts_type(&ann.type_annotation))
+                                    .unwrap_or(Type::Any);
+                                let mut property = Property::new(name, ty);
+                                if p.readonly {
+                                    property = property.readonly();
+                                }
+                                properties.push(property);
+                            }
+                        }
+                    }
+
+                    constructor_type = Some(Type::Function {
+                        params,
+                        return_type: Box::new(Type::Void), // Constructor's "return" is the instance
+                        type_params: type_params.clone(), // Use class's type parameters
+                    });
+                    continue;
+                }
+
+                if let Some(name) = get_property_key_name(&method.key) {
+                    let func_type = build_function_type(&method.value);
+                    let mut property = Property::new(name, func_type);
+                    if method.optional {
+                        property = property.optional();
+                    }
+                    // Separate static vs instance methods
+                    if method.r#static {
+                        static_properties.push(property);
+                    } else {
+                        properties.push(property);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let instance_type = Type::Object {
+        properties,
+        index_signature: None,
+        extends,
+        type_params,
+    };
+
+    let static_type = Type::Object {
+        properties: static_properties,
+        index_signature: None,
+        extends: vec![],
+        type_params: vec![],
+    };
+
+    (instance_type, constructor_type, static_type)
+}
+
 /// Widen literal types to their base types.
 ///
 /// Used for `let` and `var` declarations where the type should be mutable:

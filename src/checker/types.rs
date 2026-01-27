@@ -203,6 +203,51 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            Type::ClassConstructor { params, type_params, static_members } => {
+                // Similar to Function, don't substitute the constructor's own type parameters
+                let bound_names: std::collections::HashSet<_> = type_params.iter().map(|tp| tp.name.clone()).collect();
+                let filtered_subs: HashMap<String, Type> = substitutions
+                    .iter()
+                    .filter(|(k, _)| !bound_names.contains(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                let new_params: Vec<Param> = params
+                    .iter()
+                    .map(|p| Param {
+                        name: p.name.clone(),
+                        ty: self.substitute_type_params(&p.ty, &filtered_subs),
+                        optional: p.optional,
+                        rest: p.rest,
+                    })
+                    .collect();
+
+                let new_type_params: Vec<TypeParam> = type_params
+                    .iter()
+                    .map(|tp| TypeParam {
+                        name: tp.name.clone(),
+                        constraint: tp.constraint.as_ref().map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
+                        default: tp.default.as_ref().map(|d| Box::new(self.substitute_type_params(d, &filtered_subs))),
+                    })
+                    .collect();
+
+                let new_static_members: Vec<Property> = static_members
+                    .iter()
+                    .map(|p| Property {
+                        name: p.name.clone(),
+                        ty: self.substitute_type_params(&p.ty, &filtered_subs),
+                        optional: p.optional,
+                        readonly: p.readonly,
+                    })
+                    .collect();
+
+                Type::ClassConstructor {
+                    params: new_params,
+                    type_params: new_type_params,
+                    static_members: new_static_members,
+                }
+            }
+
             // Primitives and literals: no substitution needed
             Type::String
             | Type::Number

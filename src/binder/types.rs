@@ -107,6 +107,56 @@ impl Binder {
                     _ => Type::Any,
                 }
             }
+            // New expression returns the class instance type with type arguments
+            Expression::NewExpression(new_expr) => {
+                if let Expression::Identifier(ident) = &new_expr.callee {
+                    // Capture explicit type arguments if provided
+                    let type_args = new_expr
+                        .type_arguments
+                        .as_ref()
+                        .map(|args| args.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                        .unwrap_or_default();
+                    Type::TypeRef {
+                        name: ident.name.to_string(),
+                        type_args,
+                    }
+                } else {
+                    Type::Any
+                }
+            }
+            // Class expression returns ClassConstructor type
+            Expression::ClassExpression(class) => {
+                let (instance_type, constructor_type, static_type) = type_resolution::build_class_type(class);
+
+                // Extract type params from instance_type
+                let class_type_params = if let Type::Object { type_params, .. } = &instance_type {
+                    type_params.clone()
+                } else {
+                    vec![]
+                };
+
+                // Extract static members from static_type
+                let static_members = if let Type::Object { properties, .. } = static_type {
+                    properties
+                } else {
+                    vec![]
+                };
+
+                // Return ClassConstructor type
+                if let Some(Type::Function { params, type_params, .. }) = constructor_type {
+                    Type::ClassConstructor {
+                        params,
+                        type_params,
+                        static_members,
+                    }
+                } else {
+                    Type::ClassConstructor {
+                        params: vec![],
+                        type_params: class_type_params,
+                        static_members,
+                    }
+                }
+            }
             _ => Type::Any,
         }
     }
