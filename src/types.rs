@@ -208,6 +208,74 @@ impl Type {
             Type::String | Type::Number | Type::Boolean | Type::Null | Type::Undefined | Type::Void
         )
     }
+
+    /// Simplify a type by applying normalization rules.
+    ///
+    /// - `T | never` -> `T` (never is identity for union)
+    /// - `T & never` -> `never` (never absorbs intersection)
+    /// - Single-element union/intersection -> unwrap
+    /// - Empty union -> `never`
+    /// - Flatten nested unions/intersections
+    pub fn simplify(self) -> Self {
+        match self {
+            Type::Union(types) => {
+                // Flatten nested unions and filter out never
+                let mut simplified: Vec<Type> = types
+                    .into_iter()
+                    .flat_map(|t| {
+                        let t = t.simplify();
+                        if let Type::Union(inner) = t {
+                            inner
+                        } else {
+                            vec![t]
+                        }
+                    })
+                    .filter(|t| !matches!(t, Type::Never))
+                    .collect();
+
+                // Deduplicate
+                simplified.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                simplified.dedup();
+
+                match simplified.len() {
+                    0 => Type::Never,
+                    1 => simplified.into_iter().next().unwrap(),
+                    _ => Type::Union(simplified),
+                }
+            }
+            Type::Intersection(types) => {
+                // If any member is never, the whole intersection is never
+                let simplified: Vec<Type> = types.into_iter().map(|t| t.simplify()).collect();
+
+                if simplified.iter().any(|t| matches!(t, Type::Never)) {
+                    return Type::Never;
+                }
+
+                // Flatten nested intersections
+                let mut flattened: Vec<Type> = simplified
+                    .into_iter()
+                    .flat_map(|t| {
+                        if let Type::Intersection(inner) = t {
+                            inner
+                        } else {
+                            vec![t]
+                        }
+                    })
+                    .collect();
+
+                // Deduplicate
+                flattened.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                flattened.dedup();
+
+                match flattened.len() {
+                    0 => Type::Unknown, // Empty intersection is unknown (top type)
+                    1 => flattened.into_iter().next().unwrap(),
+                    _ => Type::Intersection(flattened),
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for Type {
@@ -617,5 +685,60 @@ mod tests {
             }),
         };
         assert_eq!(obj.to_string(), "{ [key: string]: number }");
+    }
+
+    #[test]
+    fn test_simplify_union_with_never() {
+        let union = Type::Union(vec![Type::String, Type::Never]);
+        assert_eq!(union.simplify(), Type::String);
+    }
+
+    #[test]
+    fn test_simplify_union_all_never() {
+        let union = Type::Union(vec![Type::Never, Type::Never]);
+        assert_eq!(union.simplify(), Type::Never);
+    }
+
+    #[test]
+    fn test_simplify_union_single_element() {
+        let union = Type::Union(vec![Type::String]);
+        assert_eq!(union.simplify(), Type::String);
+    }
+
+    #[test]
+    fn test_simplify_intersection_with_never() {
+        let intersection = Type::Intersection(vec![Type::String, Type::Never]);
+        assert_eq!(intersection.simplify(), Type::Never);
+    }
+
+    #[test]
+    fn test_simplify_intersection_single_element() {
+        let intersection = Type::Intersection(vec![Type::String]);
+        assert_eq!(intersection.simplify(), Type::String);
+    }
+
+    #[test]
+    fn test_simplify_nested_union() {
+        let nested = Type::Union(vec![
+            Type::String,
+            Type::Union(vec![Type::Number, Type::Boolean]),
+        ]);
+        let simplified = nested.simplify();
+        if let Type::Union(types) = simplified {
+            assert_eq!(types.len(), 3);
+        } else {
+            panic!("Expected Union");
+        }
+    }
+
+    #[test]
+    fn test_simplify_deduplicates() {
+        let union = Type::Union(vec![Type::String, Type::String, Type::Number]);
+        let simplified = union.simplify();
+        if let Type::Union(types) = simplified {
+            assert_eq!(types.len(), 2);
+        } else {
+            panic!("Expected Union");
+        }
     }
 }

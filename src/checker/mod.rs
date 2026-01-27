@@ -2021,4 +2021,134 @@ mod tests {
         "#);
         assert!(errors.is_empty());
     }
+
+    #[test]
+    fn test_union_property_access_common() {
+        let errors = check(r#"
+            interface A { x: number; y: string; }
+            interface B { x: number; z: boolean; }
+            function f(val: A | B): number {
+                return val.x;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_property_access_not_common() {
+        let errors = check(r#"
+            interface A { x: number; y: string; }
+            interface B { x: number; z: boolean; }
+            function f(val: A | B): string {
+                return val.y;
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2339);
+    }
+
+    #[test]
+    fn test_intersection_property_access() {
+        let errors = check(r#"
+            interface A { x: number; }
+            interface B { y: string; }
+            function f(val: A & B) {
+                const a: number = val.x;
+                const b: string = val.y;
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_typeof_narrowing_in_if() {
+        let errors = check(r#"
+            function f(x: string | number) {
+                if (typeof x === "string") {
+                    const s: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_typeof_narrowing_to_number() {
+        let errors = check(r#"
+            function f(x: string | number) {
+                if (typeof x === "number") {
+                    const n: number = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_null_narrowing() {
+        let errors = check(r#"
+            function f(x: string | null) {
+                if (x !== null) {
+                    const s: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_undefined_narrowing() {
+        let errors = check(r#"
+            function f(x: string | undefined) {
+                if (x !== undefined) {
+                    const s: string = x;
+                }
+            }
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_assignment_valid() {
+        let errors = check(r#"
+            let x: string | number = "hello";
+            x = 42;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_assignment_invalid() {
+        let errors = check("const x: string | number = true;");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2322);
+    }
+
+    #[test]
+    fn test_intersection_object_literal() {
+        let errors = check(r#"
+            type Named = { name: string };
+            type Aged = { age: number };
+            const person: Named & Aged = { name: "Alice", age: 30 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_of_literals() {
+        let errors = check(r#"
+            type Direction = "left" | "right" | "up" | "down";
+            const dir: Direction = "left";
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_union_of_literals_invalid() {
+        let errors = check(r#"
+            type Direction = "left" | "right" | "up" | "down";
+            const dir: Direction = "diagonal";
+        "#);
+        assert_eq!(errors.len(), 1);
+    }
 }
