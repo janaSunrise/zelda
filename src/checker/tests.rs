@@ -2538,3 +2538,39 @@ fn test_named_class_expression() {
     "#);
     assert!(errors.is_empty());
 }
+
+// ======================================================================
+// M14: Error Reporting - Severity and Related Spans
+// ======================================================================
+
+#[test]
+fn test_error_severity_default_is_error() {
+    use super::Severity;
+
+    let error = TypeError::new("test message", oxc_span::Span::new(0, 10), 1234);
+    assert!(error.is_error());
+    assert!(!error.is_warning());
+    assert_eq!(error.severity, Severity::Error);
+}
+
+#[test]
+fn test_warning_severity() {
+    use super::Severity;
+
+    let warning = TypeError::warning("test warning", oxc_span::Span::new(0, 10), 5678);
+    assert!(!warning.is_error());
+    assert!(warning.is_warning());
+    assert_eq!(warning.severity, Severity::Warning);
+}
+
+#[test]
+fn test_related_spans() {
+    let error = TypeError::new("main error", oxc_span::Span::new(0, 10), 1234)
+        .with_related("related context", oxc_span::Span::new(20, 30))
+        .with_related("another related", oxc_span::Span::new(40, 50));
+
+    assert_eq!(error.related.len(), 2);
+    assert_eq!(error.related[0].message, "related context");
+    assert_eq!(error.related[0].span.start, 20);
+    assert_eq!(error.related[1].message, "another related");
+}

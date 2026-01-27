@@ -26,7 +26,7 @@ pub enum ScopeKind {
 /// code. They have no runtime impact.
 ///
 /// This allows `interface User {}` and `const User = {}` to coexist.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scope {
     pub id: ScopeId,
     pub kind: ScopeKind,
@@ -105,7 +105,7 @@ pub struct UndefinedSymbolError {
 ///
 /// Scopes form a tree via parent pointers. Name lookup walks up the tree
 /// from the current scope until a match is found (lexical scoping).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     pub symbols: Vec<Symbol>,
     pub scopes: Vec<Scope>,

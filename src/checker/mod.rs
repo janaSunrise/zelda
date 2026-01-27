@@ -24,11 +24,30 @@ use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
 use crate::types::Type;
 
+/// Severity level of a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Errors prevent successful compilation.
+    Error,
+    /// Warnings indicate potential issues but don't block compilation.
+    Warning,
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeError {
     pub message: String,
     pub span: Span,
     pub code: u32,
+    pub severity: Severity,
+    /// Related spans that provide additional context.
+    pub related: Vec<RelatedSpan>,
+}
+
+/// A related span provides additional context for an error.
+#[derive(Debug, Clone)]
+pub struct RelatedSpan {
+    pub message: String,
+    pub span: Span,
 }
 
 impl TypeError {
@@ -37,7 +56,39 @@ impl TypeError {
             message: message.into(),
             span,
             code,
+            severity: Severity::Error,
+            related: Vec::new(),
         }
+    }
+
+    /// Create a warning instead of an error.
+    pub fn warning(message: impl Into<String>, span: Span, code: u32) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            code,
+            severity: Severity::Warning,
+            related: Vec::new(),
+        }
+    }
+
+    /// Add a related span to this error for additional context.
+    pub fn with_related(mut self, message: impl Into<String>, span: Span) -> Self {
+        self.related.push(RelatedSpan {
+            message: message.into(),
+            span,
+        });
+        self
+    }
+
+    /// Check if this is an error (not a warning).
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
+    }
+
+    /// Check if this is a warning.
+    pub fn is_warning(&self) -> bool {
+        self.severity == Severity::Warning
     }
 
     pub fn not_assignable(source: &Type, target: &Type, span: Span) -> Self {

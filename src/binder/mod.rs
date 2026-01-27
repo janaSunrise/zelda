@@ -6,7 +6,7 @@ mod types;
 
 use oxc_ast::ast::*;
 
-use crate::symbols::{DuplicateSymbolError, ScopeKind, SymbolTable, UndefinedSymbolError};
+use crate::symbols::{DuplicateSymbolError, ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError};
 
 #[derive(Debug, Clone)]
 pub enum BindingError {
@@ -48,13 +48,25 @@ impl Binder {
         }
     }
 
+    /// Create a binder with a pre-populated symbol table (e.g., from lib.d.ts).
+    pub fn with_symbols(symbols: SymbolTable) -> Self {
+        Self {
+            symbols,
+            errors: Vec::new(),
+        }
+    }
+
+    /// Consume the binder and return the symbol table.
+    pub fn into_symbols(self) -> SymbolTable {
+        self.symbols
+    }
+
     pub fn bind_program(&mut self, program: &Program) {
         for stmt in &program.body {
             self.bind_statement(stmt);
         }
     }
 
-    /// Dispatch to the appropriate binding method based on statement type.
     fn bind_statement(&mut self, stmt: &Statement) {
         match stmt {
             // Declarations
@@ -63,6 +75,7 @@ impl Binder {
             Statement::ClassDeclaration(decl) => self.bind_class_declaration(decl),
             Statement::TSInterfaceDeclaration(decl) => self.bind_interface_declaration(decl),
             Statement::TSTypeAliasDeclaration(decl) => self.bind_type_alias_declaration(decl),
+            Statement::TSModuleDeclaration(decl) => self.bind_ts_module_declaration(decl),
 
             // Control flow (creates scopes, checks expressions)
             Statement::BlockStatement(block) => self.bind_block_statement(block),
@@ -85,6 +98,20 @@ impl Binder {
             Statement::ExpressionStatement(expr_stmt) => {
                 self.bind_expression(&expr_stmt.expression);
             }
+
+            // Export declarations - bind the declaration inside
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    self.bind_declaration(decl);
+                }
+                // Re-export specifiers (export { x from "./other" }) are handled at project level
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                self.bind_export_default_declaration(export);
+            }
+
+            // Import declarations are handled at project level
+            Statement::ImportDeclaration(_) => {}
 
             _ => {}
         }
@@ -244,6 +271,88 @@ impl Binder {
                 self.bind_statement(stmt);
             }
             self.symbols.pop_scope();
+        }
+    }
+
+    /// Bind a declaration (used for export declarations).
+    fn bind_declaration(&mut self, decl: &Declaration) {
+        match decl {
+            Declaration::VariableDeclaration(var_decl) => self.bind_variable_declaration(var_decl),
+            Declaration::FunctionDeclaration(func) => self.bind_function_declaration(func),
+            Declaration::ClassDeclaration(class) => self.bind_class_declaration(class),
+            Declaration::TSInterfaceDeclaration(iface) => self.bind_interface_declaration(iface),
+            Declaration::TSTypeAliasDeclaration(alias) => self.bind_type_alias_declaration(alias),
+            Declaration::TSModuleDeclaration(module) => self.bind_ts_module_declaration(module),
+            _ => {}
+        }
+    }
+
+    /// Bind a `declare module "name"` or `namespace Name { }` declaration.
+    /// Ambient modules provide types for external packages without implementation.
+    fn bind_ts_module_declaration(&mut self, decl: &oxc_ast::ast::TSModuleDeclaration) {
+        // Get the module name
+        let name = match &decl.id {
+            oxc_ast::ast::TSModuleDeclarationName::Identifier(ident) => ident.name.to_string(),
+            oxc_ast::ast::TSModuleDeclarationName::StringLiteral(lit) => lit.value.to_string(),
+        };
+
+        // For now, we create an empty module type. In a full implementation,
+        // we'd process the body and collect exports.
+        if let Some(body) = &decl.body {
+            match body {
+                oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
+                    // Process statements in the module block
+                    self.symbols.push_scope(ScopeKind::Block);
+                    for stmt in &block.body {
+                        self.bind_statement(stmt);
+                    }
+                    self.symbols.pop_scope();
+                }
+                oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
+                    // Nested module: `module A.B { }`
+                    self.bind_ts_module_declaration(nested);
+                }
+            }
+        }
+
+        // Register the module name in the type namespace
+        let span = match &decl.id {
+            oxc_ast::ast::TSModuleDeclarationName::Identifier(ident) => ident.span,
+            oxc_ast::ast::TSModuleDeclarationName::StringLiteral(lit) => lit.span,
+        };
+
+        // Modules are registered as empty objects for now
+        let _ = self.symbols.define_type(
+            name,
+            crate::types::Type::Object {
+                properties: vec![],
+                index_signature: None,
+                extends: vec![],
+                type_params: vec![],
+            },
+            SymbolKind::TypeAlias,
+            span,
+        );
+    }
+
+    /// Bind an export default declaration.
+    fn bind_export_default_declaration(&mut self, export: &ExportDefaultDeclaration) {
+        match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                self.bind_function_declaration(func);
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                self.bind_class_declaration(class);
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
+                self.bind_interface_declaration(iface);
+            }
+            _ => {
+                // Expression exports (export default expr) - just check the expression
+                if let Some(expr) = export.declaration.as_expression() {
+                    self.bind_expression(expr);
+                }
+            }
         }
     }
 }
