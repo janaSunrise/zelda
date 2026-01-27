@@ -30,6 +30,9 @@ pub enum Type {
     Object {
         properties: Vec<Property>,
         index_signature: Option<IndexSignature>,
+        /// Base interfaces/types this interface extends (stored as TypeRefs).
+        /// Empty for plain object types. Resolved during type checking.
+        extends: Vec<Type>,
     },
     Function {
         params: Vec<Param>,
@@ -73,9 +76,10 @@ impl Hash for Type {
             Type::Tuple(types) => types.hash(state),
             Type::Union(types) => types.hash(state),
             Type::Intersection(types) => types.hash(state),
-            Type::Object { properties, index_signature } => {
+            Type::Object { properties, index_signature, extends } => {
                 properties.hash(state);
                 index_signature.hash(state);
+                extends.hash(state);
             }
             Type::Function { params, return_type, type_params } => {
                 params.hash(state);
@@ -134,9 +138,9 @@ impl Ord for Type {
             (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
             (Type::Union(a), Type::Union(b)) => a.cmp(b),
             (Type::Intersection(a), Type::Intersection(b)) => a.cmp(b),
-            (Type::Object { properties: pa, index_signature: ia },
-             Type::Object { properties: pb, index_signature: ib }) => {
-                pa.cmp(pb).then_with(|| ia.cmp(ib))
+            (Type::Object { properties: pa, index_signature: ia, extends: ea },
+             Type::Object { properties: pb, index_signature: ib, extends: eb }) => {
+                pa.cmp(pb).then_with(|| ia.cmp(ib)).then_with(|| ea.cmp(eb))
             }
             (Type::Function { params: pa, return_type: ra, type_params: ta },
              Type::Function { params: pb, return_type: rb, type_params: tb }) => {
@@ -160,6 +164,16 @@ impl Type {
         Self::Object {
             properties,
             index_signature: None,
+            extends: vec![],
+        }
+    }
+
+    /// Create an object type with inheritance (for interfaces with extends).
+    pub fn object_with_extends(properties: Vec<Property>, extends: Vec<Type>) -> Self {
+        Self::Object {
+            properties,
+            index_signature: None,
+            extends,
         }
     }
 
@@ -338,6 +352,7 @@ impl fmt::Display for Type {
             Type::Object {
                 properties,
                 index_signature,
+                extends: _, // Not shown, resolved at type-check time
             } => {
                 write!(f, "{{ ")?;
                 let mut first = true;
@@ -683,6 +698,7 @@ mod tests {
                 key_type: Box::new(Type::String),
                 value_type: Box::new(Type::Number),
             }),
+            extends: vec![],
         };
         assert_eq!(obj.to_string(), "{ [key: string]: number }");
     }

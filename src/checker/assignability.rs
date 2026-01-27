@@ -7,7 +7,7 @@
 //! - Object structural compatibility
 //! - Function variance (covariant return, contravariant params)
 
-use crate::types::Type;
+use crate::types::{Property, Type};
 
 use super::Checker;
 
@@ -15,6 +15,45 @@ impl<'a> Checker<'a> {
     /// Resolve a TypeRef to its underlying type by looking it up in the type namespace.
     fn resolve_type_ref(&self, name: &str) -> Option<Type> {
         self.symbols.lookup_type(name).map(|s| s.ty.clone())
+    }
+
+    /// Resolve all properties of an object type, including inherited properties from extends.
+    /// Properties in derived interfaces override those in base interfaces.
+    pub(super) fn resolve_object_properties(
+        &self,
+        own_props: &[Property],
+        extends: &[Type],
+    ) -> Vec<Property> {
+        let mut all_props: Vec<Property> = Vec::new();
+
+        // Collect properties from base types first
+        for base_type in extends {
+            if let Type::TypeRef { name, .. } = base_type {
+                if let Some(resolved) = self.resolve_type_ref(name) {
+                    if let Type::Object {
+                        properties,
+                        extends: base_extends,
+                        ..
+                    } = resolved
+                    {
+                        let base_props = self.resolve_object_properties(&properties, &base_extends);
+                        for prop in base_props {
+                            if !all_props.iter().any(|p| p.name == prop.name) {
+                                all_props.push(prop);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Own properties override inherited ones
+        for prop in own_props {
+            all_props.retain(|p| p.name != prop.name);
+            all_props.push(prop.clone());
+        }
+
+        all_props
     }
 
     /// Check if source type is assignable to target type.
@@ -138,17 +177,21 @@ impl<'a> Checker<'a> {
             Type::Object {
                 properties: source_props,
                 index_signature: source_idx,
+                extends: source_extends,
             },
             Type::Object {
                 properties: target_props,
                 index_signature: target_idx,
+                extends: target_extends,
             },
         ) = (source, target)
         {
+            let resolved_source_props = self.resolve_object_properties(source_props, source_extends);
+            let resolved_target_props = self.resolve_object_properties(target_props, target_extends);
             return self.is_object_assignable(
-                source_props,
+                &resolved_source_props,
                 source_idx.as_ref(),
-                target_props,
+                &resolved_target_props,
                 target_idx.as_ref(),
             );
         }

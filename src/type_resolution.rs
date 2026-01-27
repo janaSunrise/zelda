@@ -175,6 +175,7 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
     Type::Object {
         properties,
         index_signature,
+        extends: vec![],
     }
 }
 
@@ -272,6 +273,23 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
     let mut properties = Vec::new();
     let mut index_signature = None;
 
+    let extends: Vec<Type> = decl
+        .extends
+        .iter()
+        .map(|heritage| {
+            let name = match &heritage.expression {
+                Expression::Identifier(ident) => ident.name.to_string(),
+                _ => return Type::Any,
+            };
+            let type_args: Vec<Type> = heritage
+                .type_arguments
+                .as_ref()
+                .map(|args| args.params.iter().map(resolve_ts_type).collect())
+                .unwrap_or_default();
+            Type::TypeRef { name, type_args }
+        })
+        .collect();
+
     for member in &decl.body.body {
         match member {
             TSSignature::TSPropertySignature(prop) => {
@@ -329,6 +347,7 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
     Type::Object {
         properties,
         index_signature,
+        extends,
     }
 }
 
@@ -351,6 +370,7 @@ pub fn widen_type(ty: Type) -> Type {
         Type::Object {
             properties,
             index_signature,
+            extends,
         } => Type::Object {
             properties: properties
                 .into_iter()
@@ -360,6 +380,7 @@ pub fn widen_type(ty: Type) -> Type {
                 })
                 .collect(),
             index_signature,
+            extends,
         },
         other => other,
     }

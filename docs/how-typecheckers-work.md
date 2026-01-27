@@ -111,8 +111,8 @@ interface User { name: string }  // User in type namespace
 const User = { create: () => {} }  // User in value namespace
 
 const user: User = User.create();  // both exist simultaneously
-//       ^^^^   ^^^^
-//       type   value
+//          ^^^^   ^^^^
+//          type   value
 ```
 
 This is why you can have an interface and a variable with the same name. Classes are special — they exist in both namespaces (the class itself is a value, and instances have a type).

@@ -136,6 +136,7 @@ impl Binder {
         Type::Object {
             properties,
             index_signature: None,
+            extends: vec![],
         }
     }
 

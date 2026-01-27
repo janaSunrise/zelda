@@ -222,6 +222,7 @@ impl<'a> Checker<'a> {
         Type::Object {
             properties,
             index_signature: None,
+            extends: vec![],
         }
     }
 
@@ -406,12 +407,11 @@ impl<'a> Checker<'a> {
             Type::Object {
                 properties,
                 index_signature,
+                ..
             } => {
-                // First, look for an explicit property
                 if let Some(prop) = properties.iter().find(|p| p.name == prop_name) {
                     return prop.ty.clone();
                 }
-                // Fall back to index signature if present (string key)
                 if let Some(idx_sig) = index_signature {
                     if matches!(*idx_sig.key_type, Type::String) {
                         return (*idx_sig.value_type).clone();
@@ -419,8 +419,7 @@ impl<'a> Checker<'a> {
                 }
                 Type::Any
             }
-            Type::Any => Type::Any,
-            Type::Unknown => Type::Any, // Property access on unknown is unsafe
+            Type::Any | Type::Unknown => Type::Any,
             _ => Type::Any,
         }
     }

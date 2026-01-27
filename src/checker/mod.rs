@@ -89,6 +89,14 @@ impl TypeError {
             errors::EXCESS_PROPERTY.code,
         )
     }
+
+    pub fn undefined_type(name: &str, span: Span) -> Self {
+        Self::new(
+            errors::CANNOT_FIND_NAME.format(&[name]),
+            span,
+            errors::CANNOT_FIND_NAME.code,
+        )
+    }
 }
 
 /// The type checker verifies type correctness of the program.
@@ -228,6 +236,10 @@ impl<'a> Checker<'a> {
 
             Statement::ThrowStatement(throw_stmt) => {
                 self.check_expression(&throw_stmt.argument);
+            }
+
+            Statement::TSInterfaceDeclaration(decl) => {
+                self.check_interface_declaration(decl);
             }
 
             _ => {}
@@ -462,12 +474,11 @@ impl<'a> Checker<'a> {
         let ty = resolved.as_ref().unwrap_or(ty);
 
         match ty {
-            Type::Object { properties, index_signature } => {
-                // Check direct properties
-                if properties.iter().any(|p| p.name == prop_name) {
+            Type::Object { properties, index_signature, extends } => {
+                let all_props = self.resolve_object_properties(properties, extends);
+                if all_props.iter().any(|p| p.name == prop_name) {
                     return true;
                 }
-                // Check index signature (string index allows any property)
                 if index_signature.is_some() {
                     return true;
                 }
@@ -603,6 +614,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check an interface declaration.
+    /// Validates that all extended interfaces exist in the type namespace.
+    fn check_interface_declaration(&mut self, decl: &TSInterfaceDeclaration) {
+        for heritage in &decl.extends {
+            let name = match &heritage.expression {
+                Expression::Identifier(ident) => ident.name.to_string(),
+                _ => continue,
+            };
+            if self.symbols.lookup_type(&name).is_none() {
+                self.errors.push(TypeError::undefined_type(&name, heritage.span));
+            }
+        }
+    }
+
     /// Check an object literal against an expected type.
     ///
     /// This performs:
@@ -628,9 +653,9 @@ impl<'a> Checker<'a> {
         let Type::Object {
             properties: expected_props,
             index_signature,
+            extends,
         } = &resolved
         else {
-            // Not an object type, fall back to normal assignability
             let source = self.infer_object_literal(obj);
             if !self.is_assignable(&source, expected) {
                 self.errors
@@ -638,6 +663,8 @@ impl<'a> Checker<'a> {
             }
             return;
         };
+
+        let expected_props = self.resolve_object_properties(expected_props, extends);
 
         // Collect properties from the object literal
         let mut literal_props: Vec<(String, Span)> = Vec::new();
@@ -671,7 +698,7 @@ impl<'a> Checker<'a> {
 
         // Check for missing required properties
         let source_type = self.infer_object_literal(obj);
-        for expected_prop in expected_props {
+        for expected_prop in &expected_props {
             if !expected_prop.optional && !literal_prop_names.contains(expected_prop.name.as_str()) {
                 self.errors.push(TypeError::missing_property(
                     &expected_prop.name,
@@ -2200,6 +2227,240 @@ mod tests {
             function f(x: { a: number }) {}
             const obj = { a: 1, b: 2 };
             f(obj);
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_extends_basic() {
+        // interface B extends A should inherit A's properties
+        let errors = check(r#"
+            interface Animal {
+                name: string;
+            }
+            interface Dog extends Animal {
+                breed: string;
+            }
+            const dog: Dog = { name: "Rex", breed: "German Shepherd" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_extends_missing_base_property() {
+        // Must have properties from base interface
+        let errors = check(r#"
+            interface Animal {
+                name: string;
+            }
+            interface Dog extends Animal {
+                breed: string;
+            }
+            const dog: Dog = { breed: "Labrador" };
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2741); // Missing property 'name'
+    }
+
+    #[test]
+    fn test_interface_extends_missing_derived_property() {
+        // Must have properties from derived interface too
+        let errors = check(r#"
+            interface Animal {
+                name: string;
+            }
+            interface Dog extends Animal {
+                breed: string;
+            }
+            const dog: Dog = { name: "Rex" };
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2741); // Missing property 'breed'
+    }
+
+    #[test]
+    fn test_interface_extends_multiple() {
+        // interface C extends A, B gets properties from both
+        let errors = check(r#"
+            interface Named {
+                name: string;
+            }
+            interface Aged {
+                age: number;
+            }
+            interface Person extends Named, Aged {
+                email: string;
+            }
+            const person: Person = { name: "Alice", age: 30, email: "alice@example.com" };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_extends_multiple_missing() {
+        // Must have properties from all extended interfaces
+        let errors = check(r#"
+            interface Named {
+                name: string;
+            }
+            interface Aged {
+                age: number;
+            }
+            interface Person extends Named, Aged {
+                email: string;
+            }
+            const person: Person = { name: "Alice", email: "alice@example.com" };
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2741); // Missing 'age'
+    }
+
+    #[test]
+    fn test_interface_extends_chain() {
+        // A extends B extends C - should get all properties
+        let errors = check(r#"
+            interface A {
+                a: number;
+            }
+            interface B extends A {
+                b: string;
+            }
+            interface C extends B {
+                c: boolean;
+            }
+            const obj: C = { a: 1, b: "hello", c: true };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_extends_nonexistent() {
+        // Extending a non-existent interface should error
+        let errors = check(r#"
+            interface Dog extends NonExistent {
+                breed: string;
+            }
+        "#);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 2304); // Cannot find name 'NonExistent'
+    }
+
+    #[test]
+    fn test_interface_extends_with_optional() {
+        // Optional properties in base should remain optional
+        let errors = check(r#"
+            interface Base {
+                required: string;
+                optional?: number;
+            }
+            interface Derived extends Base {
+                extra: boolean;
+            }
+            const obj: Derived = { required: "hello", extra: true };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_recursive_interface() {
+        // Interface referencing itself (linked list)
+        let errors = check(r#"
+            interface ListNode {
+                value: number;
+                next: ListNode | null;
+            }
+            const node: ListNode = { value: 1, next: null };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_recursive_interface_nested() {
+        // Nested recursive structure
+        let errors = check(r#"
+            interface TreeNode {
+                value: number;
+                left: TreeNode | null;
+                right: TreeNode | null;
+            }
+            const tree: TreeNode = {
+                value: 1,
+                left: { value: 2, left: null, right: null },
+                right: null
+            };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_recursive_type_alias() {
+        // Type alias referencing itself
+        let errors = check(r#"
+            type JsonValue = string | number | boolean | null | JsonArray | JsonObject;
+            type JsonArray = JsonValue[];
+            type JsonObject = { [key: string]: JsonValue };
+            const data: JsonValue = { name: "test", values: [1, 2, 3] };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_method_signature() {
+        let errors = check(r#"
+            interface Calculator {
+                add(a: number, b: number): number;
+                subtract(a: number, b: number): number;
+            }
+            const calc: Calculator = {
+                add: (a: number, b: number) => a + b,
+                subtract: (a: number, b: number) => a - b
+            };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_interface_readonly_property() {
+        // Readonly properties should be accepted in object literals
+        let errors = check(r#"
+            interface Point {
+                readonly x: number;
+                readonly y: number;
+            }
+            const p: Point = { x: 10, y: 20 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_type_alias_union() {
+        let errors = check(r#"
+            type StringOrNumber = string | number;
+            const a: StringOrNumber = "hello";
+            const b: StringOrNumber = 42;
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_type_alias_intersection() {
+        let errors = check(r#"
+            type Named = { name: string };
+            type Aged = { age: number };
+            type Person = Named & Aged;
+            const p: Person = { name: "Alice", age: 30 };
+        "#);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_type_alias_to_interface() {
+        let errors = check(r#"
+            interface User {
+                name: string;
+            }
+            type UserAlias = User;
+            const u: UserAlias = { name: "Bob" };
         "#);
         assert!(errors.is_empty());
     }
