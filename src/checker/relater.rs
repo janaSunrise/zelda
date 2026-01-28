@@ -226,31 +226,17 @@ impl<'a> Checker<'a> {
         }
 
         // Primitive types with built-in properties (for constraint checking)
-        // string has: length: number, plus string methods
-        // Array has: length: number, plus array methods
+        // Use apparent type to look up properties from lib.d.ts interfaces
         if let Type::Object { properties: target_props, .. } = target {
-            let source_has_props = match source {
-                Type::String | Type::StringLiteral(_) => {
-                    // String has length and various string methods
-                    target_props.iter().all(|p| {
-                        (p.name == "length" && self.is_assignable(&Type::Number, &p.ty))
-                            || self.has_string_property(&p.name)
-                    })
+            let apparent_source = self.get_apparent_type(source);
+            if matches!(apparent_source, Type::TypeRef { .. }) {
+                // Check if all required target properties exist on the apparent type
+                let source_has_props = target_props.iter().all(|p| {
+                    self.has_property(source, &p.name)
+                });
+                if source_has_props {
+                    return true;
                 }
-                Type::Array(elem) => {
-                    // Array has length and various array methods
-                    target_props.iter().all(|p| {
-                        if p.name == "length" {
-                            self.is_assignable(&Type::Number, &p.ty)
-                        } else {
-                            self.has_array_property(&p.name, elem)
-                        }
-                    })
-                }
-                _ => false,
-            };
-            if source_has_props {
-                return true;
             }
         }
 
@@ -356,72 +342,6 @@ impl<'a> Checker<'a> {
         }
 
         true
-    }
-
-    /// Check if a property name is a built-in string property.
-    fn has_string_property(&self, name: &str) -> bool {
-        matches!(
-            name,
-            "length"
-                | "charAt"
-                | "charCodeAt"
-                | "concat"
-                | "includes"
-                | "endsWith"
-                | "startsWith"
-                | "indexOf"
-                | "lastIndexOf"
-                | "match"
-                | "replace"
-                | "search"
-                | "slice"
-                | "split"
-                | "substring"
-                | "toLowerCase"
-                | "toUpperCase"
-                | "trim"
-                | "trimStart"
-                | "trimEnd"
-                | "padStart"
-                | "padEnd"
-                | "repeat"
-                | "at"
-        )
-    }
-
-    /// Check if a property name is a built-in array property.
-    fn has_array_property(&self, name: &str, _elem_type: &Type) -> bool {
-        matches!(
-            name,
-            "length"
-                | "push"
-                | "pop"
-                | "shift"
-                | "unshift"
-                | "slice"
-                | "splice"
-                | "concat"
-                | "join"
-                | "map"
-                | "filter"
-                | "reduce"
-                | "forEach"
-                | "find"
-                | "findIndex"
-                | "includes"
-                | "indexOf"
-                | "every"
-                | "some"
-                | "sort"
-                | "reverse"
-                | "fill"
-                | "flat"
-                | "flatMap"
-                | "at"
-                | "entries"
-                | "keys"
-                | "values"
-        )
     }
 
     /// Check function type compatibility.

@@ -497,20 +497,25 @@ impl<'a> Checker<'a> {
     }
 
     /// Check if a type has a property with the given name.
+    ///
+    /// Uses the apparent type pattern to resolve primitive properties from lib.d.ts interfaces.
     fn has_property(&self, ty: &Type, prop_name: &str) -> bool {
-        // Resolve TypeRef first
-        let resolved = if let Type::TypeRef { name, .. } = ty {
-            self.symbols.lookup_type(name).map(|s| s.ty.clone())
+        // Convert primitives to their apparent types (e.g., string → String interface)
+        let apparent_type = self.get_apparent_type(ty);
+
+        // Resolve TypeRef to its underlying type
+        let resolved = if let Type::TypeRef { name, type_args } = &apparent_type {
+            self.resolve_type_ref_with_args(name, type_args)
         } else {
             None
         };
-        let ty = resolved.as_ref().unwrap_or(ty);
+        let ty = resolved.as_ref().unwrap_or(&apparent_type);
 
         // For TypeParameter with a constraint, use the constraint
         let resolved_constraint = if let Type::TypeParameter { constraint: Some(constraint), .. } = ty {
             // If the constraint is a TypeRef, resolve it
-            let resolved_constraint = if let Type::TypeRef { name, .. } = constraint.as_ref() {
-                self.symbols.lookup_type(name).map(|s| s.ty.clone()).unwrap_or_else(|| (**constraint).clone())
+            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref() {
+                self.resolve_type_ref_with_args(name, type_args).unwrap_or_else(|| (**constraint).clone())
             } else {
                 (**constraint).clone()
             };
@@ -530,22 +535,6 @@ impl<'a> Checker<'a> {
                     return true;
                 }
                 false
-            }
-            Type::Array(_) => {
-                // Arrays have built-in properties
-                matches!(prop_name, "length" | "push" | "pop" | "shift" | "unshift"
-                    | "slice" | "splice" | "concat" | "join" | "map" | "filter"
-                    | "reduce" | "forEach" | "find" | "findIndex" | "includes"
-                    | "indexOf" | "every" | "some" | "sort" | "reverse" | "fill"
-                    | "flat" | "flatMap" | "at" | "entries" | "keys" | "values")
-            }
-            Type::String | Type::StringLiteral(_) => {
-                // Strings have built-in properties
-                matches!(prop_name, "length" | "charAt" | "charCodeAt" | "concat"
-                    | "includes" | "endsWith" | "startsWith" | "indexOf" | "lastIndexOf"
-                    | "match" | "replace" | "search" | "slice" | "split" | "substring"
-                    | "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd"
-                    | "padStart" | "padEnd" | "repeat" | "at")
             }
             Type::Union(types) => {
                 // Property must exist on all union members

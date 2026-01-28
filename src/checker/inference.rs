@@ -436,18 +436,22 @@ impl<'a> Checker<'a> {
     /// Get property type from an object type.
     ///
     /// Resolution order:
-    /// 1. Resolve TypeRef to its underlying type
-    /// 2. For TypeParameter with constraint, use the constraint type
-    /// 3. Look for an explicit property with the given name
-    /// 4. If not found and there's a string index signature, return its value type
-    /// 5. Fall back to Any
+    /// 1. Convert primitives to their apparent types (e.g., string → String interface)
+    /// 2. Resolve TypeRef to its underlying type
+    /// 3. For TypeParameter with constraint, use the constraint type
+    /// 4. Look for an explicit property with the given name
+    /// 5. If not found and there's a string index signature, return its value type
+    /// 6. Fall back to Any
     pub(super) fn get_property_type(&self, object_type: &Type, prop_name: &str) -> Type {
-        // Resolve TypeRef first, with type argument instantiation for generics
-        let resolved_type = if let Type::TypeRef { name, type_args } = object_type {
+        // Convert primitives to their apparent types (e.g., string → String interface)
+        let apparent_type = self.get_apparent_type(object_type);
+
+        // Resolve TypeRef to its underlying type, with type argument instantiation
+        let resolved_type = if let Type::TypeRef { name, type_args } = &apparent_type {
             self.resolve_type_ref_with_args(name, type_args)
-                .unwrap_or_else(|| object_type.clone())
+                .unwrap_or_else(|| apparent_type.clone())
         } else {
-            object_type.clone()
+            apparent_type
         };
 
         // For TypeParameter with a constraint, use the constraint for property lookup
@@ -461,9 +465,12 @@ impl<'a> Checker<'a> {
             Type::Object {
                 properties,
                 index_signature,
+                extends,
                 ..
             } => {
-                if let Some(prop) = properties.iter().find(|p| p.name == prop_name) {
+                // Resolve all properties including those from extended interfaces
+                let all_props = self.resolve_object_properties(properties, extends);
+                if let Some(prop) = all_props.iter().find(|p| p.name == prop_name) {
                     return prop.ty.clone();
                 }
                 if let Some(idx_sig) = index_signature {
@@ -546,6 +553,38 @@ impl<'a> Checker<'a> {
     /// Check if a type is string-like.
     fn is_string_like(&self, ty: &Type) -> bool {
         matches!(ty, Type::String | Type::StringLiteral(_))
+    }
+
+    /// Convert primitive types to their interface equivalents for method resolution.
+    ///
+    /// This implements TypeScript's "apparent type" pattern:
+    /// - `string` / `"hello"` → `String` interface
+    /// - `number` / `42` → `Number` interface
+    /// - `boolean` / `true` → `Boolean` interface
+    /// - `T[]` → `Array<T>` interface
+    ///
+    /// This allows primitive method calls like `"hello".toUpperCase()` to resolve
+    /// against the String interface defined in lib.d.ts.
+    pub(super) fn get_apparent_type(&self, ty: &Type) -> Type {
+        match ty {
+            Type::String | Type::StringLiteral(_) => Type::TypeRef {
+                name: "String".to_string(),
+                type_args: vec![],
+            },
+            Type::Number | Type::NumberLiteral(_) => Type::TypeRef {
+                name: "Number".to_string(),
+                type_args: vec![],
+            },
+            Type::Boolean | Type::BooleanLiteral(_) => Type::TypeRef {
+                name: "Boolean".to_string(),
+                type_args: vec![],
+            },
+            Type::Array(elem) => Type::TypeRef {
+                name: "Array".to_string(),
+                type_args: vec![(**elem).clone()],
+            },
+            other => other.clone(),
+        }
     }
 
     /// Unwrap Promise<T> to T.

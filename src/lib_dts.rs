@@ -72,6 +72,10 @@ mod tests {
         assert!(symbols.lookup_type("Promise").is_some(), "Promise should be defined");
         assert!(symbols.lookup_type("Console").is_some(), "Console should be defined");
 
+        // Check primitive wrapper interfaces
+        assert!(symbols.lookup_type("Number").is_some(), "Number should be defined");
+        assert!(symbols.lookup_type("Boolean").is_some(), "Boolean should be defined");
+
         // Check that some global values are defined
         assert!(symbols.lookup("console").is_some(), "console should be defined");
         assert!(symbols.lookup("Math").is_some(), "Math should be defined");

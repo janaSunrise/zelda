@@ -1,5 +1,7 @@
 use super::*;
 use crate::binder::Binder;
+use crate::lib_dts::load_lib_dts;
+use crate::symbols::SymbolTable;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -10,7 +12,12 @@ fn check(source: &str) -> Vec<TypeError> {
     let result = Parser::new(&allocator, source, source_type).parse();
     assert!(!result.panicked);
 
-    let mut binder = Binder::new();
+    // Start with lib.d.ts symbols (built-in types like String, Array, etc.)
+    let mut symbols = SymbolTable::new();
+    load_lib_dts(&mut symbols);
+
+    // Bind the user's program on top of lib.d.ts symbols
+    let mut binder = Binder::with_symbols(symbols);
     binder.bind_program(&result.program);
 
     let mut checker = Checker::new(&mut binder.symbols);
@@ -2536,6 +2543,113 @@ fn test_named_class_expression() {
         const obj = new MyClass();
         const v: number = obj.value;
     "#);
+    assert!(errors.is_empty());
+}
+
+// ======================================================================
+// M13.7: Primitive Method Resolution via lib.d.ts (Apparent Types)
+// ======================================================================
+
+#[test]
+fn test_string_method_via_interface() {
+    // String methods should be resolved from the String interface in lib.d.ts
+    let errors = check(r#"const x: string = "hello".toUpperCase();"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_string_method_chained() {
+    // Chained string methods
+    let errors = check(r#"const x: string = "hello".toUpperCase().toLowerCase();"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_string_literal_method() {
+    // String literal should also have String interface methods
+    let errors = check(r#"const x = "hello".charAt(0);"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_string_method_return_type() {
+    // Verify correct return type from String interface
+    let errors = check(r#"const x: number = "hello".length;"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_string_includes_method() {
+    // includes() returns boolean
+    let errors = check(r#"const x: boolean = "hello".includes("el");"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_array_method_via_interface() {
+    // Array methods should be resolved from the Array interface in lib.d.ts
+    // Test that the property exists (accessing .map doesn't error)
+    // Full callback typing tests are separate from method resolution
+    let errors = check(r#"const arr = [1, 2, 3]; const mapFn = arr.map;"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_array_filter_method() {
+    // Test that filter property exists on arrays
+    let errors = check(r#"const arr = [1, 2, 3]; const filterFn = arr.filter;"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_array_find_method() {
+    // Test that find property exists on arrays
+    let errors = check(r#"const arr = [1, 2, 3]; const findFn = arr.find;"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_array_foreach_method() {
+    // Test that forEach property exists on arrays
+    let errors = check(r#"const arr = [1, 2, 3]; const forEachFn = arr.forEach;"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_unknown_string_method_error() {
+    // Unknown method on string should produce error
+    let errors = check(r#"const x = "hello".unknownMethod();"#);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2339); // Property does not exist
+}
+
+#[test]
+fn test_unknown_array_method_error() {
+    // Unknown method on array should produce error
+    let errors = check(r#"const arr = [1, 2, 3]; const x = arr.unknownMethod();"#);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2339);
+}
+
+#[test]
+fn test_number_method_via_interface() {
+    // Number methods from Number interface
+    let errors = check(r#"const n = 42; const s: string = n.toFixed(2);"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_number_literal_method() {
+    // Number literal should have Number interface methods
+    // Note: (42).toFixed() syntax needed for parser
+    let errors = check(r#"const n = 42; const s = n.toString();"#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_boolean_method_via_interface() {
+    // Boolean methods from Boolean interface
+    let errors = check(r#"const b = true; const x: boolean = b.valueOf();"#);
     assert!(errors.is_empty());
 }
 
