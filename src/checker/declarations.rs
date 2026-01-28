@@ -45,11 +45,32 @@ impl<'a> Checker<'a> {
                         // Contextual typing: check array literal against tuple type
                         self.check_array_literal_against_type(arr, &declared_type, declarator.span);
                     } else if !self.is_assignable(&init_type, &declared_type) {
-                        self.errors.push(TypeError::not_assignable(
-                            &init_type,
-                            &declared_type,
-                            declarator.span,
-                        ));
+                        // Check if the error is due to missing properties
+                        // TS2739 for multiple missing, TS2741 for single missing, TS2322 for other errors
+                        let missing = self.find_missing_properties(&init_type, &declared_type);
+                        if missing.len() > 1 {
+                            // Report TS2739 for multiple missing properties
+                            self.errors.push(TypeError::missing_properties(
+                                &missing,
+                                &init_type,
+                                &declared_type,
+                                declarator.span,
+                            ));
+                        } else if missing.len() == 1 {
+                            // Report TS2741 for single missing property
+                            self.errors.push(TypeError::missing_property(
+                                &missing[0],
+                                &init_type,
+                                &declared_type,
+                                declarator.span,
+                            ));
+                        } else {
+                            self.errors.push(TypeError::not_assignable(
+                                &init_type,
+                                &declared_type,
+                                declarator.span,
+                            ));
+                        }
                     }
                 }
             }
@@ -93,7 +114,15 @@ impl<'a> Checker<'a> {
                 TSTypeName::ThisExpression(_) => continue,
             };
 
-            let interface_type = self.symbols.lookup_type(&interface_name).map(|s| s.ty.clone());
+            // Get type arguments from the implements clause (e.g., Comparable<User>)
+            let type_args: Vec<Type> = heritage
+                .type_arguments
+                .as_ref()
+                .map(|args| args.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                .unwrap_or_default();
+
+            // Resolve the interface type with type arguments
+            let interface_type = self.resolve_type_ref_with_args(&interface_name, &type_args);
 
             if let Some(interface_type) = interface_type {
                 // Check that class implements all required members

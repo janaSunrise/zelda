@@ -139,6 +139,14 @@ impl TypeError {
         )
     }
 
+    pub fn static_member_suggestion(prop: &str, ty: &Type, class_name: &str, span: Span) -> Self {
+        Self::new(
+            errors::STATIC_MEMBER_SUGGESTION.format(&[prop, &ty.to_string(), class_name]),
+            span,
+            errors::STATIC_MEMBER_SUGGESTION.code,
+        )
+    }
+
     pub fn missing_return(span: Span) -> Self {
         Self::new(
             errors::MISSING_RETURN.format(&[]),
@@ -153,6 +161,34 @@ impl TypeError {
             span,
             errors::PROPERTY_MISSING.code,
         )
+    }
+
+    pub fn missing_properties(missing_props: &[String], source: &Type, target: &Type, span: Span) -> Self {
+        // TSC uses TS2740 when there are 5+ missing properties (shows first 4 + "and X more")
+        // TSC uses TS2739 when there are 2-4 missing properties (shows all)
+        if missing_props.len() >= 5 {
+            // TS2740: Show first 4 properties + "and X more"
+            let shown_props = missing_props[..4].join(", ");
+            let remaining = missing_props.len() - 4;
+            Self::new(
+                errors::MANY_PROPERTIES_MISSING.format(&[
+                    &source.to_string(),
+                    &target.to_string(),
+                    &shown_props,
+                    &remaining.to_string(),
+                ]),
+                span,
+                errors::MANY_PROPERTIES_MISSING.code,
+            )
+        } else {
+            // TS2739: Type 'X' is missing the following properties from type 'Y': a, b, c
+            let props_list = missing_props.join(", ");
+            Self::new(
+                errors::MULTIPLE_PROPERTIES_MISSING.format(&[&source.to_string(), &target.to_string(), &props_list]),
+                span,
+                errors::MULTIPLE_PROPERTIES_MISSING.code,
+            )
+        }
     }
 
     pub fn excess_property(prop: &str, target: &Type, span: Span) -> Self {
@@ -452,6 +488,18 @@ impl<'a> Checker<'a> {
                 .symbols
                 .lookup(ident.name.as_str())
                 .map(|s| s.ty.clone()),
+            AssignmentTarget::StaticMemberExpression(member) => {
+                // Get property type from the object type
+                let object_type = self.infer_expression(&member.object);
+                let prop_name = member.property.name.as_str();
+                let prop_type = self.get_property_type(&object_type, prop_name);
+                // Only return Some if it's not Any (means we found a real type)
+                if matches!(prop_type, Type::Any) {
+                    None
+                } else {
+                    Some(prop_type)
+                }
+            }
             _ => None,
         };
 
@@ -479,6 +527,26 @@ impl<'a> Checker<'a> {
 
         // Check if property exists on the object type
         if !self.has_property(&object_type, prop_name) {
+            // Check if this might be a static member accessed on an instance (TS2576)
+            // If the object is a TypeRef (class instance), check if the class has this as a static member
+            if let Type::TypeRef { name: class_name, .. } = &object_type {
+                // Look up the class constructor in the value namespace
+                if let Some(symbol) = self.symbols.lookup(class_name) {
+                    if let Type::ClassConstructor { static_members, .. } = &symbol.ty {
+                        // Check if the property exists as a static member
+                        if static_members.iter().any(|p| p.name == prop_name) {
+                            self.errors.push(TypeError::static_member_suggestion(
+                                prop_name,
+                                &object_type,
+                                class_name,
+                                member.span,
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+
             self.errors.push(TypeError::property_not_found(
                 prop_name,
                 &object_type,
@@ -516,7 +584,7 @@ impl<'a> Checker<'a> {
     ///
     /// Uses the apparent type pattern to resolve primitive properties from lib.d.ts interfaces.
     fn has_property(&self, ty: &Type, prop_name: &str) -> bool {
-        // Convert primitives to their apparent types (e.g., string → String interface)
+        // Convert primitives to their apparent types (e.g., string -> String interface)
         let apparent_type = self.get_apparent_type(ty);
 
         // Resolve TypeRef to its underlying type

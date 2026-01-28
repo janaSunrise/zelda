@@ -344,6 +344,49 @@ impl<'a> Checker<'a> {
         true
     }
 
+    /// Find properties that are required in target but missing in source.
+    /// Returns a list of property names that are missing.
+    pub(super) fn find_missing_properties(&self, source: &Type, target: &Type) -> Vec<String> {
+        // Resolve TypeRefs first
+        let resolved_source = if let Type::TypeRef { name, type_args } = source {
+            self.resolve_type_ref_with_args(name, type_args)
+                .unwrap_or_else(|| source.clone())
+        } else {
+            source.clone()
+        };
+        let resolved_target = if let Type::TypeRef { name, type_args } = target {
+            self.resolve_type_ref_with_args(name, type_args)
+                .unwrap_or_else(|| target.clone())
+        } else {
+            target.clone()
+        };
+
+        // Get properties from both types
+        let source_props = match &resolved_source {
+            Type::Object { properties, extends, .. } => {
+                self.resolve_object_properties(properties, extends)
+            }
+            _ => vec![],
+        };
+
+        let target_props = match &resolved_target {
+            Type::Object { properties, extends, .. } => {
+                self.resolve_object_properties(properties, extends)
+            }
+            _ => vec![],
+        };
+
+        // Find required target properties missing from source
+        let source_prop_names: std::collections::HashSet<&str> =
+            source_props.iter().map(|p| p.name.as_str()).collect();
+
+        target_props
+            .iter()
+            .filter(|p| !p.optional && !source_prop_names.contains(p.name.as_str()))
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
     /// Check function type compatibility.
     ///
     /// - Return type: covariant (source return must be assignable to target return)

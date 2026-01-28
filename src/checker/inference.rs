@@ -436,14 +436,14 @@ impl<'a> Checker<'a> {
     /// Get property type from an object type.
     ///
     /// Resolution order:
-    /// 1. Convert primitives to their apparent types (e.g., string → String interface)
+    /// 1. Convert primitives to their apparent types (e.g., string -> String interface)
     /// 2. Resolve TypeRef to its underlying type
     /// 3. For TypeParameter with constraint, use the constraint type
     /// 4. Look for an explicit property with the given name
     /// 5. If not found and there's a string index signature, return its value type
     /// 6. Fall back to Any
     pub(super) fn get_property_type(&self, object_type: &Type, prop_name: &str) -> Type {
-        // Convert primitives to their apparent types (e.g., string → String interface)
+        // Convert primitives to their apparent types (e.g., string -> String interface)
         let apparent_type = self.get_apparent_type(object_type);
 
         // Resolve TypeRef to its underlying type, with type argument instantiation
@@ -558,10 +558,10 @@ impl<'a> Checker<'a> {
     /// Convert primitive types to their interface equivalents for method resolution.
     ///
     /// This implements TypeScript's "apparent type" pattern:
-    /// - `string` / `"hello"` → `String` interface
-    /// - `number` / `42` → `Number` interface
-    /// - `boolean` / `true` → `Boolean` interface
-    /// - `T[]` → `Array<T>` interface
+    /// - `string` / `"hello"` -> `String` interface
+    /// - `number` / `42` -> `Number` interface
+    /// - `boolean` / `true` -> `Boolean` interface
+    /// - `T[]` -> `Array<T>` interface
     ///
     /// This allows primitive method calls like `"hello".toUpperCase()` to resolve
     /// against the String interface defined in lib.d.ts.

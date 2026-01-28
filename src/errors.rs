@@ -107,6 +107,7 @@ pub const WRONG_ARG_COUNT: Diagnostic = Diagnostic::new(2554, "Expected {0} argu
 pub const WRONG_ARG_COUNT_RANGE: Diagnostic = Diagnostic::new(2555, "Expected {0}-{1} arguments, but got {2}.");
 pub const TOO_FEW_ARGS: Diagnostic = Diagnostic::new(2556, "Expected at least {0} arguments, but got {1}.");
 pub const NO_COMMON_PROPERTIES: Diagnostic = Diagnostic::new(2559, "Type '{0}' has no properties in common with type '{1}'.");
+pub const STATIC_MEMBER_SUGGESTION: Diagnostic = Diagnostic::new(2576, "Property '{0}' does not exist on type '{1}'. Did you mean to access the static member '{2}.{0}' instead?");
 
 // ============================================
 // 2600-2699: This/Context Errors
@@ -122,6 +123,8 @@ pub const THIS_NOT_ASSIGNABLE: Diagnostic = Diagnostic::new(2684, "The 'this' co
 pub const INVOKE_POSSIBLY_NULL: Diagnostic = Diagnostic::new(2721, "Cannot invoke an object which is possibly 'null'.");
 pub const INVOKE_POSSIBLY_UNDEFINED: Diagnostic = Diagnostic::new(2722, "Cannot invoke an object which is possibly 'undefined'.");
 pub const INVOKE_POSSIBLY_NULL_UNDEFINED: Diagnostic = Diagnostic::new(2723, "Cannot invoke an object which is possibly 'null' or 'undefined'.");
+pub const MULTIPLE_PROPERTIES_MISSING: Diagnostic = Diagnostic::new(2739, "Type '{0}' is missing the following properties from type '{1}': {2}");
+pub const MANY_PROPERTIES_MISSING: Diagnostic = Diagnostic::new(2740, "Type '{0}' is missing the following properties from type '{1}': {2}, and {3} more.");
 pub const PROPERTY_MISSING: Diagnostic = Diagnostic::new(2741, "Property '{0}' is missing in type '{1}' but required in type '{2}'.");
 pub const NO_OVERLOAD_MATCH: Diagnostic = Diagnostic::new(2769, "No overload matches this call.");
 pub const LAST_OVERLOAD_ERROR: Diagnostic = Diagnostic::new(2770, "The last overload gave the following error.");

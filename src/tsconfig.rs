@@ -55,7 +55,7 @@ impl TsConfig {
         serde_json::from_str(&content).ok()
     }
 
-    /// Convert path mappings to resolver format: `{ "@/*": ["src/*"] }` → `[("@/*", vec!["src/*"])]`
+    /// Convert path mappings to resolver format: `{ "@/*": ["src/*"] }` -> `[("@/*", vec!["src/*"])]`
     pub fn get_path_mappings(&self) -> Vec<(String, Vec<String>)> {
         self.compiler_options
             .paths

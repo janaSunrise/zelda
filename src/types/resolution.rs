@@ -183,7 +183,7 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
 }
 
 pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
-    params
+    let mut result: Vec<Param> = params
         .items
         .iter()
         .map(|p| {
@@ -202,7 +202,25 @@ pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
             }
             param
         })
-        .collect()
+        .collect();
+
+    // Handle rest parameter (...args) if present
+    // Rest parameter is stored separately in params.rest, not in params.items
+    if let Some(rest_param) = &params.rest {
+        let name = match &rest_param.rest.argument {
+            BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+            _ => "args".to_string(),
+        };
+        // Rest parameter type should be the array type (e.g., any[] for ...data: any[])
+        let ty = rest_param
+            .type_annotation
+            .as_ref()
+            .map(|ann| resolve_ts_type(&ann.type_annotation))
+            .unwrap_or(Type::Array(Box::new(Type::Any)));
+        result.push(Param::new(name, ty).rest());
+    }
+
+    result
 }
 
 pub fn get_property_key_name(key: &PropertyKey) -> Option<String> {

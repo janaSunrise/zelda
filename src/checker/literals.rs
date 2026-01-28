@@ -132,11 +132,31 @@ impl<'a> Checker<'a> {
                     if let Some(expected_prop) = expected_props.iter().find(|ep| ep.name == name) {
                         let value_type = self.infer_expression(&p.value);
                         if !self.is_assignable(&value_type, &expected_prop.ty) {
-                            self.errors.push(TypeError::not_assignable(
-                                &value_type,
-                                &expected_prop.ty,
-                                p.span,
-                            ));
+                            // Check if the error is due to missing properties
+                            let missing = self.find_missing_properties(&value_type, &expected_prop.ty);
+                            if missing.len() > 1 {
+                                // TS2739 for multiple missing properties
+                                self.errors.push(TypeError::missing_properties(
+                                    &missing,
+                                    &value_type,
+                                    &expected_prop.ty,
+                                    p.span,
+                                ));
+                            } else if missing.len() == 1 {
+                                // TS2741 for single missing property
+                                self.errors.push(TypeError::missing_property(
+                                    &missing[0],
+                                    &value_type,
+                                    &expected_prop.ty,
+                                    p.span,
+                                ));
+                            } else {
+                                self.errors.push(TypeError::not_assignable(
+                                    &value_type,
+                                    &expected_prop.ty,
+                                    p.span,
+                                ));
+                            }
                         }
                     }
                 }
@@ -147,16 +167,30 @@ impl<'a> Checker<'a> {
             literal_props.iter().map(|(n, _)| n.as_str()).collect();
 
         // Check for missing required properties
+        // Collect all missing properties first to decide between TS2739 and TS2741
         let source_type = self.infer_object_literal(obj);
-        for expected_prop in &expected_props {
-            if !expected_prop.optional && !literal_prop_names.contains(expected_prop.name.as_str()) {
-                self.errors.push(TypeError::missing_property(
-                    &expected_prop.name,
-                    &source_type,
-                    expected,
-                    span,
-                ));
-            }
+        let missing_props: Vec<String> = expected_props
+            .iter()
+            .filter(|p| !p.optional && !literal_prop_names.contains(p.name.as_str()))
+            .map(|p| p.name.clone())
+            .collect();
+
+        if missing_props.len() > 1 {
+            // TS2739: Multiple missing properties
+            self.errors.push(TypeError::missing_properties(
+                &missing_props,
+                &source_type,
+                expected,
+                span,
+            ));
+        } else if missing_props.len() == 1 {
+            // TS2741: Single missing property
+            self.errors.push(TypeError::missing_property(
+                &missing_props[0],
+                &source_type,
+                expected,
+                span,
+            ));
         }
 
         // Check for excess properties (only if no index signature)

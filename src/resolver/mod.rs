@@ -78,7 +78,7 @@ impl ModuleResolver {
     }
 
     /// Resolve an import specifier to a file path.
-    /// Tries: relative → path mappings → baseUrl → node_modules
+    /// Tries: relative -> path mappings -> baseUrl -> node_modules
     pub fn resolve(&self, specifier: &str, from_file: &Path) -> Result<ResolvedModule, ResolveError> {
         if specifier.starts_with("./") || specifier.starts_with("../") {
             return self.resolve_relative(specifier, from_file);
@@ -126,7 +126,7 @@ impl ModuleResolver {
         None
     }
 
-    /// Match pattern `@/*` against specifier `@/utils` → returns `Some("utils")`
+    /// Match pattern `@/*` against specifier `@/utils` -> returns `Some("utils")`
     fn match_path_pattern(&self, pattern: &str, specifier: &str) -> Option<String> {
         if pattern.ends_with('*') {
             let prefix = &pattern[..pattern.len() - 1];
