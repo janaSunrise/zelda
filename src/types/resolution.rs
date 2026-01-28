@@ -79,6 +79,70 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
         // Parenthesized types
         TSType::TSParenthesizedType(paren) => resolve_ts_type(&paren.type_annotation),
 
+        // Type operators (keyof, unique, readonly)
+        TSType::TSTypeOperatorType(op) => {
+            match op.operator {
+                TSTypeOperatorOperator::Keyof => {
+                    Type::KeyOf(Box::new(resolve_ts_type(&op.type_annotation)))
+                }
+                TSTypeOperatorOperator::Readonly => {
+                    // For now, pass through (readonly modifier on mapped types)
+                    resolve_ts_type(&op.type_annotation)
+                }
+                TSTypeOperatorOperator::Unique => {
+                    // unique symbol - just treat as the underlying type
+                    resolve_ts_type(&op.type_annotation)
+                }
+            }
+        }
+
+        // Indexed access types: T[K]
+        TSType::TSIndexedAccessType(access) => {
+            Type::IndexedAccess {
+                object_type: Box::new(resolve_ts_type(&access.object_type)),
+                index_type: Box::new(resolve_ts_type(&access.index_type)),
+            }
+        }
+
+        // Mapped types: { [K in keyof T]: T[K] }
+        TSType::TSMappedType(mapped) => {
+            // Key type parameter name (e.g., "P" in [P in keyof T])
+            let type_param = mapped.key.name.to_string();
+
+            // The constraint (e.g., "keyof T" in [P in keyof T])
+            let constraint = resolve_ts_type(&mapped.constraint);
+
+            // The template is the value type (e.g., "T[K]" in "{ [K in keyof T]: T[K] }")
+            let template = mapped
+                .type_annotation
+                .as_ref()
+                .map(|a| resolve_ts_type(a))
+                .unwrap_or(Type::Any);
+
+            // Handle modifiers
+            // readonly_modifier: +readonly, -readonly, or none
+            let readonly_modifier = mapped.readonly.map(|op| {
+                matches!(op, TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus)
+            });
+
+            // optional_modifier: +?, -?, or none
+            let optional_modifier = mapped.optional.map(|op| {
+                matches!(op, TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus)
+            });
+
+            Type::MappedType {
+                type_param,
+                constraint: Box::new(constraint),
+                template: Box::new(template),
+                readonly_modifier,
+                optional_modifier,
+            }
+        }
+
+        // Type predicates resolve to boolean when used as standalone types.
+        // The predicate details are extracted in build_function_type for narrowing.
+        TSType::TSTypePredicate(_) => Type::Boolean,
+
         _ => Type::Any,
     }
 }
@@ -113,6 +177,7 @@ pub fn resolve_function_type(func: &TSFunctionType) -> Type {
         params,
         return_type: Box::new(return_type),
         type_params: vec![],
+        type_predicate: None,
     }
 }
 
@@ -151,6 +216,7 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
                         params,
                         return_type: Box::new(return_type),
                         type_params: vec![],
+                        type_predicate: None,
                     };
                     let mut property = Property::new(name, ty);
                     if method.optional {
@@ -276,11 +342,35 @@ pub fn build_function_type(func: &Function) -> Type {
         params.push(param);
     }
 
-    let return_type = func
-        .return_type
-        .as_ref()
-        .map(|ann| resolve_ts_type(&ann.type_annotation))
-        .unwrap_or(Type::Void);
+    // Handle type predicates specially. Assertion functions like "asserts val is string"
+    // have void as their effective return type since they throw on failure. Regular type
+    // guards like "val is string" return boolean.
+    let (return_type, type_predicate) = if let Some(ann) = &func.return_type {
+        if let TSType::TSTypePredicate(pred) = &ann.type_annotation {
+            let parameter_name = match &pred.parameter_name {
+                TSTypePredicateName::Identifier(ident) => ident.name.to_string(),
+                TSTypePredicateName::This(_) => "this".to_string(),
+            };
+
+            let type_annotation = pred
+                .type_annotation
+                .as_ref()
+                .map(|ann| Box::new(resolve_ts_type(&ann.type_annotation)));
+
+            let predicate = super::TypePredicate {
+                parameter_name,
+                asserts: pred.asserts,
+                type_annotation,
+            };
+
+            let ret = if pred.asserts { Type::Void } else { Type::Boolean };
+            (ret, Some(predicate))
+        } else {
+            (resolve_ts_type(&ann.type_annotation), None)
+        }
+    } else {
+        (Type::Void, None)
+    };
 
     let type_params: Vec<TypeParam> = func
         .type_parameters
@@ -304,6 +394,7 @@ pub fn build_function_type(func: &Function) -> Type {
         params,
         return_type: Box::new(return_type),
         type_params,
+        type_predicate,
     }
 }
 
@@ -382,6 +473,7 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
                         params,
                         return_type: Box::new(return_type),
                         type_params: vec![],
+                        type_predicate: None,
                     };
                     let mut property = Property::new(name, ty);
                     if method.optional {
@@ -541,6 +633,7 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                         params,
                         return_type: Box::new(Type::Void), // Constructor's "return" is the instance
                         type_params: type_params.clone(), // Use class's type parameters
+                        type_predicate: None,
                     });
                     continue;
                 }

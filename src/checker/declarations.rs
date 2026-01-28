@@ -20,7 +20,17 @@ impl<'a> Checker<'a> {
         let is_const = decl.kind == VariableDeclarationKind::Const;
 
         for declarator in &decl.declarations {
+            // Track variable name for definite assignment analysis
+            let var_name = match &declarator.id {
+                BindingPattern::BindingIdentifier(ident) => Some(ident.name.to_string()),
+                _ => None,
+            };
+
             if let Some(init) = &declarator.init {
+                // Variable is initialized - mark as assigned
+                if let Some(name) = &var_name {
+                    self.assigned_vars.insert(name.clone());
+                }
                 // Check sub-expressions first
                 self.check_expression(init);
 
@@ -71,6 +81,14 @@ impl<'a> Checker<'a> {
                                 declarator.span,
                             ));
                         }
+                    }
+                }
+            } else {
+                // Variable declared without initializer - track as uninitialized
+                // Only for `let` declarations (const requires initializer, var is hoisted)
+                if decl.kind == VariableDeclarationKind::Let {
+                    if let Some(name) = var_name {
+                        self.uninitialized_vars.insert(name);
                     }
                 }
             }
@@ -234,11 +252,18 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // Get declared return type
-            let declared_return = func
-                .return_type
-                .as_ref()
-                .map(|ann| self.resolve_ts_type(&ann.type_annotation));
+            // Assertion functions return void (they throw on failure), type guards return boolean.
+            let declared_return = func.return_type.as_ref().map(|ann| {
+                if let oxc_ast::ast::TSType::TSTypePredicate(pred) = &ann.type_annotation {
+                    if pred.asserts {
+                        Type::Void
+                    } else {
+                        Type::Boolean
+                    }
+                } else {
+                    self.resolve_ts_type(&ann.type_annotation)
+                }
+            });
 
             // Collect return types from body
             let return_types = self.collect_return_types(body);

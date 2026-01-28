@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use super::{IndexSignature, Param, Property, Type, TypeParam};
+use super::{IndexSignature, Param, Property, Type, TypeParam, TypePredicate};
 
 /// A lightweight, copyable handle to an interned type.
 ///
@@ -278,6 +278,7 @@ impl TypeArena {
                 params,
                 return_type,
                 type_params,
+                type_predicate,
             } => {
                 let interned_params: Vec<Param> = params
                     .into_iter()
@@ -300,10 +301,23 @@ impl TypeArena {
                     .map(|tp| self.intern_type_param(tp))
                     .collect();
 
+                let interned_predicate = type_predicate.map(|tp| {
+                    let interned_annotation = tp.type_annotation.map(|ty| {
+                        let id = self.intern_deep(*ty);
+                        Box::new(self.get(id).clone())
+                    });
+                    TypePredicate {
+                        parameter_name: tp.parameter_name,
+                        asserts: tp.asserts,
+                        type_annotation: interned_annotation,
+                    }
+                });
+
                 self.intern(Type::Function {
                     params: interned_params,
                     return_type: Box::new(interned_ret),
                     type_params: interned_type_params,
+                    type_predicate: interned_predicate,
                 })
             }
 
@@ -381,6 +395,32 @@ impl TypeArena {
                     name,
                     constraint: interned_constraint,
                     default: interned_default,
+                })
+            }
+
+            Type::KeyOf(inner) => {
+                let inner_id = self.intern_deep(*inner);
+                self.intern(Type::KeyOf(Box::new(self.get(inner_id).clone())))
+            }
+
+            Type::IndexedAccess { object_type, index_type } => {
+                let obj_id = self.intern_deep(*object_type);
+                let idx_id = self.intern_deep(*index_type);
+                self.intern(Type::IndexedAccess {
+                    object_type: Box::new(self.get(obj_id).clone()),
+                    index_type: Box::new(self.get(idx_id).clone()),
+                })
+            }
+
+            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+                let constraint_id = self.intern_deep(*constraint);
+                let template_id = self.intern_deep(*template);
+                self.intern(Type::MappedType {
+                    type_param,
+                    constraint: Box::new(self.get(constraint_id).clone()),
+                    template: Box::new(self.get(template_id).clone()),
+                    readonly_modifier,
+                    optional_modifier,
                 })
             }
         }

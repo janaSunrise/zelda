@@ -15,7 +15,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use flow::{apply_guard, extract_type_guard, NarrowingContext};
+use flow::{apply_guard_with_resolver, extract_type_guard, NarrowingContext};
 
 use oxc_ast::ast::*;
 use oxc_span::Span;
@@ -24,6 +24,72 @@ use serde::Serialize;
 use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
 use crate::types::Type;
+
+// ============================================
+// String Distance Utilities for Suggestions
+// ============================================
+
+/// Compute the Levenshtein (edit) distance between two strings.
+///
+/// The Levenshtein distance is the minimum number of single-character edits
+/// (insertions, deletions, or substitutions) required to change one string
+/// into the other.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+
+    // Optimization: if one string is empty, distance is the length of the other
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    // Use two rows instead of a full matrix to save memory
+    let mut prev_row: Vec<usize> = (0..=b_len).collect();
+    let mut curr_row: Vec<usize> = vec![0; b_len + 1];
+
+    for (i, a_char) in a.chars().enumerate() {
+        curr_row[0] = i + 1;
+
+        for (j, b_char) in b.chars().enumerate() {
+            let cost = if a_char == b_char { 0 } else { 1 };
+            curr_row[j + 1] = (prev_row[j + 1] + 1) // deletion
+                .min(curr_row[j] + 1) // insertion
+                .min(prev_row[j] + cost); // substitution
+        }
+
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    prev_row[b_len]
+}
+
+/// Find the most similar name from a list of candidates.
+///
+/// Returns `Some(best_match)` if a candidate is found with a Levenshtein
+/// distance of 3 or less. The threshold of 3 was chosen to balance between
+/// finding useful suggestions and avoiding false positives.
+///
+/// TypeScript uses a more complex heuristic that considers:
+/// - Maximum distance relative to string length
+/// - Case-insensitive matching as a fallback
+/// We use a simpler threshold-based approach for now.
+fn find_similar_name<'a>(
+    name: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    // Max allowed distance (TSC uses around 3 for short names)
+    let max_distance = 3;
+
+    candidates
+        .filter(|c| {
+            let dist = levenshtein_distance(name, c);
+            dist > 0 && dist <= max_distance
+        })
+        .min_by_key(|c| levenshtein_distance(name, c))
+}
 
 /// Severity level of a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -139,6 +205,51 @@ impl TypeError {
         )
     }
 
+    /// Create a property-not-found error with a "Did you mean?" suggestion.
+    ///
+    /// If a similar property name is found among the available properties,
+    /// uses TS2551 with a suggestion. Otherwise falls back to TS2339.
+    pub fn property_not_found_with_suggestion(
+        prop: &str,
+        ty: &Type,
+        available_props: &[String],
+        span: Span,
+    ) -> Self {
+        if let Some(suggestion) =
+            find_similar_name(prop, available_props.iter().map(|s| s.as_str()))
+        {
+            Self::new(
+                errors::PROPERTY_NOT_EXIST_SUGGESTION.format(&[prop, &ty.to_string(), suggestion]),
+                span,
+                errors::PROPERTY_NOT_EXIST_SUGGESTION.code,
+            )
+        } else {
+            Self::property_not_found(prop, ty, span)
+        }
+    }
+
+    /// Create a cannot-find-name error with a "Did you mean?" suggestion.
+    ///
+    /// If a similar name is found among the available names,
+    /// uses TS2552 with a suggestion. Otherwise falls back to TS2304.
+    pub fn undefined_type_with_suggestion(
+        name: &str,
+        available_names: &[String],
+        span: Span,
+    ) -> Self {
+        if let Some(suggestion) =
+            find_similar_name(name, available_names.iter().map(|s| s.as_str()))
+        {
+            Self::new(
+                errors::CANNOT_FIND_NAME_SUGGESTION.format(&[name, suggestion]),
+                span,
+                errors::CANNOT_FIND_NAME_SUGGESTION.code,
+            )
+        } else {
+            Self::undefined_type(name, span)
+        }
+    }
+
     pub fn static_member_suggestion(prop: &str, ty: &Type, class_name: &str, span: Span) -> Self {
         Self::new(
             errors::STATIC_MEMBER_SUGGESTION.format(&[prop, &ty.to_string(), class_name]),
@@ -237,6 +348,10 @@ pub struct Checker<'a> {
     narrowing: NarrowingContext,
     /// Current class name for super call checking (Some when inside a class)
     current_class: Option<String>,
+    /// Variables that have been definitely assigned (initialized)
+    assigned_vars: std::collections::HashSet<String>,
+    /// Variables declared without initializer that need assignment checking
+    uninitialized_vars: std::collections::HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -246,6 +361,8 @@ impl<'a> Checker<'a> {
             errors: Vec::new(),
             narrowing: NarrowingContext::new(),
             current_class: None,
+            assigned_vars: std::collections::HashSet::new(),
+            uninitialized_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -261,6 +378,11 @@ impl<'a> Checker<'a> {
             Statement::FunctionDeclaration(func) => self.check_function_declaration(func),
             Statement::ExpressionStatement(expr) => {
                 self.check_expression(&expr.expression);
+
+                // Check for assertion function calls and apply narrowing
+                if let Expression::CallExpression(call) = &expr.expression {
+                    self.apply_assertion_narrowing(call);
+                }
             }
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
@@ -279,7 +401,11 @@ impl<'a> Checker<'a> {
                 let guard = extract_type_guard(&if_stmt.test);
                 if let Some(extracted) = &guard {
                     if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
-                        let narrowed = apply_guard(&original_type, &extracted.guard, extracted.negated);
+                        // Create resolver closure that can look up TypeRefs
+                        let resolver = |name: &str| {
+                            self.symbols.lookup_type(name).map(|s| s.ty.clone())
+                        };
+                        let narrowed = apply_guard_with_resolver(&original_type, &extracted.guard, extracted.negated, resolver);
                         self.narrowing.narrow(extracted.variable.clone(), narrowed);
                     }
                 }
@@ -291,7 +417,10 @@ impl<'a> Checker<'a> {
                     // Apply negated guard for else branch
                     if let Some(extracted) = &guard {
                         if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
-                            let narrowed = apply_guard(&original_type, &extracted.guard, !extracted.negated);
+                            let resolver = |name: &str| {
+                                self.symbols.lookup_type(name).map(|s| s.ty.clone())
+                            };
+                            let narrowed = apply_guard_with_resolver(&original_type, &extracted.guard, !extracted.negated, resolver);
                             self.narrowing.narrow(extracted.variable.clone(), narrowed);
                         }
                     }
@@ -377,6 +506,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// After calling an assertion function like `assertIsString(x)`, narrow x to string.
+    fn apply_assertion_narrowing(&mut self, call: &CallExpression) {
+        let callee_type = self.infer_expression(&call.callee);
+
+        if let Type::Function { type_predicate: Some(predicate), params, .. } = &callee_type {
+            if !predicate.asserts {
+                return;
+            }
+
+            // Match the predicate's parameter name to find which argument gets narrowed.
+            // For example, if the predicate says "asserts val is string" and val is the
+            // first parameter, we narrow the first argument passed to the call.
+            let param_index = params.iter().position(|p| p.name == predicate.parameter_name);
+
+            if let Some(idx) = param_index {
+                if let Some(arg) = call.arguments.get(idx) {
+                    if let Some(Expression::Identifier(ident)) = arg.as_expression() {
+                        if let Some(narrowed_type) = &predicate.type_annotation {
+                            self.narrowing.narrow(ident.name.to_string(), (**narrowed_type).clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Check an expression for type errors.
     ///
     /// This walks the expression tree and checks for:
@@ -453,7 +608,20 @@ impl<'a> Checker<'a> {
                 self.check_computed_member_expression(member);
             }
 
-            // Literals and identifiers don't need checking
+            // Check identifiers for used-before-assigned
+            Expression::Identifier(ident) => {
+                let name = ident.name.as_str();
+                // If the variable was declared without an initializer and hasn't been assigned yet
+                if self.uninitialized_vars.contains(name) && !self.assigned_vars.contains(name) {
+                    self.errors.push(TypeError::new(
+                        errors::USED_BEFORE_ASSIGNED.format(&[name]),
+                        ident.span,
+                        errors::USED_BEFORE_ASSIGNED.code,
+                    ));
+                }
+            }
+
+            // Literals don't need checking
             _ => {}
         }
     }
@@ -461,6 +629,11 @@ impl<'a> Checker<'a> {
     /// Check an assignment expression for type compatibility.
     fn check_assignment_expression(&mut self, assign: &AssignmentExpression) {
         self.check_expression(&assign.right);
+
+        // Mark identifier targets as assigned (for definite assignment analysis)
+        if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &assign.left {
+            self.assigned_vars.insert(ident.name.to_string());
+        }
 
         // Check property existence for member expression targets
         match &assign.left {
@@ -471,9 +644,11 @@ impl<'a> Checker<'a> {
                 // Skip checking for `any` and `unknown` types
                 if !matches!(object_type, Type::Any | Type::Unknown) {
                     if !self.has_property(&object_type, prop_name) {
-                        self.errors.push(TypeError::property_not_found(
+                        let available_props = self.get_available_properties(&object_type);
+                        self.errors.push(TypeError::property_not_found_with_suggestion(
                             prop_name,
                             &object_type,
+                            &available_props,
                             member.span,
                         ));
                     }
@@ -547,9 +722,12 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            self.errors.push(TypeError::property_not_found(
+            // Collect available properties for "Did you mean?" suggestions
+            let available_props = self.get_available_properties(&object_type);
+            self.errors.push(TypeError::property_not_found_with_suggestion(
                 prop_name,
                 &object_type,
+                &available_props,
                 member.span,
             ));
         }
@@ -568,9 +746,11 @@ impl<'a> Checker<'a> {
         // If indexing with a string literal, check property existence
         if let Type::StringLiteral(prop_name) = &index_type {
             if !self.has_property(&object_type, prop_name) {
-                self.errors.push(TypeError::property_not_found(
+                let available_props = self.get_available_properties(&object_type);
+                self.errors.push(TypeError::property_not_found_with_suggestion(
                     prop_name,
                     &object_type,
+                    &available_props,
                     member.span,
                 ));
             }
@@ -578,6 +758,72 @@ impl<'a> Checker<'a> {
 
         // Array/tuple indexing with number is always valid
         // Index signatures are checked separately
+    }
+
+    /// Collect all available property names from a type.
+    ///
+    /// Used for "Did you mean?" suggestions when a property is not found.
+    fn get_available_properties(&self, ty: &Type) -> Vec<String> {
+        // Convert primitives to their apparent types
+        let apparent_type = self.get_apparent_type(ty);
+
+        // Resolve TypeRef to its underlying type
+        let resolved = if let Type::TypeRef { name, type_args } = &apparent_type {
+            self.resolve_type_ref_with_args(name, type_args)
+        } else {
+            None
+        };
+        let ty = resolved.as_ref().unwrap_or(&apparent_type);
+
+        // For TypeParameter with a constraint, use the constraint
+        let resolved_constraint = if let Type::TypeParameter { constraint: Some(constraint), .. } = ty {
+            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref() {
+                self.resolve_type_ref_with_args(name, type_args).unwrap_or_else(|| (**constraint).clone())
+            } else {
+                (**constraint).clone()
+            };
+            Some(resolved_constraint)
+        } else {
+            None
+        };
+        let ty = resolved_constraint.as_ref().unwrap_or(ty);
+
+        match ty {
+            Type::Object { properties, extends, .. } => {
+                let all_props = self.resolve_object_properties(properties, extends);
+                all_props.iter().map(|p| p.name.clone()).collect()
+            }
+            Type::Union(types) => {
+                // For unions, collect properties that exist on ALL members
+                if types.is_empty() {
+                    return vec![];
+                }
+                let first_props: std::collections::HashSet<String> =
+                    self.get_available_properties(&types[0]).into_iter().collect();
+                types[1..]
+                    .iter()
+                    .fold(first_props, |acc, t| {
+                        let props: std::collections::HashSet<String> =
+                            self.get_available_properties(t).into_iter().collect();
+                        acc.intersection(&props).cloned().collect()
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            Type::Intersection(types) => {
+                // For intersections, collect properties from ALL members
+                types
+                    .iter()
+                    .flat_map(|t| self.get_available_properties(t))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect()
+            }
+            Type::ClassConstructor { static_members, .. } => {
+                static_members.iter().map(|p| p.name.clone()).collect()
+            }
+            _ => vec![],
+        }
     }
 
     /// Check if a type has a property with the given name.

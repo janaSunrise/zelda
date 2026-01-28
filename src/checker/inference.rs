@@ -303,6 +303,7 @@ impl<'a> Checker<'a> {
             params,
             return_type: Box::new(return_type),
             type_params: vec![],
+            type_predicate: None,
         }
     }
 
@@ -362,6 +363,7 @@ impl<'a> Checker<'a> {
             params,
             return_type: Box::new(return_type),
             type_params: vec![],
+            type_predicate: None,
         }
     }
 
@@ -603,7 +605,7 @@ impl<'a> Checker<'a> {
     fn infer_call_expression(&self, call: &CallExpression) -> Type {
         let callee_type = self.infer_expression(&call.callee);
 
-        if let Type::Function { params, return_type, type_params } = callee_type {
+        if let Type::Function { params, return_type, type_params, .. } = callee_type {
             // If no type parameters, just return the return type
             if type_params.is_empty() {
                 return *return_type;

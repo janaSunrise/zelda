@@ -67,6 +67,8 @@ pub enum Type {
         params: Vec<Param>,
         return_type: Box<Type>,
         type_params: Vec<TypeParam>,
+        /// Assertion predicate for assertion functions like `asserts val is string`
+        type_predicate: Option<TypePredicate>,
     },
 
     /// Class constructor type - stored in value namespace for classes.
@@ -91,6 +93,37 @@ pub enum Type {
         name: String,
         constraint: Option<Box<Type>>,
         default: Option<Box<Type>>,
+    },
+
+    /// keyof T - union of property name literals
+    ///
+    /// `keyof { x: number; y: string }` = `"x" | "y"`
+    KeyOf(Box<Type>),
+
+    /// Indexed access type: T[K]
+    ///
+    /// `Person["name"]` gets the type of the "name" property
+    /// `T[keyof T]` gets a union of all property value types
+    IndexedAccess {
+        object_type: Box<Type>,
+        index_type: Box<Type>,
+    },
+
+    /// Mapped type: { [K in keyof T]: T[K] }
+    ///
+    /// Transforms an object type by mapping over its keys.
+    /// Used for utility types like Partial, Required, Readonly, Pick, Record.
+    MappedType {
+        /// The type parameter variable name (e.g., "K" in [K in keyof T])
+        type_param: String,
+        /// The constraint on the type parameter (e.g., keyof T)
+        constraint: Box<Type>,
+        /// The template for each property value (e.g., T[K])
+        template: Box<Type>,
+        /// Modifier for readonly: Some(true) = +readonly, Some(false) = -readonly, None = unchanged
+        readonly_modifier: Option<bool>,
+        /// Modifier for optional: Some(true) = +?, Some(false) = -?, None = unchanged
+        optional_modifier: Option<bool>,
     },
 }
 
@@ -138,10 +171,12 @@ impl Hash for Type {
                 params,
                 return_type,
                 type_params,
+                type_predicate,
             } => {
                 params.hash(state);
                 return_type.hash(state);
                 type_params.hash(state);
+                type_predicate.hash(state);
             }
             Type::ClassConstructor {
                 params,
@@ -164,6 +199,18 @@ impl Hash for Type {
                 name.hash(state);
                 constraint.hash(state);
                 default.hash(state);
+            }
+            Type::KeyOf(inner) => inner.hash(state),
+            Type::IndexedAccess { object_type, index_type } => {
+                object_type.hash(state);
+                index_type.hash(state);
+            }
+            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+                type_param.hash(state);
+                constraint.hash(state);
+                template.hash(state);
+                readonly_modifier.hash(state);
+                optional_modifier.hash(state);
             }
         }
     }
@@ -197,6 +244,9 @@ impl Type {
             Type::ClassConstructor { .. } => 18,
             Type::TypeRef { .. } => 19,
             Type::TypeParameter { .. } => 20,
+            Type::KeyOf(_) => 21,
+            Type::IndexedAccess { .. } => 22,
+            Type::MappedType { .. } => 23,
         }
     }
 }
@@ -260,16 +310,19 @@ impl Ord for Type {
                     params: pa,
                     return_type: ra,
                     type_params: ta,
+                    type_predicate: tpa,
                 },
                 Type::Function {
                     params: pb,
                     return_type: rb,
                     type_params: tb,
+                    type_predicate: tpb,
                 },
             ) => pa
                 .cmp(pb)
                 .then_with(|| ra.cmp(rb))
-                .then_with(|| ta.cmp(tb)),
+                .then_with(|| ta.cmp(tb))
+                .then_with(|| tpa.cmp(tpb)),
             (
                 Type::TypeRef {
                     name: na,
@@ -310,6 +363,19 @@ impl Ord for Type {
                 .cmp(pb)
                 .then_with(|| ta.cmp(tb))
                 .then_with(|| sa.cmp(sb)),
+            (Type::KeyOf(a), Type::KeyOf(b)) => a.cmp(b),
+            (
+                Type::IndexedAccess { object_type: oa, index_type: ia },
+                Type::IndexedAccess { object_type: ob, index_type: ib },
+            ) => oa.cmp(ob).then_with(|| ia.cmp(ib)),
+            (
+                Type::MappedType { type_param: pa, constraint: ca, template: ta, readonly_modifier: ra, optional_modifier: oa },
+                Type::MappedType { type_param: pb, constraint: cb, template: tb, readonly_modifier: rb, optional_modifier: ob },
+            ) => pa.cmp(pb)
+                .then_with(|| ca.cmp(cb))
+                .then_with(|| ta.cmp(tb))
+                .then_with(|| ra.cmp(rb))
+                .then_with(|| oa.cmp(ob)),
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
     }
@@ -353,6 +419,7 @@ impl Type {
             params,
             return_type: Box::new(return_type),
             type_params: Vec::new(),
+            type_predicate: None,
         }
     }
 
@@ -365,6 +432,7 @@ impl Type {
             params,
             return_type: Box::new(return_type),
             type_params,
+            type_predicate: None,
         }
     }
 
@@ -577,6 +645,7 @@ impl fmt::Display for Type {
                 params,
                 return_type,
                 type_params,
+                type_predicate: _,
             } => {
                 if !type_params.is_empty() {
                     write!(f, "<")?;
@@ -677,6 +746,31 @@ impl fmt::Display for Type {
                 }
                 Ok(())
             }
+
+            Type::KeyOf(inner) => write!(f, "keyof {}", inner),
+
+            Type::IndexedAccess { object_type, index_type } => {
+                write!(f, "{}[{}]", object_type, index_type)
+            }
+
+            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+                write!(f, "{{ ")?;
+                // Readonly modifier
+                match readonly_modifier {
+                    Some(true) => write!(f, "+readonly ")?,
+                    Some(false) => write!(f, "-readonly ")?,
+                    None => {}
+                }
+                // Key mapping
+                write!(f, "[{} in {}]", type_param, constraint)?;
+                // Optional modifier
+                match optional_modifier {
+                    Some(true) => write!(f, "?")?,
+                    Some(false) => write!(f, "-?")?,
+                    None => {}
+                }
+                write!(f, ": {}; }}", template)
+            }
         }
     }
 }
@@ -774,6 +868,32 @@ impl TypeParam {
 pub struct IndexSignature {
     pub key_type: Box<Type>,
     pub value_type: Box<Type>,
+}
+
+/// Type predicate for assertion functions: `asserts val is string`
+///
+/// Used for type narrowing after calling assertion functions.
+/// - `parameter_name`: The parameter being asserted (e.g., "val")
+/// - `asserts`: Whether this is an `asserts` predicate (vs just `is`)
+/// - `type_annotation`: The type being asserted (e.g., `string`), or None for just `asserts val`
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TypePredicate {
+    /// The parameter name being asserted (e.g., "val" in `asserts val is string`)
+    pub parameter_name: String,
+    /// Whether this is an assertion predicate (true) or a regular type guard (false)
+    pub asserts: bool,
+    /// The type being asserted, if any (None for just `asserts val`)
+    pub type_annotation: Option<Box<Type>>,
+}
+
+impl TypePredicate {
+    pub fn new(parameter_name: impl Into<String>, asserts: bool, type_annotation: Option<Type>) -> Self {
+        Self {
+            parameter_name: parameter_name.into(),
+            asserts,
+            type_annotation: type_annotation.map(Box::new),
+        }
+    }
 }
 
 #[cfg(test)]

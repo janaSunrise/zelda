@@ -165,7 +165,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            Type::Function { params, return_type, type_params } => {
+            Type::Function { params, return_type, type_params, type_predicate } => {
                 // Don't substitute the function's own type parameters, only free variables
                 let bound_names: std::collections::HashSet<_> = type_params.iter().map(|tp| tp.name.clone()).collect();
                 let filtered_subs: HashMap<String, Type> = substitutions
@@ -196,10 +196,17 @@ impl<'a> Checker<'a> {
                     })
                     .collect();
 
+                let new_predicate = type_predicate.as_ref().map(|tp| crate::types::TypePredicate {
+                    parameter_name: tp.parameter_name.clone(),
+                    asserts: tp.asserts,
+                    type_annotation: tp.type_annotation.as_ref().map(|ty| Box::new(self.substitute_type_params(ty, &filtered_subs))),
+                });
+
                 Type::Function {
                     params: new_params,
                     return_type: Box::new(new_return),
                     type_params: new_type_params,
+                    type_predicate: new_predicate,
                 }
             }
 
@@ -248,6 +255,37 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // KeyOf: substitute into the inner type
+            Type::KeyOf(inner) => {
+                Type::KeyOf(Box::new(self.substitute_type_params(inner, substitutions)))
+            }
+
+            // IndexedAccess: substitute into both parts
+            Type::IndexedAccess { object_type, index_type } => {
+                Type::IndexedAccess {
+                    object_type: Box::new(self.substitute_type_params(object_type, substitutions)),
+                    index_type: Box::new(self.substitute_type_params(index_type, substitutions)),
+                }
+            }
+
+            // MappedType: substitute into constraint and template, but not the bound type_param
+            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+                // The type_param is a bound variable in the mapped type, so filter it from substitutions
+                let filtered_subs: HashMap<String, Type> = substitutions
+                    .iter()
+                    .filter(|(k, _)| *k != type_param)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                Type::MappedType {
+                    type_param: type_param.clone(),
+                    constraint: Box::new(self.substitute_type_params(constraint, &filtered_subs)),
+                    template: Box::new(self.substitute_type_params(template, &filtered_subs)),
+                    readonly_modifier: *readonly_modifier,
+                    optional_modifier: *optional_modifier,
+                }
+            }
+
             // Primitives and literals: no substitution needed
             Type::String
             | Type::Number
@@ -261,6 +299,210 @@ impl<'a> Checker<'a> {
             | Type::StringLiteral(_)
             | Type::NumberLiteral(_)
             | Type::BooleanLiteral(_) => ty.clone(),
+        }
+    }
+
+    /// Resolve a keyof type to a union of string literal types.
+    ///
+    /// `keyof { x: number; y: string }` resolves to `"x" | "y"`
+    pub fn resolve_keyof(&self, ty: &Type) -> Type {
+        // First resolve the type if it's a TypeRef
+        let resolved = match ty {
+            Type::TypeRef { name, type_args } => {
+                self.resolve_type_ref_with_args(name, type_args)
+                    .unwrap_or_else(|| ty.clone())
+            }
+            Type::TypeParameter { constraint: Some(constraint), .. } => {
+                // For a type parameter with constraint, keyof T extends C gives keyof C
+                return self.resolve_keyof(constraint);
+            }
+            other => other.clone(),
+        };
+
+        match &resolved {
+            Type::Object { properties, extends, .. } => {
+                // Collect all property names including from extended interfaces
+                let all_props = self.resolve_object_properties(properties, extends);
+                let keys: Vec<Type> = all_props
+                    .iter()
+                    .map(|p| Type::StringLiteral(p.name.clone()))
+                    .collect();
+
+                if keys.is_empty() {
+                    Type::Never
+                } else if keys.len() == 1 {
+                    keys.into_iter().next().unwrap()
+                } else {
+                    Type::Union(keys)
+                }
+            }
+            Type::Union(types) => {
+                // keyof (A | B) = (keyof A) & (keyof B)
+                let resolved_keys: Vec<Type> = types
+                    .iter()
+                    .map(|t| self.resolve_keyof(t))
+                    .collect();
+                if resolved_keys.is_empty() {
+                    Type::Never
+                } else if resolved_keys.len() == 1 {
+                    resolved_keys.into_iter().next().unwrap()
+                } else {
+                    Type::Intersection(resolved_keys)
+                }
+            }
+            Type::Intersection(types) => {
+                // keyof (A & B) = (keyof A) | (keyof B)
+                let resolved_keys: Vec<Type> = types
+                    .iter()
+                    .map(|t| self.resolve_keyof(t))
+                    .collect();
+                self.unify_types(resolved_keys)
+            }
+            Type::Any => Type::Union(vec![Type::String, Type::Number]),
+            Type::Unknown => Type::Never,
+            _ => Type::Never, // Primitives have no keys
+        }
+    }
+
+    /// Resolve a mapped type to a concrete object type.
+    ///
+    /// `{ [K in keyof Person]: Person[K] }` resolves to `{ name: string; age: number }`
+    pub fn resolve_mapped_type(
+        &self,
+        type_param: &str,
+        constraint: &Type,
+        template: &Type,
+        readonly_modifier: Option<bool>,
+        optional_modifier: Option<bool>,
+    ) -> Type {
+        // First resolve the constraint to get the keys
+        let resolved_constraint = if let Type::KeyOf(inner) = constraint {
+            self.resolve_keyof(inner)
+        } else {
+            constraint.clone()
+        };
+
+        // Get the list of keys to iterate over
+        let keys: Vec<Type> = match &resolved_constraint {
+            Type::Union(types) => types.clone(),
+            Type::StringLiteral(_) => vec![resolved_constraint.clone()],
+            Type::Never => return Type::Object {
+                properties: vec![],
+                index_signature: None,
+                extends: vec![],
+                type_params: vec![],
+            },
+            _ => return Type::Any, // Can't resolve mapped type with this constraint
+        };
+
+        // Build properties by substituting each key
+        let mut properties: Vec<Property> = Vec::new();
+
+        for key in keys {
+            if let Type::StringLiteral(key_name) = &key {
+                // Create substitution map: type_param -> key
+                let mut subs = HashMap::new();
+                subs.insert(type_param.to_string(), key.clone());
+
+                // Substitute in the template to get the property type
+                let prop_type = self.substitute_type_params(template, &subs);
+
+                // If the template is an indexed access like T[K], resolve it
+                let resolved_prop_type = if let Type::IndexedAccess { object_type, index_type } = &prop_type {
+                    self.resolve_indexed_access(object_type, index_type)
+                } else {
+                    prop_type
+                };
+
+                let mut prop = Property::new(key_name.clone(), resolved_prop_type);
+
+                // Apply modifiers
+                if let Some(true) = optional_modifier {
+                    prop = prop.optional();
+                }
+                if let Some(true) = readonly_modifier {
+                    prop = prop.readonly();
+                }
+
+                properties.push(prop);
+            }
+        }
+
+        Type::Object {
+            properties,
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        }
+    }
+
+    /// Resolve an indexed access type T[K] to the property type.
+    ///
+    /// `Person["name"]` resolves to `string`
+    /// `Person[keyof Person]` resolves to union of all property types
+    pub fn resolve_indexed_access(&self, object_type: &Type, index_type: &Type) -> Type {
+        // First, try to resolve KeyOf if that's what index_type is
+        let resolved_index = if let Type::KeyOf(inner) = index_type {
+            self.resolve_keyof(inner)
+        } else {
+            index_type.clone()
+        };
+
+        // Resolve the object type if it's a TypeRef
+        let resolved_object = match object_type {
+            Type::TypeRef { name, type_args } => {
+                self.resolve_type_ref_with_args(name, type_args)
+                    .unwrap_or_else(|| object_type.clone())
+            }
+            other => other.clone(),
+        };
+
+        match &resolved_index {
+            // String literal key: T["prop"]
+            Type::StringLiteral(key) => {
+                self.get_property_type(&resolved_object, key)
+            }
+            // Union of keys: T["a" | "b"] = T["a"] | T["b"]
+            Type::Union(keys) => {
+                let types: Vec<Type> = keys
+                    .iter()
+                    .map(|k| self.resolve_indexed_access(&resolved_object, k))
+                    .collect();
+                self.unify_types(types)
+            }
+            // Number literal: mainly for tuples
+            Type::NumberLiteral(idx) => {
+                if let Type::Tuple(types) = &resolved_object {
+                    let i = *idx as usize;
+                    types.get(i).cloned().unwrap_or(Type::Any)
+                } else if let Type::Array(elem) = &resolved_object {
+                    (**elem).clone()
+                } else {
+                    Type::Any
+                }
+            }
+            // String index: get index signature value type
+            Type::String => {
+                if let Type::Object { index_signature: Some(idx), .. } = &resolved_object {
+                    if matches!(*idx.key_type, Type::String) {
+                        return (*idx.value_type).clone();
+                    }
+                }
+                Type::Any
+            }
+            // Number index: for arrays or number index signatures
+            Type::Number => {
+                if let Type::Array(elem) = &resolved_object {
+                    return (**elem).clone();
+                }
+                if let Type::Object { index_signature: Some(idx), .. } = &resolved_object {
+                    if matches!(*idx.key_type, Type::Number) {
+                        return (*idx.value_type).clone();
+                    }
+                }
+                Type::Any
+            }
+            _ => Type::Any,
         }
     }
 

@@ -71,6 +71,10 @@ pub const ARG_NOT_ASSIGNABLE: Diagnostic = Diagnostic::new(2345, "Argument of ty
 // ============================================
 
 pub const NOT_CALLABLE: Diagnostic = Diagnostic::new(2349, "This expression is not callable.");
+pub const TYPE_CONVERSION_MISTAKE: Diagnostic = Diagnostic::new(2352, "Conversion of type '{0}' to type '{1}' may be a mistake because neither type sufficiently overlaps with the other.");
+pub const LEFT_ARITHMETIC_ANY_NUMBER: Diagnostic = Diagnostic::new(2362, "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.");
+pub const RIGHT_ARITHMETIC_ANY_NUMBER: Diagnostic = Diagnostic::new(2363, "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.");
+pub const OPERATOR_CANNOT_BE_APPLIED: Diagnostic = Diagnostic::new(2365, "Operator '{0}' cannot be applied to types '{1}' and '{2}'.");
 pub const NOT_CONSTRUCTABLE: Diagnostic = Diagnostic::new(2351, "This expression is not constructable.");
 pub const EXCESS_PROPERTY: Diagnostic = Diagnostic::new(2353, "Object literal may only specify known properties, and '{0}' does not exist in type '{1}'.");
 pub const MUST_RETURN_VALUE: Diagnostic = Diagnostic::new(2355, "A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.");
@@ -90,6 +94,7 @@ pub const STATIC_INCORRECTLY_EXTENDS: Diagnostic = Diagnostic::new(2417, "Class 
 pub const INCORRECTLY_IMPLEMENTS: Diagnostic = Diagnostic::new(2420, "Class '{0}' incorrectly implements interface '{1}'.");
 pub const IMPLEMENTS_INVALID_TYPE: Diagnostic = Diagnostic::new(2422, "A class can only implement an object type or intersection of object types with statically known members.");
 pub const PROTECTED_PROPERTY: Diagnostic = Diagnostic::new(2445, "Property '{0}' is protected and only accessible within class '{1}' and its subclasses.");
+pub const USED_BEFORE_ASSIGNED: Diagnostic = Diagnostic::new(2454, "Variable '{0}' is used before being assigned.");
 
 // ============================================
 // 2500-2549: Function Call Errors
@@ -107,13 +112,23 @@ pub const WRONG_ARG_COUNT: Diagnostic = Diagnostic::new(2554, "Expected {0} argu
 pub const WRONG_ARG_COUNT_RANGE: Diagnostic = Diagnostic::new(2555, "Expected {0}-{1} arguments, but got {2}.");
 pub const TOO_FEW_ARGS: Diagnostic = Diagnostic::new(2556, "Expected at least {0} arguments, but got {1}.");
 pub const NO_COMMON_PROPERTIES: Diagnostic = Diagnostic::new(2559, "Type '{0}' has no properties in common with type '{1}'.");
+pub const PROPERTY_USED_BEFORE_ASSIGNED: Diagnostic = Diagnostic::new(2565, "Property '{0}' is used before being assigned in the constructor.");
 pub const STATIC_MEMBER_SUGGESTION: Diagnostic = Diagnostic::new(2576, "Property '{0}' does not exist on type '{1}'. Did you mean to access the static member '{2}.{0}' instead?");
+
+// ============================================
+// 2550-2599: Suggestion Errors
+// ============================================
+
+pub const PROPERTY_NOT_EXIST_SUGGESTION: Diagnostic = Diagnostic::new(2551, "Property '{0}' does not exist on type '{1}'. Did you mean '{2}'?");
+pub const CANNOT_FIND_NAME_SUGGESTION: Diagnostic = Diagnostic::new(2552, "Cannot find name '{0}'. Did you mean '{1}'?");
 
 // ============================================
 // 2600-2699: This/Context Errors
 // ============================================
 
 pub const IMPLICIT_ANY_THIS: Diagnostic = Diagnostic::new(2683, "'this' implicitly has type 'any' because it does not have a type annotation.");
+pub const TYPE_USED_AS_VALUE: Diagnostic = Diagnostic::new(2693, "'{0}' only refers to a type, but is being used as a value here.");
+pub const VALUE_USED_AS_TYPE: Diagnostic = Diagnostic::new(2749, "'{0}' refers to a value, but is being used as a type here. Did you mean 'typeof {0}'?");
 pub const THIS_NOT_ASSIGNABLE: Diagnostic = Diagnostic::new(2684, "The 'this' context of type '{0}' is not assignable to method's 'this' of type '{1}'.");
 
 // ============================================

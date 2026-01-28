@@ -259,6 +259,7 @@ impl Binder {
             params,
             return_type: Box::new(return_type),
             type_params: vec![],
+            type_predicate: None,
         }
     }
 

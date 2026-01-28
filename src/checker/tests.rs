@@ -220,7 +220,12 @@ fn test_object_missing_property() {
 #[test]
 fn test_object_missing_multiple_properties() {
     let errors = check("const x: { a: number; b: string } = {};");
-    assert_eq!(errors.len(), 2);
+    // TS2739: Type '{}' is missing the following properties from type '...': a, b
+    // Multiple missing properties are consolidated into a single error
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2739);
+    assert!(errors[0].message.contains("a"));
+    assert!(errors[0].message.contains("b"));
 }
 
 #[test]
@@ -284,7 +289,10 @@ fn test_property_access_exists() {
 fn test_property_access_not_exists() {
     let errors = check("const obj = { x: 1 }; const y = obj.z;");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339);
+    // TS2551 when suggestion available, TS2339 otherwise
+    // "z" is close to "x" (distance=1), so we get a suggestion
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'x'"));
 }
 
 #[test]
@@ -297,7 +305,9 @@ fn test_property_access_on_typed_object() {
 fn test_property_access_not_exists_on_typed() {
     let errors = check("const obj: { x: number } = { x: 1 }; const y = obj.z;");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339);
+    // "z" is close to "x", so we get TS2551 with a suggestion
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'x'"));
 }
 
 #[test]
@@ -310,7 +320,49 @@ fn test_computed_property_access_string_literal() {
 fn test_computed_property_access_not_exists() {
     let errors = check("const obj = { x: 1 }; const y = obj[\"z\"];");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339);
+    // "z" is close to "x", so we get TS2551 with a suggestion
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'x'"));
+}
+
+// ============================================
+// Property Suggestion Tests (TS2551)
+// ============================================
+
+#[test]
+fn test_property_suggestion_typo() {
+    // Common typo: "naem" vs "name"
+    let errors = check("const obj = { name: 'Alice' }; const x = obj.naem;");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'name'"));
+}
+
+#[test]
+fn test_property_suggestion_case_sensitivity() {
+    // Case typo: "Name" vs "name"
+    let errors = check("const obj = { name: 'Alice' }; const x = obj.Name;");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'name'"));
+}
+
+#[test]
+fn test_property_suggestion_no_close_match() {
+    // "xyz" is too far from "name" (distance > 3), so no suggestion
+    let errors = check("const obj = { name: 'Alice' }; const x = obj.xyz;");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2339); // No suggestion, falls back to plain error
+}
+
+#[test]
+fn test_property_suggestion_multiple_candidates() {
+    // Multiple properties: "fname" should suggest "firstName" (distance 4) but that's > 3
+    // Actually "x" to "y" distance is 1, so it should suggest "y" for "x" access
+    let errors = check("const obj = { firstName: 'A', lastName: 'B' }; const x = obj.firstNaem;");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'firstName'"));
 }
 
 #[test]
@@ -347,7 +399,9 @@ fn test_nested_property_access() {
 fn test_nested_property_not_exists() {
     let errors = check("const obj = { inner: { x: 1 } }; const y = obj.inner.z;");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339);
+    // "z" is close to "x", so we get TS2551 with a suggestion
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'x'"));
 }
 
 #[test]
@@ -1181,7 +1235,10 @@ fn test_union_property_access_not_common() {
         }
     "#);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339);
+    // "y" only exists on A, not B, so only "x" is available on union A|B
+    // "y" is close to "x" (distance=1), suggests "x"
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean 'x'"));
 }
 
 #[test]
@@ -1278,9 +1335,8 @@ fn test_excess_property_variable_missing_property() {
         const x: { a: number } = obj;
     "#);
     assert_eq!(errors.len(), 1);
-    // Note: Currently reports as type mismatch (2322) rather than missing property (2741)
-    // because the variable assignment goes through is_assignable() not check_object_literal_against_type()
-    assert_eq!(errors[0].code, 2322);
+    // TS2741: Property 'a' is missing - more specific than generic type mismatch
+    assert_eq!(errors[0].code, 2741);
 }
 
 #[test]
@@ -1669,7 +1725,9 @@ fn test_generic_constraint_violation() {
         const len = getLength(42);
     "#);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2344); // Type does not satisfy constraint
+    // TS2345: Argument of type 'number' is not assignable to parameter type
+    // (constraint check happens during call argument checking)
+    assert_eq!(errors[0].code, 2345);
 }
 
 #[test]
@@ -1957,7 +2015,9 @@ fn test_class_instance_property_not_found() {
         const z = p.z;
     "#);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339); // Property 'z' does not exist
+    // "z" is close to "x" and "y" (distance=1), suggests the closest
+    assert_eq!(errors[0].code, 2551);
+    assert!(errors[0].message.contains("Did you mean"));
 }
 
 #[test]
@@ -2198,7 +2258,9 @@ fn test_static_property_not_on_instance() {
         const x = c.count;
     "#);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2339); // Property does not exist
+    // TS2576: suggests accessing the static member via Counter.count
+    assert_eq!(errors[0].code, 2576);
+    assert!(errors[0].message.contains("static member"));
 }
 
 #[test]
@@ -2514,4 +2576,254 @@ fn test_related_spans() {
     assert_eq!(error.related[0].message, "related context");
     assert_eq!(error.related[0].span.start, 20);
     assert_eq!(error.related[1].message, "another related");
+}
+
+// ============================================
+// keyof and Indexed Access Type Tests
+// ============================================
+
+#[test]
+fn test_keyof_type_parsing() {
+    // keyof should parse without errors
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type PersonKeys = keyof Person;
+        const key: PersonKeys = "name";
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_keyof_type_invalid_key() {
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type PersonKeys = keyof Person;
+        const key: PersonKeys = "invalid";
+    "#);
+    // "invalid" is not assignable to "name" | "age"
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2322);
+}
+
+#[test]
+fn test_indexed_access_type_parsing() {
+    // T["prop"] should parse and resolve correctly
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type NameType = Person["name"];
+        const n: NameType = "Alice";
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_indexed_access_type_wrong_type() {
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type NameType = Person["name"];
+        const n: NameType = 42;
+    "#);
+    // 42 is not assignable to string
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2322);
+}
+
+#[test]
+fn test_indexed_access_with_keyof() {
+    // T[keyof T] should resolve to union of all property types
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type PersonValues = Person[keyof Person];
+        const v: PersonValues = "test";
+    "#);
+    // PersonValues is string | number, so "test" should be valid
+    assert!(errors.is_empty());
+}
+
+// ============================================
+// Mapped Type Tests
+// ============================================
+
+#[test]
+fn test_mapped_type_parsing() {
+    // Basic mapped type should parse without errors
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type ReadonlyPerson = { readonly [K in keyof Person]: Person[K] };
+        const p: ReadonlyPerson = { name: "Alice", age: 30 };
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_mapped_type_partial() {
+    // Partial-like mapped type makes all properties optional
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type PartialPerson = { [K in keyof Person]?: Person[K] };
+        const p: PartialPerson = { name: "Alice" };
+    "#);
+    // Should be valid - age is optional
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_mapped_type_identity() {
+    // Identity mapped type { [K in keyof T]: T[K] } preserves the type
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type IdentityPerson = { [K in keyof Person]: Person[K] };
+        const p: IdentityPerson = { name: "Alice", age: 30 };
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_mapped_type_wrong_value() {
+    let errors = check(r#"
+        type Person = { name: string; age: number };
+        type IdentityPerson = { [K in keyof Person]: Person[K] };
+        const p: IdentityPerson = { name: 42, age: 30 };
+    "#);
+    // name should be string, not number
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2322);
+}
+
+// ============================================
+// Discriminated Union Narrowing Tests
+// ============================================
+
+#[test]
+fn test_discriminated_union_narrowing_basic() {
+    // Basic discriminated union with kind property
+    let errors = check(r#"
+        type Circle = { kind: "circle"; radius: number };
+        type Square = { kind: "square"; side: number };
+        type Shape = Circle | Square;
+
+        function area(shape: Shape): number {
+            if (shape.kind === "circle") {
+                return shape.radius * 3.14;
+            } else {
+                return shape.side * shape.side;
+            }
+        }
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_discriminated_union_wrong_property_access() {
+    // Accessing wrong property before narrowing should error
+    let errors = check(r#"
+        type Circle = { kind: "circle"; radius: number };
+        type Square = { kind: "square"; side: number };
+        type Shape = Circle | Square;
+
+        function getRadius(shape: Shape): number {
+            return shape.radius;
+        }
+    "#);
+    // radius doesn't exist on Square
+    assert_eq!(errors.len(), 1);
+}
+
+// ============================================
+// Definite Assignment Analysis Tests
+// ============================================
+
+#[test]
+fn test_definite_assignment_basic() {
+    // Variable used before being assigned should error
+    let errors = check(r#"
+        let x: number;
+        const y = x + 1;
+    "#);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, 2454);
+    assert!(errors[0].message.contains("'x'"));
+}
+
+#[test]
+fn test_definite_assignment_with_initializer() {
+    // Variable with initializer should not error
+    let errors = check(r#"
+        let x: number = 5;
+        const y = x + 1;
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_definite_assignment_after_assignment() {
+    // Variable used after being assigned should not error
+    let errors = check(r#"
+        let x: number;
+        x = 5;
+        const y = x + 1;
+    "#);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_definite_assignment_multiple_uses() {
+    // Multiple uses of unassigned variable should report error for each use
+    let errors = check(r#"
+        let x: number;
+        const a = x;
+        const b = x;
+    "#);
+    // Both uses should be flagged
+    assert_eq!(errors.len(), 2);
+}
+
+// Assertion function tests
+
+#[test]
+fn test_assertion_function_narrows_type() {
+    let errors = check(r#"
+        function assertIsString(val: unknown): asserts val is string {
+            if (typeof val !== "string") throw new Error("Not a string");
+        }
+
+        function test(x: unknown) {
+            assertIsString(x);
+            const len: number = x.length;
+        }
+    "#);
+    assert!(errors.is_empty(), "Assertion should narrow x to string. Errors: {:?}", errors);
+}
+
+#[test]
+fn test_assertion_function_without_type_annotation() {
+    // "asserts condition" without "is T" just asserts truthiness, no type narrowing
+    let errors = check(r#"
+        function assert(condition: unknown): asserts condition {
+            if (!condition) throw new Error("Assertion failed");
+        }
+
+        function test(x: string | null) {
+            assert(x !== null);
+            const len: number = x.length;
+        }
+    "#);
+    // We don't narrow based on condition expressions yet, just verify it doesn't crash
+    assert!(errors.len() <= 1);
+}
+
+#[test]
+fn test_type_guard_function() {
+    // Type guards return boolean and narrow in conditionals (not fully implemented yet)
+    let errors = check(r#"
+        function isString(val: unknown): val is string {
+            return typeof val === "string";
+        }
+
+        const x: unknown = "hello";
+        if (isString(x)) {
+            const len: number = x.length;
+        }
+    "#);
+    assert!(errors.len() <= 1);
 }

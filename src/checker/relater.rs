@@ -85,6 +85,36 @@ impl<'a> Checker<'a> {
     }
 
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
+        // Resolve KeyOf types to their union of string literals
+        if let Type::KeyOf(inner) = source {
+            let resolved = self.resolve_keyof(inner);
+            return self.is_assignable(&resolved, target);
+        }
+        if let Type::KeyOf(inner) = target {
+            let resolved = self.resolve_keyof(inner);
+            return self.is_assignable(source, &resolved);
+        }
+
+        // Resolve IndexedAccess types to their property types
+        if let Type::IndexedAccess { object_type, index_type } = source {
+            let resolved = self.resolve_indexed_access(object_type, index_type);
+            return self.is_assignable(&resolved, target);
+        }
+        if let Type::IndexedAccess { object_type, index_type } = target {
+            let resolved = self.resolve_indexed_access(object_type, index_type);
+            return self.is_assignable(source, &resolved);
+        }
+
+        // Resolve MappedType to concrete object type
+        if let Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } = source {
+            let resolved = self.resolve_mapped_type(type_param, constraint, template, *readonly_modifier, *optional_modifier);
+            return self.is_assignable(&resolved, target);
+        }
+        if let Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } = target {
+            let resolved = self.resolve_mapped_type(type_param, constraint, template, *readonly_modifier, *optional_modifier);
+            return self.is_assignable(source, &resolved);
+        }
+
         // Handle TypeRef resolution with type argument instantiation
         if let Type::TypeRef { name, type_args } = source {
             if let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
