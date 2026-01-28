@@ -1,5 +1,3 @@
-//! Test orchestration - runs zelda and tsc on all fixtures.
-
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -9,7 +7,6 @@ use crate::tsc::run_tsc;
 use crate::types::TestResult;
 use crate::zelda::run_zelda;
 
-/// Discover all TypeScript test fixtures in a directory.
 pub fn discover_fixtures(fixtures_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     discover_recursive(fixtures_dir, &mut files);
@@ -34,7 +31,6 @@ fn discover_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Run a single test file through both zelda and tsc.
 pub fn run_single_test(file: &Path, zelda_binary: &Path, iterations: usize) -> TestResult {
     // Run multiple iterations and take the minimum time for more stable benchmarks
     let mut best_zelda_ms = u64::MAX;
@@ -77,7 +73,6 @@ pub fn run_single_test(file: &Path, zelda_binary: &Path, iterations: usize) -> T
         }
     }
 
-    // Handle case where neither succeeded
     if best_zelda_ms == u64::MAX {
         best_zelda_ms = 0;
     }
@@ -94,7 +89,6 @@ pub fn run_single_test(file: &Path, zelda_binary: &Path, iterations: usize) -> T
     )
 }
 
-/// Run all tests in parallel.
 pub fn run_all_tests(
     fixtures: &[PathBuf],
     zelda_binary: &Path,
@@ -106,7 +100,6 @@ pub fn run_all_tests(
         .collect()
 }
 
-/// Run tests sequentially (useful for debugging).
 #[allow(dead_code)]
 pub fn run_all_tests_sequential(
     fixtures: &[PathBuf],

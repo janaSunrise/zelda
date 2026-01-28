@@ -1,5 +1,3 @@
-//! Run tsc and parse its output.
-
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -8,13 +6,11 @@ use regex::Regex;
 
 use crate::types::DiagnosticError;
 
-/// Result of running tsc on a file.
 pub struct TscResult {
     pub errors: Vec<DiagnosticError>,
     pub duration_ms: u64,
 }
 
-/// Run tsc on the given file and return parsed errors.
 pub fn run_tsc(file: &Path) -> Result<TscResult, String> {
     let start = Instant::now();
 

@@ -1,10 +1,7 @@
-//! Results formatting for table and JSON output.
-
 use colored::Colorize;
 
 use crate::types::{JsonReport, JsonTestResult, Summary, TestResult};
 
-/// Print results as a formatted table.
 pub fn print_table(results: &[TestResult], summary: &Summary) {
     println!();
     println!("{}", "TSC Compatibility Report".bold());
@@ -17,14 +14,12 @@ pub fn print_table(results: &[TestResult], summary: &Summary) {
     const TIME_W: usize = 11;
     const SPEED_W: usize = 10;
 
-    // Print header
     println!(
         "{:FILE_W$} {:>NUM_W$} {:>NUM_W$} {:>NUM_W$} {:>TIME_W$} {:>TIME_W$} {:>SPEED_W$}",
         "File", "Matched", "Missing", "Extra", "Zelda(ms)", "TSC(ms)", "Speedup"
     );
     println!("{}", "─".repeat(FILE_W + NUM_W * 3 + TIME_W * 2 + SPEED_W + 6));
 
-    // Print each result
     for result in results {
         let file_name = result
             .file
@@ -58,7 +53,6 @@ pub fn print_table(results: &[TestResult], summary: &Summary) {
         let tsc_col = format!("{:>TIME_W$}", result.tsc_ms);
         let speedup_col = format!("{:>SPEED_W$.1}x", speedup);
 
-        // Apply colors after formatting
         let file_colored = if result.passed() {
             file_col.green()
         } else {
@@ -103,7 +97,6 @@ pub fn print_table(results: &[TestResult], summary: &Summary) {
         }
     }
 
-    // Print summary
     println!();
     println!("{}", "─".repeat(FILE_W + NUM_W * 3 + TIME_W * 2 + SPEED_W + 6));
     println!();
@@ -157,7 +150,6 @@ pub fn print_table(results: &[TestResult], summary: &Summary) {
     println!();
 }
 
-/// Print results as JSON.
 pub fn print_json(results: &[TestResult], summary: Summary) {
     let json_results: Vec<JsonTestResult> = results.iter().map(JsonTestResult::from).collect();
 
@@ -169,7 +161,6 @@ pub fn print_json(results: &[TestResult], summary: Summary) {
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }
 
-/// Print a compact one-line summary (useful for CI).
 pub fn print_compact(summary: &Summary) {
     let status = if summary.failed == 0 {
         "PASS".green().bold()

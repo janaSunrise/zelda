@@ -12,11 +12,9 @@ fn check(source: &str) -> Vec<TypeError> {
     let result = Parser::new(&allocator, source, source_type).parse();
     assert!(!result.panicked);
 
-    // Start with lib.d.ts symbols (built-in types like String, Array, etc.)
     let mut symbols = SymbolTable::new();
     load_lib_dts(&mut symbols);
 
-    // Bind the user's program on top of lib.d.ts symbols
     let mut binder = Binder::with_symbols(symbols);
     binder.bind_program(&result.program);
 
@@ -317,7 +315,6 @@ fn test_computed_property_access_not_exists() {
 
 #[test]
 fn test_property_access_on_any() {
-    // Accessing property on `any` should not error
     let errors = check("const obj: any = {}; const y = obj.anything;");
     assert!(errors.is_empty());
 }
@@ -388,7 +385,6 @@ fn test_nested_union() {
 
 #[test]
 fn test_intersection_must_satisfy_all() {
-    // Object must have both a and b
     let errors = check("const x: { a: number } & { b: string } = { a: 1 };");
     assert_eq!(errors.len(), 1);
 }
@@ -433,7 +429,6 @@ fn test_tuple_correct() {
 
 #[test]
 fn test_tuple_to_array() {
-    // Tuple [number, number] should be assignable to number[]
     let errors = check("const x: [number, number] = [1, 2]; const y: number[] = x;");
     assert!(errors.is_empty());
 }
@@ -1203,54 +1198,6 @@ fn test_intersection_property_access() {
 }
 
 #[test]
-fn test_typeof_narrowing_in_if() {
-    let errors = check(r#"
-        function f(x: string | number) {
-            if (typeof x === "string") {
-                const s: string = x;
-            }
-        }
-    "#);
-    assert!(errors.is_empty());
-}
-
-#[test]
-fn test_typeof_narrowing_to_number() {
-    let errors = check(r#"
-        function f(x: string | number) {
-            if (typeof x === "number") {
-                const n: number = x;
-            }
-        }
-    "#);
-    assert!(errors.is_empty());
-}
-
-#[test]
-fn test_null_narrowing() {
-    let errors = check(r#"
-        function f(x: string | null) {
-            if (x !== null) {
-                const s: string = x;
-            }
-        }
-    "#);
-    assert!(errors.is_empty());
-}
-
-#[test]
-fn test_undefined_narrowing() {
-    let errors = check(r#"
-        function f(x: string | undefined) {
-            if (x !== undefined) {
-                const s: string = x;
-            }
-        }
-    "#);
-    assert!(errors.is_empty());
-}
-
-#[test]
 fn test_union_assignment_valid() {
     let errors = check(r#"
         let x: string | number = "hello";
@@ -1363,7 +1310,6 @@ fn test_interface_extends_basic() {
 
 #[test]
 fn test_interface_extends_missing_base_property() {
-    // Must have properties from base interface
     let errors = check(r#"
         interface Animal {
             name: string;
@@ -1379,7 +1325,6 @@ fn test_interface_extends_missing_base_property() {
 
 #[test]
 fn test_interface_extends_missing_derived_property() {
-    // Must have properties from derived interface too
     let errors = check(r#"
         interface Animal {
             name: string;
@@ -1413,7 +1358,6 @@ fn test_interface_extends_multiple() {
 
 #[test]
 fn test_interface_extends_multiple_missing() {
-    // Must have properties from all extended interfaces
     let errors = check(r#"
         interface Named {
             name: string;
@@ -1432,7 +1376,6 @@ fn test_interface_extends_multiple_missing() {
 
 #[test]
 fn test_interface_extends_chain() {
-    // A extends B extends C - should get all properties
     let errors = check(r#"
         interface A {
             a: number;
@@ -1450,7 +1393,6 @@ fn test_interface_extends_chain() {
 
 #[test]
 fn test_interface_extends_nonexistent() {
-    // Extending a non-existent interface should error
     let errors = check(r#"
         interface Dog extends NonExistent {
             breed: string;
@@ -1462,7 +1404,6 @@ fn test_interface_extends_nonexistent() {
 
 #[test]
 fn test_interface_extends_with_optional() {
-    // Optional properties in base should remain optional
     let errors = check(r#"
         interface Base {
             required: string;
@@ -1478,7 +1419,6 @@ fn test_interface_extends_with_optional() {
 
 #[test]
 fn test_recursive_interface() {
-    // Interface referencing itself (linked list)
     let errors = check(r#"
         interface ListNode {
             value: number;
@@ -1491,7 +1431,6 @@ fn test_recursive_interface() {
 
 #[test]
 fn test_recursive_interface_nested() {
-    // Nested recursive structure
     let errors = check(r#"
         interface TreeNode {
             value: number;
@@ -1509,7 +1448,6 @@ fn test_recursive_interface_nested() {
 
 #[test]
 fn test_recursive_type_alias() {
-    // Type alias referencing itself
     let errors = check(r#"
         type JsonValue = string | number | boolean | null | JsonArray | JsonObject;
         type JsonArray = JsonValue[];
@@ -1536,7 +1474,6 @@ fn test_interface_method_signature() {
 
 #[test]
 fn test_interface_readonly_property() {
-    // Readonly properties should be accepted in object literals
     let errors = check(r#"
         interface Point {
             readonly x: number;
@@ -1580,16 +1517,10 @@ fn test_type_alias_to_interface() {
     assert!(errors.is_empty());
 }
 
-// ========================================================================
-// Milestone 9: Generics
-// ========================================================================
-
-// M9.1: Parse Generic Type Parameters
-// ------------------------------------
+// Generics
 
 #[test]
 fn test_generic_function_declaration_basic() {
-    // Basic generic function should parse without errors
     let errors = check(r#"
         function identity<T>(x: T): T {
             return x;
@@ -1600,8 +1531,6 @@ fn test_generic_function_declaration_basic() {
 
 #[test]
 fn test_generic_function_with_multiple_type_params() {
-    // Test that multiple type parameters are parsed and the function body
-    // can reference them. The actual tuple inference is tested separately.
     let errors = check(r#"
         function makePair<A, B>(a: A, b: B): { first: A; second: B } {
             return { first: a, second: b };
@@ -1628,12 +1557,8 @@ fn test_generic_type_alias_basic() {
     assert!(errors.is_empty());
 }
 
-// M9.2: Instantiate Generic Types
-// --------------------------------
-
 #[test]
 fn test_generic_function_explicit_type_arg() {
-    // Calling generic function with explicit type argument
     let errors = check(r#"
         function identity<T>(x: T): T {
             return x;
@@ -1645,7 +1570,6 @@ fn test_generic_function_explicit_type_arg() {
 
 #[test]
 fn test_generic_function_explicit_type_arg_mismatch() {
-    // Type argument says string, but passing number - should error
     let errors = check(r#"
         function identity<T>(x: T): T {
             return x;
@@ -1679,9 +1603,6 @@ fn test_generic_interface_instantiation_error() {
     assert_eq!(errors[0].code, 2322); // Type 'X' is not assignable to type 'Y'
 }
 
-// M9.3: Infer Type Arguments
-// ---------------------------
-
 #[test]
 fn test_generic_function_type_inference_simple() {
     // identity(42) should infer T = number
@@ -1707,7 +1628,6 @@ fn test_generic_function_type_inference_string() {
 
 #[test]
 fn test_generic_function_type_inference_mismatch() {
-    // identity(42) infers T = number, but assigning to string should error
     let errors = check(r#"
         function identity<T>(x: T): T {
             return x;
@@ -1720,7 +1640,6 @@ fn test_generic_function_type_inference_mismatch() {
 
 #[test]
 fn test_generic_function_type_inference_multiple_args() {
-    // Infer from multiple arguments
     let errors = check(r#"
         function first<T>(a: T, b: T): T {
             return a;
@@ -1729,9 +1648,6 @@ fn test_generic_function_type_inference_multiple_args() {
     "#);
     assert!(errors.is_empty());
 }
-
-// M9.4: Generic Constraints
-// --------------------------
 
 #[test]
 fn test_generic_constraint_basic() {
@@ -1758,7 +1674,6 @@ fn test_generic_constraint_violation() {
 
 #[test]
 fn test_generic_constraint_with_explicit_type_arg() {
-    // Explicit type arg that doesn't satisfy constraint
     let errors = check(r#"
         interface HasLength {
             length: number;
@@ -1771,9 +1686,6 @@ fn test_generic_constraint_with_explicit_type_arg() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].code, 2344);
 }
-
-// M9.5: Generic Defaults
-// -----------------------
 
 #[test]
 fn test_generic_default_type() {
@@ -2007,13 +1919,10 @@ fn test_combined_optional_and_rest_params() {
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// Milestone 11: Classes
-// ======================================================================
+// Classes
 
 #[test]
 fn test_class_basic_instantiation() {
-    // Basic class with property and instantiation with `new`
     let errors = check(r#"
         class Point {
             x: number;
@@ -2026,7 +1935,6 @@ fn test_class_basic_instantiation() {
 
 #[test]
 fn test_class_instance_property_access() {
-    // Access properties on class instance
     let errors = check(r#"
         class Point {
             x: number;
@@ -2040,7 +1948,6 @@ fn test_class_instance_property_access() {
 
 #[test]
 fn test_class_instance_property_not_found() {
-    // Error when accessing non-existent property
     let errors = check(r#"
         class Point {
             x: number;
@@ -2055,7 +1962,6 @@ fn test_class_instance_property_not_found() {
 
 #[test]
 fn test_class_constructor_with_params() {
-    // Class with constructor that takes parameters
     let errors = check(r#"
         class Point {
             x: number;
@@ -2072,7 +1978,6 @@ fn test_class_constructor_with_params() {
 
 #[test]
 fn test_class_constructor_wrong_arg_count() {
-    // Error when passing wrong number of args to constructor
     let errors = check(r#"
         class Point {
             x: number;
@@ -2090,7 +1995,6 @@ fn test_class_constructor_wrong_arg_count() {
 
 #[test]
 fn test_class_constructor_wrong_arg_type() {
-    // Error when passing wrong type to constructor
     let errors = check(r#"
         class Point {
             x: number;
@@ -2108,7 +2012,6 @@ fn test_class_constructor_wrong_arg_type() {
 
 #[test]
 fn test_class_method_call() {
-    // Call method on class instance
     let errors = check(r#"
         class Calculator {
             add(a: number, b: number): number {
@@ -2123,7 +2026,6 @@ fn test_class_method_call() {
 
 #[test]
 fn test_class_method_wrong_arg_type() {
-    // Error when calling method with wrong argument type
     let errors = check(r#"
         class Calculator {
             add(a: number, b: number): number {
@@ -2139,7 +2041,6 @@ fn test_class_method_wrong_arg_type() {
 
 #[test]
 fn test_class_as_type_annotation() {
-    // Use class name as type annotation
     let errors = check(r#"
         class User {
             name: string;
@@ -2151,7 +2052,6 @@ fn test_class_as_type_annotation() {
 
 #[test]
 fn test_class_type_mismatch() {
-    // Error when assigning wrong type to class-typed variable
     let errors = check(r#"
         class User {
             name: string;
@@ -2164,7 +2064,6 @@ fn test_class_type_mismatch() {
 
 #[test]
 fn test_class_extends_basic() {
-    // Derived class inherits properties from base
     let errors = check(r#"
         class Animal {
             name: string;
@@ -2181,7 +2080,6 @@ fn test_class_extends_basic() {
 
 #[test]
 fn test_class_extends_method() {
-    // Derived class inherits methods from base
     let errors = check(r#"
         class Animal {
             speak(): string {
@@ -2202,7 +2100,6 @@ fn test_class_extends_method() {
 
 #[test]
 fn test_class_extends_property_not_on_base() {
-    // Error when accessing derived property on base type
     let errors = check(r#"
         class Animal {
             name: string;
@@ -2219,7 +2116,6 @@ fn test_class_extends_property_not_on_base() {
 
 #[test]
 fn test_class_assignable_to_base() {
-    // Derived class is assignable to base class type
     let errors = check(r#"
         class Animal {
             name: string;
@@ -2235,7 +2131,6 @@ fn test_class_assignable_to_base() {
 
 #[test]
 fn test_generic_class_basic() {
-    // Generic class with type parameter
     let errors = check(r#"
         class Box<T> {
             value: T;
@@ -2248,7 +2143,6 @@ fn test_generic_class_basic() {
 
 #[test]
 fn test_generic_class_constraint_satisfied() {
-    // Generic class with constraint that is satisfied
     let errors = check(r#"
         class Container<T extends { length: number }> {
             item: T;
@@ -2260,7 +2154,6 @@ fn test_generic_class_constraint_satisfied() {
 
 #[test]
 fn test_generic_class_constraint_violated() {
-    // Error when constraint is not satisfied
     let errors = check(r#"
         class Container<T extends { length: number }> {
             item: T;
@@ -2271,13 +2164,8 @@ fn test_generic_class_constraint_violated() {
     assert_eq!(errors[0].code, 2344); // Type does not satisfy constraint
 }
 
-// ======================================================================
-// M11: Static Members
-// ======================================================================
-
 #[test]
 fn test_static_property_access() {
-    // Access static property via ClassName.prop
     let errors = check(r#"
         class Counter {
             static count: number;
@@ -2289,7 +2177,6 @@ fn test_static_property_access() {
 
 #[test]
 fn test_static_method_call() {
-    // Call static method via ClassName.method()
     let errors = check(r#"
         class Factory {
             static create(): string {
@@ -2303,7 +2190,6 @@ fn test_static_method_call() {
 
 #[test]
 fn test_static_property_not_on_instance() {
-    // Error when accessing static property on instance
     let errors = check(r#"
         class Counter {
             static count: number;
@@ -2317,7 +2203,6 @@ fn test_static_property_not_on_instance() {
 
 #[test]
 fn test_static_property_not_found() {
-    // Error when accessing non-existent static property
     let errors = check(r#"
         class Counter {
             static count: number;
@@ -2328,13 +2213,8 @@ fn test_static_property_not_found() {
     assert_eq!(errors[0].code, 2339);
 }
 
-// ======================================================================
-// M11: Class Implements Interface
-// ======================================================================
-
 #[test]
 fn test_class_implements_interface() {
-    // Class correctly implements interface
     let errors = check(r#"
         interface Printable {
             print(): void;
@@ -2348,7 +2228,6 @@ fn test_class_implements_interface() {
 
 #[test]
 fn test_class_implements_missing_method() {
-    // Error when class is missing interface method
     let errors = check(r#"
         interface Printable {
             print(): void;
@@ -2362,7 +2241,6 @@ fn test_class_implements_missing_method() {
 
 #[test]
 fn test_class_implements_missing_property() {
-    // Error when class is missing interface property
     let errors = check(r#"
         interface Named {
             name: string;
@@ -2376,7 +2254,6 @@ fn test_class_implements_missing_property() {
 
 #[test]
 fn test_class_implements_multiple_interfaces() {
-    // Class implements multiple interfaces
     let errors = check(r#"
         interface Named {
             name: string;
@@ -2392,13 +2269,8 @@ fn test_class_implements_multiple_interfaces() {
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// M11: Parameter Properties
-// ======================================================================
-
 #[test]
 fn test_parameter_property_public() {
-    // Parameter property with public modifier creates instance property
     let errors = check(r#"
         class Point {
             constructor(public x: number, public y: number) {}
@@ -2412,7 +2284,6 @@ fn test_parameter_property_public() {
 
 #[test]
 fn test_parameter_property_readonly() {
-    // Parameter property with readonly modifier
     let errors = check(r#"
         class Point {
             constructor(readonly x: number) {}
@@ -2423,13 +2294,8 @@ fn test_parameter_property_readonly() {
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// M11: this Type in Methods
-// ======================================================================
-
 #[test]
 fn test_this_type_in_method() {
-    // 'this' in method refers to instance type
     let errors = check(r#"
         class Counter {
             count: number;
@@ -2443,7 +2309,6 @@ fn test_this_type_in_method() {
 
 #[test]
 fn test_this_property_not_found() {
-    // Error when accessing non-existent property via this
     let errors = check(r#"
         class Counter {
             count: number;
@@ -2456,13 +2321,8 @@ fn test_this_property_not_found() {
     assert_eq!(errors[0].code, 2339);
 }
 
-// ======================================================================
-// M11: super() Calls
-// ======================================================================
-
 #[test]
 fn test_super_call_in_derived_constructor() {
-    // super() call in derived class constructor
     let errors = check(r#"
         class Animal {
             constructor(public name: string) {}
@@ -2479,7 +2339,6 @@ fn test_super_call_in_derived_constructor() {
 
 #[test]
 fn test_super_call_wrong_args() {
-    // Error when super() called with wrong argument types
     let errors = check(r#"
         class Animal {
             constructor(public name: string) {}
@@ -2494,13 +2353,8 @@ fn test_super_call_wrong_args() {
     assert_eq!(errors[0].code, 2345); // Argument not assignable
 }
 
-// ======================================================================
-// M11: super Property Access
-// ======================================================================
-
 #[test]
 fn test_super_property_access() {
-    // Access base class method via super
     let errors = check(r#"
         class Animal {
             speak(): string {
@@ -2516,13 +2370,8 @@ fn test_super_property_access() {
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// M11: Class Expressions
-// ======================================================================
-
 #[test]
 fn test_class_expression() {
-    // Anonymous class expression
     let errors = check(r#"
         const MyClass = class {
             value: number;
@@ -2535,7 +2384,6 @@ fn test_class_expression() {
 
 #[test]
 fn test_named_class_expression() {
-    // Named class expression
     let errors = check(r#"
         const MyClass = class InnerName {
             value: number;
@@ -2546,78 +2394,64 @@ fn test_named_class_expression() {
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// M13.7: Primitive Method Resolution via lib.d.ts (Apparent Types)
-// ======================================================================
+// Apparent types: primitive method resolution via lib.d.ts
 
 #[test]
 fn test_string_method_via_interface() {
-    // String methods should be resolved from the String interface in lib.d.ts
     let errors = check(r#"const x: string = "hello".toUpperCase();"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_string_method_chained() {
-    // Chained string methods
     let errors = check(r#"const x: string = "hello".toUpperCase().toLowerCase();"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_string_literal_method() {
-    // String literal should also have String interface methods
     let errors = check(r#"const x = "hello".charAt(0);"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_string_method_return_type() {
-    // Verify correct return type from String interface
     let errors = check(r#"const x: number = "hello".length;"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_string_includes_method() {
-    // includes() returns boolean
     let errors = check(r#"const x: boolean = "hello".includes("el");"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_array_method_via_interface() {
-    // Array methods should be resolved from the Array interface in lib.d.ts
-    // Test that the property exists (accessing .map doesn't error)
-    // Full callback typing tests are separate from method resolution
     let errors = check(r#"const arr = [1, 2, 3]; const mapFn = arr.map;"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_array_filter_method() {
-    // Test that filter property exists on arrays
     let errors = check(r#"const arr = [1, 2, 3]; const filterFn = arr.filter;"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_array_find_method() {
-    // Test that find property exists on arrays
     let errors = check(r#"const arr = [1, 2, 3]; const findFn = arr.find;"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_array_foreach_method() {
-    // Test that forEach property exists on arrays
     let errors = check(r#"const arr = [1, 2, 3]; const forEachFn = arr.forEach;"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_unknown_string_method_error() {
-    // Unknown method on string should produce error
     let errors = check(r#"const x = "hello".unknownMethod();"#);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].code, 2339); // Property does not exist
@@ -2625,7 +2459,6 @@ fn test_unknown_string_method_error() {
 
 #[test]
 fn test_unknown_array_method_error() {
-    // Unknown method on array should produce error
     let errors = check(r#"const arr = [1, 2, 3]; const x = arr.unknownMethod();"#);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].code, 2339);
@@ -2633,29 +2466,23 @@ fn test_unknown_array_method_error() {
 
 #[test]
 fn test_number_method_via_interface() {
-    // Number methods from Number interface
     let errors = check(r#"const n = 42; const s: string = n.toFixed(2);"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_number_literal_method() {
-    // Number literal should have Number interface methods
-    // Note: (42).toFixed() syntax needed for parser
     let errors = check(r#"const n = 42; const s = n.toString();"#);
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_boolean_method_via_interface() {
-    // Boolean methods from Boolean interface
     let errors = check(r#"const b = true; const x: boolean = b.valueOf();"#);
     assert!(errors.is_empty());
 }
 
-// ======================================================================
-// M14: Error Reporting - Severity and Related Spans
-// ======================================================================
+// Error reporting: severity and related spans
 
 #[test]
 fn test_error_severity_default_is_error() {

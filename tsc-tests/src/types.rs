@@ -1,10 +1,7 @@
-//! Shared data structures for TSC comparison testing.
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// A diagnostic error from either zelda or tsc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticError {
     pub code: u32,
@@ -13,7 +10,6 @@ pub struct DiagnosticError {
     pub column: u32,
 }
 
-/// Result of checking a single test file with both zelda and tsc.
 #[derive(Debug)]
 pub struct TestResult {
     pub file: PathBuf,
@@ -27,13 +23,11 @@ pub struct TestResult {
 }
 
 impl TestResult {
-    /// Check if this test passed (exact match of error codes).
     pub fn passed(&self) -> bool {
         self.missing.is_empty() && self.extra.is_empty()
     }
 }
 
-/// Summary statistics for all test results.
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
     pub total_files: usize,
@@ -48,7 +42,6 @@ pub struct Summary {
 }
 
 impl Summary {
-    /// Create a summary from a collection of test results.
     pub fn from_results(results: &[TestResult]) -> Self {
         let total_files = results.len();
         let passed = results.iter().filter(|r| r.passed()).count();
@@ -81,14 +74,12 @@ impl Summary {
     }
 }
 
-/// Output format for JSON reports.
 #[derive(Debug, Serialize)]
 pub struct JsonReport {
     pub summary: Summary,
     pub results: Vec<JsonTestResult>,
 }
 
-/// Individual test result for JSON output.
 #[derive(Debug, Serialize)]
 pub struct JsonTestResult {
     pub file: String,

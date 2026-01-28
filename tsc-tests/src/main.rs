@@ -58,7 +58,6 @@ enum OutputFormat {
 fn main() {
     let cli = Cli::parse();
 
-    // Verify zelda binary exists
     if !cli.zelda.exists() {
         eprintln!(
             "Error: zelda binary not found at '{}'",
@@ -93,14 +92,10 @@ fn main() {
         cli.iterations
     );
 
-    // Run all tests
     let results = run_all_tests(&fixtures, &cli.zelda, cli.iterations);
-
-    // Generate summary
     let summary = Summary::from_results(&results);
-
-    // Output results
     let failed = summary.failed;
+
     match cli.output {
         OutputFormat::Table => {
             if cli.summary_only {
