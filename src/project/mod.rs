@@ -13,6 +13,7 @@ use std::sync::Arc;
 use oxc_allocator::Allocator;
 use oxc_parser::{Parser, ParserReturn};
 use oxc_span::{SourceType, Span};
+use serde::Serialize;
 
 use crate::binder::{Binder, BindingError};
 use crate::checker::{Checker, TypeError};
@@ -31,19 +32,33 @@ pub struct ModuleInfo {
     pub is_declaration: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProjectError {
     Binding(BindingError),
     Type(TypeError),
     ModuleNotFound {
         specifier: String,
         from_file: PathBuf,
+        #[serde(serialize_with = "serialize_span")]
         span: Span,
     },
     FileReadError {
         path: PathBuf,
         error: String,
     },
+}
+
+/// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
+fn serialize_span<S>(span: &Span, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+    let mut state = serializer.serialize_struct("Span", 2)?;
+    state.serialize_field("start", &span.start)?;
+    state.serialize_field("end", &span.end)?;
+    state.end()
 }
 
 /// Coordinates multi-file type checking with module resolution and caching.

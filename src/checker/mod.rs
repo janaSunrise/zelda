@@ -19,13 +19,15 @@ use flow::{apply_guard, extract_type_guard, NarrowingContext};
 
 use oxc_ast::ast::*;
 use oxc_span::Span;
+use serde::Serialize;
 
 use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
 use crate::types::Type;
 
 /// Severity level of a diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Errors prevent successful compilation.
     Error,
@@ -33,9 +35,10 @@ pub enum Severity {
     Warning,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TypeError {
     pub message: String,
+    #[serde(serialize_with = "serialize_span")]
     pub span: Span,
     pub code: u32,
     pub severity: Severity,
@@ -44,10 +47,23 @@ pub struct TypeError {
 }
 
 /// A related span provides additional context for an error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RelatedSpan {
     pub message: String,
+    #[serde(serialize_with = "serialize_span")]
     pub span: Span,
+}
+
+/// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
+fn serialize_span<S>(span: &Span, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+    let mut state = serializer.serialize_struct("Span", 2)?;
+    state.serialize_field("start", &span.start)?;
+    state.serialize_field("end", &span.end)?;
+    state.end()
 }
 
 impl TypeError {

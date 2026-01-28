@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use oxc_span::Span;
+use serde::Serialize;
 
 use crate::types::Type;
 
@@ -87,18 +88,33 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DuplicateSymbolError {
     pub name: String,
+    #[serde(serialize_with = "serialize_span")]
     pub existing: Span,
+    #[serde(serialize_with = "serialize_span")]
     pub duplicate: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UndefinedSymbolError {
     pub name: String,
+    #[serde(serialize_with = "serialize_span")]
     pub span: Span,
     pub is_type: bool,
+}
+
+/// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
+fn serialize_span<S>(span: &Span, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+    let mut state = serializer.serialize_struct("Span", 2)?;
+    state.serialize_field("start", &span.start)?;
+    state.serialize_field("end", &span.end)?;
+    state.end()
 }
 
 /// The symbol table tracks all declared symbols and their scopes.
