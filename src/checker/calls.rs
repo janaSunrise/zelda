@@ -16,7 +16,7 @@
 use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 
-use crate::types::{Param, Type};
+use crate::types::{Param, Type, TypeId};
 
 use super::{Checker, TypeError};
 
@@ -40,7 +40,8 @@ impl<'a> Checker<'a> {
         }
 
         // Get the callee type
-        let callee_type = self.infer_expression(&call.callee);
+        let callee_type_id = self.infer_expression(&call.callee);
+        let callee_type = self.get_type(callee_type_id).clone();
 
         // Only check if it's a function type
         if let Type::Function {
@@ -50,7 +51,7 @@ impl<'a> Checker<'a> {
         } = callee_type
         {
             // Collect argument types for type inference
-            let arg_types: Vec<Type> = call
+            let arg_type_ids: Vec<TypeId> = call
                 .arguments
                 .iter()
                 .filter_map(|arg| arg.as_expression())
@@ -58,7 +59,7 @@ impl<'a> Checker<'a> {
                 .collect();
 
             // Get explicit type arguments from the call if present
-            let explicit_type_args: Vec<Type> = call
+            let explicit_type_args: Vec<TypeId> = call
                 .type_arguments
                 .as_ref()
                 .map(|args| {
@@ -76,7 +77,7 @@ impl<'a> Checker<'a> {
                     self.build_substitution_map(&type_params, &explicit_type_args)
                 } else {
                     // Infer type arguments from argument types
-                    self.infer_type_args_from_call(&type_params, &params, &arg_types)
+                    self.infer_type_args_from_call(&type_params, &params, &arg_type_ids)
                 }
             } else {
                 rustc_hash::FxHashMap::default()
@@ -86,18 +87,20 @@ impl<'a> Checker<'a> {
             // Use TS2344 for explicit type args, TS2345 for inferred type args
             let has_explicit_type_args = !explicit_type_args.is_empty();
             for tp in &type_params {
-                if let Some(constraint) = &tp.constraint
-                    && let Some(type_arg) = substitutions.get(&tp.name)
-                        && !self.satisfies_constraint(type_arg, constraint) {
+                if let Some(constraint_id) = tp.constraint
+                    && let Some(&type_arg_id) = substitutions.get(&tp.name)
+                        && !self.satisfies_constraint(type_arg_id, constraint_id) {
+                            let type_arg_str = self.fmt_type(type_arg_id);
+                            let constraint_str = self.fmt_type(constraint_id);
                             if has_explicit_type_args {
                                 // Explicit type args: "Type 'X' does not satisfy constraint 'Y'"
                                 self.errors.push(TypeError::constraint_violation(
-                                    type_arg, constraint, call.span,
+                                    &type_arg_str, &constraint_str, call.span,
                                 ));
                             } else {
                                 // Inferred type args: "Argument of type 'X' is not assignable to parameter of type 'Y'"
                                 self.errors.push(TypeError::argument_not_assignable(
-                                    type_arg, constraint, call.span,
+                                    &type_arg_str, &constraint_str, call.span,
                                 ));
                             }
                         }
@@ -109,9 +112,9 @@ impl<'a> Checker<'a> {
                 .map(|p| Param {
                     name: p.name.clone(),
                     ty: if substitutions.is_empty() {
-                        p.ty.clone()
+                        p.ty
                     } else {
-                        self.substitute_type_params(&p.ty, &substitutions)
+                        self.substitute_type_params(p.ty, &substitutions)
                     },
                     optional: p.optional,
                     rest: p.rest,
@@ -132,28 +135,41 @@ impl<'a> Checker<'a> {
         };
 
         // Look up the class type and its extends clause
-        let class_type = self.symbols.lookup_type(&class_name).map(|s| s.ty.clone());
-        let parent_class_name = match class_type {
-            Some(Type::Object { extends, .. }) if !extends.is_empty() => {
-                if let Type::TypeRef { name, .. } = &extends[0] {
-                    name.clone()
-                } else {
-                    return;
+        let class_type_id = self.symbols.lookup_type(&class_name).map(|s| s.ty);
+        let parent_class_name = match class_type_id {
+            Some(ty_id) => {
+                let ty = self.get_type(ty_id).clone();
+                match ty {
+                    Type::Object { extends, .. } if !extends.is_empty() => {
+                        let first_extend = self.get_type(extends[0]).clone();
+                        if let Type::TypeRef { name, .. } = first_extend {
+                            name
+                        } else {
+                            return;
+                        }
+                    }
+                    _ => return, // No parent class
                 }
             }
-            _ => return, // No parent class
+            None => return,
         };
 
         // Get parent's constructor type
-        let parent_constructor = self
+        let parent_constructor_id = self
             .symbols
             .lookup(&parent_class_name)
-            .map(|s| s.ty.clone());
+            .map(|s| s.ty);
 
-        let params = match parent_constructor {
-            Some(Type::ClassConstructor { params, .. }) => params,
-            Some(Type::Function { params, .. }) => params, // For backward compatibility
-            _ => return,
+        let params = match parent_constructor_id {
+            Some(ty_id) => {
+                let ty = self.get_type(ty_id).clone();
+                match ty {
+                    Type::ClassConstructor { params, .. } => params,
+                    Type::Function { params, .. } => params, // For backward compatibility
+                    _ => return,
+                }
+            }
+            None => return,
         };
 
         // Check arguments against parent constructor parameters
@@ -171,31 +187,35 @@ impl<'a> Checker<'a> {
         }
 
         // Get the constructor type from the value namespace
-        let constructor_type = if let Expression::Identifier(ident) = &new_expr.callee {
-            self.symbols
-                .lookup(ident.name.as_str())
-                .map(|s| s.ty.clone())
+        let constructor_type_id = if let Expression::Identifier(ident) = &new_expr.callee {
+            self.symbols.lookup(ident.name.as_str()).map(|s| s.ty)
         } else {
             None
         };
 
         // Extract params and type_params from either Function or ClassConstructor
-        let (params, type_params) = match constructor_type {
-            Some(Type::Function {
-                params,
-                type_params,
-                ..
-            }) => (params, type_params),
-            Some(Type::ClassConstructor {
-                params,
-                type_params,
-                ..
-            }) => (params, type_params),
-            _ => return,
+        let (params, type_params) = match constructor_type_id {
+            Some(ty_id) => {
+                let ty = self.get_type(ty_id).clone();
+                match ty {
+                    Type::Function {
+                        params,
+                        type_params,
+                        ..
+                    } => (params, type_params),
+                    Type::ClassConstructor {
+                        params,
+                        type_params,
+                        ..
+                    } => (params, type_params),
+                    _ => return,
+                }
+            }
+            None => return,
         };
 
         // Collect argument types
-        let arg_types: Vec<Type> = new_expr
+        let arg_type_ids: Vec<TypeId> = new_expr
             .arguments
             .iter()
             .filter_map(|arg| arg.as_expression())
@@ -203,7 +223,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         // Get explicit type arguments if present
-        let explicit_type_args: Vec<Type> = new_expr
+        let explicit_type_args: Vec<TypeId> = new_expr
             .type_arguments
             .as_ref()
             .map(|args| {
@@ -219,7 +239,7 @@ impl<'a> Checker<'a> {
             if !explicit_type_args.is_empty() {
                 self.build_substitution_map(&type_params, &explicit_type_args)
             } else {
-                self.infer_type_args_from_call(&type_params, &params, &arg_types)
+                self.infer_type_args_from_call(&type_params, &params, &arg_type_ids)
             }
         } else {
             rustc_hash::FxHashMap::default()
@@ -229,19 +249,21 @@ impl<'a> Checker<'a> {
         // Use TS2344 for explicit type args, TS2345 for inferred type args
         let has_explicit_type_args = !explicit_type_args.is_empty();
         for tp in &type_params {
-            if let Some(constraint) = &tp.constraint
-                && let Some(type_arg) = substitutions.get(&tp.name)
-                    && !self.satisfies_constraint(type_arg, constraint) {
+            if let Some(constraint_id) = tp.constraint
+                && let Some(&type_arg_id) = substitutions.get(&tp.name)
+                    && !self.satisfies_constraint(type_arg_id, constraint_id) {
+                        let type_arg_str = self.fmt_type(type_arg_id);
+                        let constraint_str = self.fmt_type(constraint_id);
                         if has_explicit_type_args {
                             self.errors.push(TypeError::constraint_violation(
-                                type_arg,
-                                constraint,
+                                &type_arg_str,
+                                &constraint_str,
                                 new_expr.span,
                             ));
                         } else {
                             self.errors.push(TypeError::argument_not_assignable(
-                                type_arg,
-                                constraint,
+                                &type_arg_str,
+                                &constraint_str,
                                 new_expr.span,
                             ));
                         }
@@ -254,9 +276,9 @@ impl<'a> Checker<'a> {
             .map(|p| Param {
                 name: p.name.clone(),
                 ty: if substitutions.is_empty() {
-                    p.ty.clone()
+                    p.ty
                 } else {
-                    self.substitute_type_params(&p.ty, &substitutions)
+                    self.substitute_type_params(p.ty, &substitutions)
                 },
                 optional: p.optional,
                 rest: p.rest,
@@ -313,29 +335,32 @@ impl<'a> Checker<'a> {
 
         for (i, arg) in args.iter().enumerate() {
             if let Some(expr) = arg.as_expression() {
-                let arg_type = self.infer_expression(expr);
+                let arg_type_id = self.infer_expression(expr);
 
-                let param_type = if i < non_rest_param_count {
+                let param_type_id = if i < non_rest_param_count {
                     // Regular parameter
-                    &params[i].ty
+                    params[i].ty
                 } else if has_rest {
                     // Rest parameter - check against element type of the array
                     let rest_param = params.last().unwrap();
-                    if let Type::Array(elem_type) = &rest_param.ty {
-                        elem_type.as_ref()
+                    let rest_ty = self.get_type(rest_param.ty).clone();
+                    if let Type::Array(elem_type_id) = rest_ty {
+                        elem_type_id
                     } else {
                         // Rest param should always be array type
-                        &rest_param.ty
+                        rest_param.ty
                     }
                 } else {
                     // No more params and no rest - already handled by arg count check
                     break;
                 };
 
-                if !self.is_assignable(&arg_type, param_type) {
+                if !self.is_assignable(arg_type_id, param_type_id) {
+                    let arg_str = self.fmt_type(arg_type_id);
+                    let param_str = self.fmt_type(param_type_id);
                     self.errors.push(TypeError::argument_not_assignable(
-                        &arg_type,
-                        param_type,
+                        &arg_str,
+                        &param_str,
                         expr.span(),
                     ));
                 }

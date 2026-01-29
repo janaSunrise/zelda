@@ -13,19 +13,17 @@ use rustc_hash::FxHashMap;
 
 use oxc_ast::ast::*;
 
-use crate::types::Type;
+use crate::types::{Type, TypeArena, TypeId};
 
 /// Tracks narrowed types within a scope.
 ///
 /// When we enter a conditional branch (if/else), we can narrow types
 /// based on the condition expression.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NarrowingContext {
-    /// Variable name -> narrowed type. Uses FxHashMap for faster lookups.
-    narrowed: FxHashMap<String, Type>,
+    /// Variable name -> narrowed type ID. Uses FxHashMap for faster lookups.
+    narrowed: FxHashMap<String, TypeId>,
 }
-
 
 impl NarrowingContext {
     pub fn new() -> Self {
@@ -33,13 +31,13 @@ impl NarrowingContext {
     }
 
     /// Narrow a variable to a specific type.
-    pub fn narrow(&mut self, name: String, ty: Type) {
+    pub fn narrow(&mut self, name: String, ty: TypeId) {
         self.narrowed.insert(name, ty);
     }
 
-    /// Get the narrowed type for a variable, if any.
-    pub fn get_narrowed(&self, name: &str) -> Option<&Type> {
-        self.narrowed.get(name)
+    /// Get the narrowed type ID for a variable, if any.
+    pub fn get_narrowed_id(&self, name: &str) -> Option<TypeId> {
+        self.narrowed.get(name).copied()
     }
 
     /// Clear all narrowing information (e.g., when exiting a branch).
@@ -128,13 +126,14 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
         // instanceof: x instanceof Foo
         BinaryOperator::Instanceof => {
             if let Expression::Identifier(left) = &binary.left
-                && let Expression::Identifier(right) = &binary.right {
-                    return Some(ExtractedGuard {
-                        variable: left.name.to_string(),
-                        guard: TypeGuard::Instanceof(right.name.to_string()),
-                        negated: false,
-                    });
-                }
+                && let Expression::Identifier(right) = &binary.right
+            {
+                return Some(ExtractedGuard {
+                    variable: left.name.to_string(),
+                    guard: TypeGuard::Instanceof(right.name.to_string()),
+                    negated: false,
+                });
+            }
             None
         }
 
@@ -143,10 +142,7 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
 }
 
 /// Extract guard from equality/inequality expressions.
-fn extract_equality_guard(
-    binary: &BinaryExpression,
-    is_inequality: bool,
-) -> Option<ExtractedGuard> {
+fn extract_equality_guard(binary: &BinaryExpression, is_inequality: bool) -> Option<ExtractedGuard> {
     // typeof x === "string"
     if let Some(guard) = extract_typeof_guard(&binary.left, &binary.right, is_inequality) {
         return Some(guard);
@@ -194,14 +190,15 @@ fn extract_typeof_guard(
 ) -> Option<ExtractedGuard> {
     if let Expression::UnaryExpression(unary) = left
         && matches!(unary.operator, UnaryOperator::Typeof)
-            && let Expression::Identifier(ident) = &unary.argument
-                && let Expression::StringLiteral(lit) = right {
-                    return Some(ExtractedGuard {
-                        variable: ident.name.to_string(),
-                        guard: TypeGuard::Typeof(lit.value.to_string()),
-                        negated,
-                    });
-                }
+        && let Expression::Identifier(ident) = &unary.argument
+        && let Expression::StringLiteral(lit) = right
+    {
+        return Some(ExtractedGuard {
+            variable: ident.name.to_string(),
+            guard: TypeGuard::Typeof(lit.value.to_string()),
+            negated,
+        });
+    }
     None
 }
 
@@ -212,15 +209,16 @@ fn extract_null_guard(
     is_inequality: bool,
 ) -> Option<ExtractedGuard> {
     if let Expression::Identifier(ident) = left
-        && let Expression::NullLiteral(_) = right {
-            return Some(ExtractedGuard {
-                variable: ident.name.to_string(),
-                guard: TypeGuard::NotNull,
-                // For x === null, we negate (narrowing to null)
-                // For x !== null, we don't negate (removing null)
-                negated: !is_inequality,
-            });
-        }
+        && let Expression::NullLiteral(_) = right
+    {
+        return Some(ExtractedGuard {
+            variable: ident.name.to_string(),
+            guard: TypeGuard::NotNull,
+            // For x === null, we negate (narrowing to null)
+            // For x !== null, we don't negate (removing null)
+            negated: !is_inequality,
+        });
+    }
     None
 }
 
@@ -232,15 +230,16 @@ fn extract_undefined_guard(
 ) -> Option<ExtractedGuard> {
     if let Expression::Identifier(ident) = left
         && let Expression::Identifier(right_ident) = right
-            && right_ident.name == "undefined" {
-                return Some(ExtractedGuard {
-                    variable: ident.name.to_string(),
-                    guard: TypeGuard::NotUndefined,
-                    // For x === undefined, we negate (narrowing to undefined)
-                    // For x !== undefined, we don't negate (removing undefined)
-                    negated: !is_inequality,
-                });
-            }
+        && right_ident.name == "undefined"
+    {
+        return Some(ExtractedGuard {
+            variable: ident.name.to_string(),
+            guard: TypeGuard::NotUndefined,
+            // For x === undefined, we negate (narrowing to undefined)
+            // For x !== undefined, we don't negate (removing undefined)
+            negated: !is_inequality,
+        });
+    }
     None
 }
 
@@ -274,136 +273,153 @@ fn extract_discriminant_guard(
     None
 }
 
-/// Apply a type guard to narrow a type.
-pub fn apply_guard(original: &Type, guard: &TypeGuard, negated: bool) -> Type {
-    apply_guard_with_resolver(original, guard, negated, |_| None)
-}
-
-/// Apply a type guard to narrow a type, with ability to resolve TypeRefs.
+/// Apply a type guard to narrow a type, using the arena to resolve type IDs.
 ///
-/// The resolver function takes a type name and returns the resolved type if available.
-pub fn apply_guard_with_resolver<F>(
-    original: &Type,
+/// The `type_resolver` function takes a type name (for TypeRef) and returns
+/// the resolved TypeId if available.
+pub fn apply_guard_with_arena<F>(
+    arena: &mut TypeArena,
+    original_id: TypeId,
     guard: &TypeGuard,
     negated: bool,
-    resolver: F,
-) -> Type
+    type_resolver: F,
+) -> TypeId
 where
-    F: Fn(&str) -> Option<Type> + Copy,
+    F: Fn(&str) -> Option<TypeId> + Copy,
 {
     if negated {
-        apply_negated_guard_with_resolver(original, guard, resolver)
+        apply_negated_guard_with_arena(arena, original_id, guard, type_resolver)
     } else {
-        apply_positive_guard_with_resolver(original, guard, resolver)
+        apply_positive_guard_with_arena(arena, original_id, guard, type_resolver)
     }
 }
 
-/// Apply a positive type guard with resolver support.
-fn apply_positive_guard_with_resolver<F>(original: &Type, guard: &TypeGuard, resolver: F) -> Type
+/// Apply a positive type guard with arena support.
+fn apply_positive_guard_with_arena<F>(
+    arena: &mut TypeArena,
+    original_id: TypeId,
+    guard: &TypeGuard,
+    type_resolver: F,
+) -> TypeId
 where
-    F: Fn(&str) -> Option<Type> + Copy,
+    F: Fn(&str) -> Option<TypeId> + Copy,
 {
     match guard {
-        TypeGuard::Typeof(type_str) => {
-            match type_str.as_str() {
-                "string" => narrow_to_type(original, &Type::String),
-                "number" => narrow_to_type(original, &Type::Number),
-                "boolean" => narrow_to_type(original, &Type::Boolean),
-                "undefined" => narrow_to_type(original, &Type::Undefined),
-                "object" => {
-                    // typeof x === "object" keeps objects, arrays, null
-                    // For now, just return original if it could be object-like
-                    original.clone()
-                }
-                "function" => {
-                    // Keep function types, fallback to original if no match
-                    filter_union(original, |t| matches!(t, Type::Function { .. }), original)
-                }
-                _ => original.clone(),
+        TypeGuard::Typeof(type_str) => match type_str.as_str() {
+            "string" => narrow_to_type_with_arena(arena, original_id, TypeId::STRING),
+            "number" => narrow_to_type_with_arena(arena, original_id, TypeId::NUMBER),
+            "boolean" => narrow_to_type_with_arena(arena, original_id, TypeId::BOOLEAN),
+            "undefined" => narrow_to_type_with_arena(arena, original_id, TypeId::UNDEFINED),
+            "object" => {
+                // typeof x === "object" keeps objects, arrays, null
+                // For now, just return original if it could be object-like
+                original_id
             }
+            "function" => {
+                // Keep function types, fallback to original if no match
+                filter_union_with_arena(
+                    arena,
+                    original_id,
+                    |ty| matches!(ty, Type::Function { .. }),
+                    original_id,
+                )
+            }
+            _ => original_id,
+        },
+        TypeGuard::NotNull => remove_from_union_with_arena(arena, original_id, TypeId::NULL),
+        TypeGuard::NotUndefined => {
+            remove_from_union_with_arena(arena, original_id, TypeId::UNDEFINED)
         }
-        TypeGuard::NotNull => remove_from_union(original, &Type::Null),
-        TypeGuard::NotUndefined => remove_from_union(original, &Type::Undefined),
-        TypeGuard::Instanceof(class_name) => Type::TypeRef {
+        TypeGuard::Instanceof(class_name) => arena.intern(Type::TypeRef {
             name: class_name.clone(),
             type_args: vec![],
-        },
+        }),
         TypeGuard::Truthy => {
             // Remove null, undefined from union
-            let without_null = remove_from_union(original, &Type::Null);
-            remove_from_union(&without_null, &Type::Undefined)
+            let without_null = remove_from_union_with_arena(arena, original_id, TypeId::NULL);
+            remove_from_union_with_arena(arena, without_null, TypeId::UNDEFINED)
         }
         TypeGuard::Discriminant(prop_name, prop_value) => {
             // Narrow union to members that have the matching discriminant property
-            narrow_by_discriminant_with_resolver(original, prop_name, prop_value, resolver)
+            narrow_by_discriminant_with_arena(arena, original_id, prop_name, prop_value, type_resolver)
         }
     }
 }
 
-/// Apply a negated type guard with resolver support.
-fn apply_negated_guard_with_resolver<F>(original: &Type, guard: &TypeGuard, resolver: F) -> Type
+/// Apply a negated type guard with arena support.
+fn apply_negated_guard_with_arena<F>(
+    arena: &mut TypeArena,
+    original_id: TypeId,
+    guard: &TypeGuard,
+    type_resolver: F,
+) -> TypeId
 where
-    F: Fn(&str) -> Option<Type> + Copy,
+    F: Fn(&str) -> Option<TypeId> + Copy,
 {
     match guard {
         TypeGuard::Typeof(type_str) => {
             // typeof x !== "string" removes string from union
-            let target = match type_str.as_str() {
-                "string" => Type::String,
-                "number" => Type::Number,
-                "boolean" => Type::Boolean,
-                "undefined" => Type::Undefined,
-                _ => return original.clone(),
+            let target_id = match type_str.as_str() {
+                "string" => TypeId::STRING,
+                "number" => TypeId::NUMBER,
+                "boolean" => TypeId::BOOLEAN,
+                "undefined" => TypeId::UNDEFINED,
+                _ => return original_id,
             };
-            remove_from_union(original, &target)
+            remove_from_union_with_arena(arena, original_id, target_id)
         }
         TypeGuard::NotNull => {
             // Negated NotNull means it IS null
-            narrow_to_type(original, &Type::Null)
+            narrow_to_type_with_arena(arena, original_id, TypeId::NULL)
         }
         TypeGuard::NotUndefined => {
             // Negated NotUndefined means it IS undefined
-            narrow_to_type(original, &Type::Undefined)
+            narrow_to_type_with_arena(arena, original_id, TypeId::UNDEFINED)
         }
         TypeGuard::Instanceof(_) => {
             // Negated instanceof - hard to narrow, just return original
-            original.clone()
+            original_id
         }
         TypeGuard::Truthy => {
             // Negated truthy means it's falsy (null, undefined, false, 0, "")
             // For now, just return original
-            original.clone()
+            original_id
         }
         TypeGuard::Discriminant(prop_name, prop_value) => {
             // Negated discriminant: remove members that match the discriminant
-            exclude_by_discriminant_with_resolver(original, prop_name, prop_value, resolver)
+            exclude_by_discriminant_with_arena(arena, original_id, prop_name, prop_value, type_resolver)
         }
     }
 }
 
 /// Narrow a type to a target type (for positive guards).
-fn narrow_to_type(original: &Type, target: &Type) -> Type {
+fn narrow_to_type_with_arena(arena: &mut TypeArena, original_id: TypeId, target_id: TypeId) -> TypeId {
+    let original = arena.get(original_id).clone();
+
     match original {
-        Type::Union(types) => {
+        Type::Union(type_ids) => {
             // Find types in the union that match the target
-            let matching: Vec<Type> = types
+            let matching: Vec<TypeId> = type_ids
                 .iter()
-                .filter(|t| types_compatible(t, target))
-                .cloned()
+                .filter(|&&id| types_compatible_with_arena(arena, id, target_id))
+                .copied()
                 .collect();
 
-            match matching.len() {
-                0 => target.clone(), // Fall back to target if nothing matches
-                1 => matching.into_iter().next().expect("checked len == 1"),
-                _ => Type::Union(matching),
-            }
+            simplify_union_ids(arena, matching, target_id)
         }
-        _ => target.clone(),
+        _ => target_id,
     }
 }
 
 /// Check if two types are compatible for narrowing.
-fn types_compatible(a: &Type, b: &Type) -> bool {
+fn types_compatible_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) -> bool {
+    if a_id == b_id {
+        return true;
+    }
+
+    let a = arena.get(a_id);
+    let b = arena.get(b_id);
+
     match (a, b) {
         (Type::String, Type::String) => true,
         (Type::StringLiteral(_), Type::String) => true,
@@ -413,61 +429,95 @@ fn types_compatible(a: &Type, b: &Type) -> bool {
         (Type::BooleanLiteral(_), Type::Boolean) => true,
         (Type::Null, Type::Null) => true,
         (Type::Undefined, Type::Undefined) => true,
-        _ => a == b,
+        _ => false,
     }
 }
 
 /// Remove a type from a union.
-pub fn remove_from_union(ty: &Type, to_remove: &Type) -> Type {
+fn remove_from_union_with_arena(
+    arena: &mut TypeArena,
+    ty_id: TypeId,
+    to_remove_id: TypeId,
+) -> TypeId {
+    let ty = arena.get(ty_id).clone();
+
     match ty {
-        Type::Union(types) => {
-            let filtered: Vec<Type> = types
+        Type::Union(type_ids) => {
+            let filtered: Vec<TypeId> = type_ids
                 .iter()
-                .filter(|t| !types_match(t, to_remove))
-                .cloned()
+                .filter(|&&id| !types_match_with_arena(arena, id, to_remove_id))
+                .copied()
                 .collect();
 
-            simplify_filtered_union(filtered)
+            simplify_filtered_union_ids(arena, filtered)
         }
         _ => {
-            if types_match(ty, to_remove) {
-                Type::Never
+            if types_match_with_arena(arena, ty_id, to_remove_id) {
+                TypeId::NEVER
             } else {
-                ty.clone()
+                ty_id
             }
         }
     }
 }
 
 /// Filter union to members matching predicate, returning fallback if no matches.
-fn filter_union<F>(ty: &Type, pred: F, fallback: &Type) -> Type
+fn filter_union_with_arena<F>(
+    arena: &mut TypeArena,
+    ty_id: TypeId,
+    pred: F,
+    fallback_id: TypeId,
+) -> TypeId
 where
     F: Fn(&Type) -> bool,
 {
+    let ty = arena.get(ty_id).clone();
+
     match ty {
-        Type::Union(types) => {
-            let filtered: Vec<Type> = types.iter().filter(|t| pred(t)).cloned().collect();
+        Type::Union(type_ids) => {
+            let filtered: Vec<TypeId> = type_ids
+                .iter()
+                .filter(|&&id| pred(arena.get(id)))
+                .copied()
+                .collect();
+
             if filtered.is_empty() {
-                fallback.clone()
+                fallback_id
             } else {
-                simplify_filtered_union(filtered)
+                simplify_filtered_union_ids(arena, filtered)
             }
         }
-        _ => fallback.clone(),
+        _ => fallback_id,
     }
 }
 
 /// Simplify filtered union: empty -> never, single -> unwrap, else union.
-fn simplify_filtered_union(types: Vec<Type>) -> Type {
-    match types.len() {
-        0 => Type::Never,
-        1 => types.into_iter().next().expect("checked len == 1"),
-        _ => Type::Union(types),
+fn simplify_filtered_union_ids(arena: &mut TypeArena, type_ids: Vec<TypeId>) -> TypeId {
+    match type_ids.len() {
+        0 => TypeId::NEVER,
+        1 => type_ids[0],
+        _ => arena.intern(Type::Union(type_ids)),
+    }
+}
+
+/// Simplify union with fallback for empty case.
+fn simplify_union_ids(arena: &mut TypeArena, type_ids: Vec<TypeId>, fallback_id: TypeId) -> TypeId {
+    match type_ids.len() {
+        0 => fallback_id,
+        1 => type_ids[0],
+        _ => arena.intern(Type::Union(type_ids)),
     }
 }
 
 /// Check if two types match (for removal).
-fn types_match(a: &Type, b: &Type) -> bool {
+fn types_match_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) -> bool {
+    if a_id == b_id {
+        return true;
+    }
+
+    let a = arena.get(a_id);
+    let b = arena.get(b_id);
+
     match (a, b) {
         (Type::Null, Type::Null) => true,
         (Type::Undefined, Type::Undefined) => true,
@@ -477,128 +527,148 @@ fn types_match(a: &Type, b: &Type) -> bool {
         (Type::NumberLiteral(_), Type::Number) => true,
         (Type::Boolean, Type::Boolean) => true,
         (Type::BooleanLiteral(_), Type::Boolean) => true,
-        _ => a == b,
+        _ => false,
     }
 }
 
 /// Narrow a union type to members that have a matching discriminant property.
-pub fn narrow_by_discriminant_with_resolver<F>(
-    original: &Type,
+fn narrow_by_discriminant_with_arena<F>(
+    arena: &mut TypeArena,
+    original_id: TypeId,
     prop_name: &str,
     prop_value: &str,
-    resolver: F,
-) -> Type
+    type_resolver: F,
+) -> TypeId
 where
-    F: Fn(&str) -> Option<Type> + Copy,
+    F: Fn(&str) -> Option<TypeId> + Copy,
 {
+    let original = arena.get(original_id).clone();
+
     match original {
-        Type::Union(types) => {
-            let matching: Vec<Type> = types
+        Type::Union(type_ids) => {
+            let matching: Vec<TypeId> = type_ids
                 .iter()
-                .filter(|t| {
-                    has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver)
+                .filter(|&&id| {
+                    has_discriminant_property_with_arena(arena, id, prop_name, prop_value, type_resolver)
                 })
-                .cloned()
+                .copied()
                 .collect();
 
-            simplify_filtered_union(matching)
+            simplify_filtered_union_ids(arena, matching)
         }
-        Type::TypeRef { name, .. } => {
+        Type::TypeRef { ref name, .. } => {
             // If original is a TypeRef to a union, resolve and narrow
-            if let Some(resolved) = resolver(name)
-                && matches!(resolved, Type::Union(_)) {
-                    return narrow_by_discriminant_with_resolver(
-                        &resolved, prop_name, prop_value, resolver,
+            if let Some(resolved_id) = type_resolver(name) {
+                let resolved = arena.get(resolved_id).clone();
+                if matches!(resolved, Type::Union(_)) {
+                    return narrow_by_discriminant_with_arena(
+                        arena,
+                        resolved_id,
+                        prop_name,
+                        prop_value,
+                        type_resolver,
                     );
                 }
+            }
             // For non-union types, check if it matches
-            if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
-                original.clone()
+            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+                original_id
             } else {
-                Type::Never
+                TypeId::NEVER
             }
         }
         _ => {
             // For non-union types, check if it matches
-            if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
-                original.clone()
+            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+                original_id
             } else {
-                Type::Never
+                TypeId::NEVER
             }
         }
     }
 }
 
 /// Exclude union members that have a matching discriminant property.
-pub fn exclude_by_discriminant_with_resolver<F>(
-    original: &Type,
+fn exclude_by_discriminant_with_arena<F>(
+    arena: &mut TypeArena,
+    original_id: TypeId,
     prop_name: &str,
     prop_value: &str,
-    resolver: F,
-) -> Type
+    type_resolver: F,
+) -> TypeId
 where
-    F: Fn(&str) -> Option<Type> + Copy,
+    F: Fn(&str) -> Option<TypeId> + Copy,
 {
+    let original = arena.get(original_id).clone();
+
     match original {
-        Type::Union(types) => {
-            let remaining: Vec<Type> = types
+        Type::Union(type_ids) => {
+            let remaining: Vec<TypeId> = type_ids
                 .iter()
-                .filter(|t| {
-                    !has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver)
+                .filter(|&&id| {
+                    !has_discriminant_property_with_arena(arena, id, prop_name, prop_value, type_resolver)
                 })
-                .cloned()
+                .copied()
                 .collect();
 
-            simplify_filtered_union(remaining)
+            simplify_filtered_union_ids(arena, remaining)
         }
-        Type::TypeRef { name, .. } => {
+        Type::TypeRef { ref name, .. } => {
             // If original is a TypeRef to a union, resolve and exclude
-            if let Some(resolved) = resolver(name)
-                && matches!(resolved, Type::Union(_)) {
-                    return exclude_by_discriminant_with_resolver(
-                        &resolved, prop_name, prop_value, resolver,
+            if let Some(resolved_id) = type_resolver(name) {
+                let resolved = arena.get(resolved_id).clone();
+                if matches!(resolved, Type::Union(_)) {
+                    return exclude_by_discriminant_with_arena(
+                        arena,
+                        resolved_id,
+                        prop_name,
+                        prop_value,
+                        type_resolver,
                     );
                 }
+            }
             // For non-union types, check if it matches
-            if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
-                Type::Never
+            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+                TypeId::NEVER
             } else {
-                original.clone()
+                original_id
             }
         }
         _ => {
-            if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
-                Type::Never
+            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+                TypeId::NEVER
             } else {
-                original.clone()
+                original_id
             }
         }
     }
 }
 
 /// Check if a type has a discriminant property with a specific string literal value.
-pub fn has_discriminant_property_with_resolver<F>(
-    ty: &Type,
+fn has_discriminant_property_with_arena<F>(
+    arena: &TypeArena,
+    ty_id: TypeId,
     prop_name: &str,
     expected_value: &str,
-    resolver: F,
+    type_resolver: F,
 ) -> bool
 where
-    F: Fn(&str) -> Option<Type>,
+    F: Fn(&str) -> Option<TypeId>,
 {
+    let ty = arena.get(ty_id);
+
     match ty {
         Type::Object { properties, .. } => properties.iter().any(|p| {
-            p.name == prop_name && matches!(&p.ty, Type::StringLiteral(v) if v == expected_value)
+            if p.name != prop_name {
+                return false;
+            }
+            let prop_ty = arena.get(p.ty);
+            matches!(prop_ty, Type::StringLiteral(v) if v == expected_value)
         }),
         Type::TypeRef { name, .. } => {
             // Try to resolve the type reference
-            if let Some(resolved) = resolver(name) {
-                has_discriminant_property_with_resolver(
-                    &resolved,
-                    prop_name,
-                    expected_value,
-                    resolver,
-                )
+            if let Some(resolved_id) = type_resolver(name) {
+                has_discriminant_property_with_arena(arena, resolved_id, prop_name, expected_value, type_resolver)
             } else {
                 // If we can't resolve, be conservative and return false
                 false
@@ -615,54 +685,75 @@ mod tests {
     #[test]
     fn test_narrowing_context() {
         let mut ctx = NarrowingContext::new();
-        ctx.narrow("x".to_string(), Type::String);
+        ctx.narrow("x".to_string(), TypeId::STRING);
 
-        assert_eq!(ctx.get_narrowed("x"), Some(&Type::String));
-        assert_eq!(ctx.get_narrowed("y"), None);
+        assert_eq!(ctx.get_narrowed_id("x"), Some(TypeId::STRING));
+        assert_eq!(ctx.get_narrowed_id("y"), None);
 
         ctx.clear();
-        assert_eq!(ctx.get_narrowed("x"), None);
+        assert_eq!(ctx.get_narrowed_id("x"), None);
     }
 
     #[test]
     fn test_remove_null_from_union() {
-        let union = Type::Union(vec![Type::String, Type::Null]);
-        let result = remove_from_union(&union, &Type::Null);
-        assert_eq!(result, Type::String);
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NULL]));
+        let result = remove_from_union_with_arena(&mut arena, union_id, TypeId::NULL);
+        assert_eq!(result, TypeId::STRING);
     }
 
     #[test]
     fn test_remove_undefined_from_union() {
-        let union = Type::Union(vec![Type::Number, Type::Undefined]);
-        let result = remove_from_union(&union, &Type::Undefined);
-        assert_eq!(result, Type::Number);
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::NUMBER, TypeId::UNDEFINED]));
+        let result = remove_from_union_with_arena(&mut arena, union_id, TypeId::UNDEFINED);
+        assert_eq!(result, TypeId::NUMBER);
     }
 
     #[test]
     fn test_remove_multiple_keeps_union() {
-        let union = Type::Union(vec![Type::String, Type::Number, Type::Null]);
-        let result = remove_from_union(&union, &Type::Null);
-        assert_eq!(result, Type::Union(vec![Type::String, Type::Number]));
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NUMBER, TypeId::NULL]));
+        let result = remove_from_union_with_arena(&mut arena, union_id, TypeId::NULL);
+
+        let result_ty = arena.get(result).clone();
+        match result_ty {
+            Type::Union(ids) => {
+                assert_eq!(ids.len(), 2);
+                assert!(ids.contains(&TypeId::STRING));
+                assert!(ids.contains(&TypeId::NUMBER));
+            }
+            _ => panic!("Expected union type"),
+        }
     }
 
     #[test]
     fn test_apply_typeof_guard() {
-        let union = Type::Union(vec![Type::String, Type::Number]);
-        let result = apply_guard(&union, &TypeGuard::Typeof("string".to_string()), false);
-        assert_eq!(result, Type::String);
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NUMBER]));
+        let result = apply_guard_with_arena(
+            &mut arena,
+            union_id,
+            &TypeGuard::Typeof("string".to_string()),
+            false,
+            |_| None,
+        );
+        assert_eq!(result, TypeId::STRING);
     }
 
     #[test]
     fn test_apply_not_null_guard() {
-        let union = Type::Union(vec![Type::String, Type::Null]);
-        let result = apply_guard(&union, &TypeGuard::NotNull, false);
-        assert_eq!(result, Type::String);
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NULL]));
+        let result = apply_guard_with_arena(&mut arena, union_id, &TypeGuard::NotNull, false, |_| None);
+        assert_eq!(result, TypeId::STRING);
     }
 
     #[test]
     fn test_apply_truthy_guard() {
-        let union = Type::Union(vec![Type::String, Type::Null, Type::Undefined]);
-        let result = apply_guard(&union, &TypeGuard::Truthy, false);
-        assert_eq!(result, Type::String);
+        let mut arena = TypeArena::new();
+        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NULL, TypeId::UNDEFINED]));
+        let result = apply_guard_with_arena(&mut arena, union_id, &TypeGuard::Truthy, false, |_| None);
+        assert_eq!(result, TypeId::STRING);
     }
 }

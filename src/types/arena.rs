@@ -15,7 +15,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{IndexSignature, Param, Property, Type, TypeParam, TypePredicate};
+use super::{Param, Property, Type, TypeParam};
 
 /// A lightweight, copyable handle to an interned type.
 ///
@@ -26,9 +26,22 @@ use super::{IndexSignature, Param, Property, Type, TypeParam, TypePredicate};
 ///
 /// Use `TypeArena::get(id)` to retrieve the actual `Type` when needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TypeId(u32);
+pub struct TypeId(pub(crate) u32);
 
 impl TypeId {
+    // Pre-defined constants for primitive types (indices 0-10 in the arena)
+    pub const STRING: TypeId = TypeId(0);
+    pub const NUMBER: TypeId = TypeId(1);
+    pub const BOOLEAN: TypeId = TypeId(2);
+    pub const NULL: TypeId = TypeId(3);
+    pub const UNDEFINED: TypeId = TypeId(4);
+    pub const VOID: TypeId = TypeId(5);
+    pub const ANY: TypeId = TypeId(6);
+    pub const UNKNOWN: TypeId = TypeId(7);
+    pub const NEVER: TypeId = TypeId(8);
+    pub const TRUE: TypeId = TypeId(9);
+    pub const FALSE: TypeId = TypeId(10);
+
     #[inline]
     pub const fn from_raw(value: u32) -> Self {
         Self(value)
@@ -39,11 +52,18 @@ impl TypeId {
     pub const fn as_raw(self) -> u32 {
         self.0
     }
+
+    /// Check if this TypeId refers to a primitive type (one of the pre-cached constants).
+    #[inline]
+    pub const fn is_primitive(self) -> bool {
+        self.0 <= 10
+    }
 }
 
 /// Pre-cached primitive type IDs for instant access.
 ///
 /// These are always the first types interned, so their IDs are predictable.
+/// All fields use the TypeId constants (e.g., `TypeId::STRING`).
 #[derive(Debug, Clone, Copy)]
 pub struct PrimitiveTypes {
     pub string: TypeId,
@@ -57,6 +77,24 @@ pub struct PrimitiveTypes {
     pub never: TypeId,
     pub true_literal: TypeId,
     pub false_literal: TypeId,
+}
+
+impl Default for PrimitiveTypes {
+    fn default() -> Self {
+        Self {
+            string: TypeId::STRING,
+            number: TypeId::NUMBER,
+            boolean: TypeId::BOOLEAN,
+            null: TypeId::NULL,
+            undefined: TypeId::UNDEFINED,
+            void: TypeId::VOID,
+            any: TypeId::ANY,
+            unknown: TypeId::UNKNOWN,
+            never: TypeId::NEVER,
+            true_literal: TypeId::TRUE,
+            false_literal: TypeId::FALSE,
+        }
+    }
 }
 
 /// An arena for interning and storing types.
@@ -85,6 +123,7 @@ pub struct PrimitiveTypes {
 /// let obj_id2 = arena.intern(obj_type2);
 /// assert_eq!(obj_id, obj_id2);
 /// ```
+#[derive(Debug, Clone)]
 pub struct TypeArena {
     /// Storage for all interned types.
     types: Vec<Type>,
@@ -102,45 +141,32 @@ impl TypeArena {
         let mut types = Vec::with_capacity(256); // Pre-allocate for common programs
         let mut intern_cache = FxHashMap::with_capacity_and_hasher(256, Default::default());
 
-        // Intern primitives in a fixed order so their IDs are predictable
-        let primitives = [
-            Type::String,
-            Type::Number,
-            Type::Boolean,
-            Type::Null,
-            Type::Undefined,
-            Type::Void,
-            Type::Any,
-            Type::Unknown,
-            Type::Never,
-            Type::BooleanLiteral(true),
-            Type::BooleanLiteral(false),
+        // Intern primitives in a fixed order so their IDs are predictable.
+        // The order MUST match the TypeId constants (STRING=0, NUMBER=1, etc.)
+        let primitives_list = [
+            Type::String,            // TypeId::STRING = 0
+            Type::Number,            // TypeId::NUMBER = 1
+            Type::Boolean,           // TypeId::BOOLEAN = 2
+            Type::Null,              // TypeId::NULL = 3
+            Type::Undefined,         // TypeId::UNDEFINED = 4
+            Type::Void,              // TypeId::VOID = 5
+            Type::Any,               // TypeId::ANY = 6
+            Type::Unknown,           // TypeId::UNKNOWN = 7
+            Type::Never,             // TypeId::NEVER = 8
+            Type::BooleanLiteral(true),  // TypeId::TRUE = 9
+            Type::BooleanLiteral(false), // TypeId::FALSE = 10
         ];
 
-        for ty in primitives {
+        for ty in primitives_list {
             let id = TypeId(types.len() as u32);
             intern_cache.insert(ty.clone(), id);
             types.push(ty);
         }
 
-        let primitives = PrimitiveTypes {
-            string: TypeId(0),
-            number: TypeId(1),
-            boolean: TypeId(2),
-            null: TypeId(3),
-            undefined: TypeId(4),
-            void: TypeId(5),
-            any: TypeId(6),
-            unknown: TypeId(7),
-            never: TypeId(8),
-            true_literal: TypeId(9),
-            false_literal: TypeId(10),
-        };
-
         Self {
             types,
             intern_cache,
-            primitives,
+            primitives: PrimitiveTypes::default(),
         }
     }
 
@@ -166,335 +192,6 @@ impl TypeArena {
         self.intern_cache.insert(ty.clone(), id);
         self.types.push(ty);
         id
-    }
-
-    /// Intern a type, recursively interning nested types first.
-    ///
-    /// This ensures all nested types (e.g., in unions, arrays, objects)
-    /// are also interned, which is important for deep type structures.
-    pub fn intern_deep(&mut self, ty: Type) -> TypeId {
-        // For simple types, just intern directly
-        match ty {
-            Type::String
-            | Type::Number
-            | Type::Boolean
-            | Type::Null
-            | Type::Undefined
-            | Type::Void
-            | Type::Any
-            | Type::Unknown
-            | Type::Never
-            | Type::StringLiteral(_)
-            | Type::NumberLiteral(_)
-            | Type::BooleanLiteral(_) => self.intern(ty),
-
-            Type::Array(elem) => {
-                let elem_id = self.intern_deep(*elem);
-                let elem_ty = self.get(elem_id).clone();
-                self.intern(Type::Array(Box::new(elem_ty)))
-            }
-
-            Type::Tuple(types) => {
-                let interned: Vec<Type> = types
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-                self.intern(Type::Tuple(interned))
-            }
-
-            Type::Union(types) => {
-                let interned: Vec<Type> = types
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-                self.intern(Type::Union(interned))
-            }
-
-            Type::Intersection(types) => {
-                let interned: Vec<Type> = types
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-                self.intern(Type::Intersection(interned))
-            }
-
-            Type::Object {
-                properties,
-                index_signature,
-                extends,
-                type_params,
-            } => {
-                let interned_props: Vec<Property> = properties
-                    .into_iter()
-                    .map(|p| {
-                        let ty_id = self.intern_deep(p.ty);
-                        Property {
-                            name: p.name,
-                            ty: self.get(ty_id).clone(),
-                            optional: p.optional,
-                            readonly: p.readonly,
-                        }
-                    })
-                    .collect();
-
-                let interned_idx = index_signature.map(|idx| {
-                    let key_id = self.intern_deep(*idx.key_type);
-                    let val_id = self.intern_deep(*idx.value_type);
-                    IndexSignature {
-                        key_type: Box::new(self.get(key_id).clone()),
-                        value_type: Box::new(self.get(val_id).clone()),
-                    }
-                });
-
-                let interned_extends: Vec<Type> = extends
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-
-                let interned_params: Vec<TypeParam> = type_params
-                    .into_iter()
-                    .map(|tp| self.intern_type_param(tp))
-                    .collect();
-
-                self.intern(Type::Object {
-                    properties: interned_props,
-                    index_signature: interned_idx,
-                    extends: interned_extends,
-                    type_params: interned_params,
-                })
-            }
-
-            Type::Function {
-                params,
-                return_type,
-                type_params,
-                type_predicate,
-            } => {
-                let interned_params: Vec<Param> = params
-                    .into_iter()
-                    .map(|p| {
-                        let ty_id = self.intern_deep(p.ty);
-                        Param {
-                            name: p.name,
-                            ty: self.get(ty_id).clone(),
-                            optional: p.optional,
-                            rest: p.rest,
-                        }
-                    })
-                    .collect();
-
-                let ret_id = self.intern_deep(*return_type);
-                let interned_ret = self.get(ret_id).clone();
-
-                let interned_type_params: Vec<TypeParam> = type_params
-                    .into_iter()
-                    .map(|tp| self.intern_type_param(tp))
-                    .collect();
-
-                let interned_predicate = type_predicate.map(|tp| {
-                    let interned_annotation = tp.type_annotation.map(|ty| {
-                        let id = self.intern_deep(*ty);
-                        Box::new(self.get(id).clone())
-                    });
-                    TypePredicate {
-                        parameter_name: tp.parameter_name,
-                        asserts: tp.asserts,
-                        type_annotation: interned_annotation,
-                    }
-                });
-
-                self.intern(Type::Function {
-                    params: interned_params,
-                    return_type: Box::new(interned_ret),
-                    type_params: interned_type_params,
-                    type_predicate: interned_predicate,
-                })
-            }
-
-            Type::ClassConstructor {
-                params,
-                type_params,
-                static_members,
-            } => {
-                let interned_params: Vec<Param> = params
-                    .into_iter()
-                    .map(|p| {
-                        let ty_id = self.intern_deep(p.ty);
-                        Param {
-                            name: p.name,
-                            ty: self.get(ty_id).clone(),
-                            optional: p.optional,
-                            rest: p.rest,
-                        }
-                    })
-                    .collect();
-
-                let interned_type_params: Vec<TypeParam> = type_params
-                    .into_iter()
-                    .map(|tp| self.intern_type_param(tp))
-                    .collect();
-
-                let interned_statics: Vec<Property> = static_members
-                    .into_iter()
-                    .map(|p| {
-                        let ty_id = self.intern_deep(p.ty);
-                        Property {
-                            name: p.name,
-                            ty: self.get(ty_id).clone(),
-                            optional: p.optional,
-                            readonly: p.readonly,
-                        }
-                    })
-                    .collect();
-
-                self.intern(Type::ClassConstructor {
-                    params: interned_params,
-                    type_params: interned_type_params,
-                    static_members: interned_statics,
-                })
-            }
-
-            Type::TypeRef { name, type_args } => {
-                let interned_args: Vec<Type> = type_args
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-                self.intern(Type::TypeRef {
-                    name,
-                    type_args: interned_args,
-                })
-            }
-
-            Type::TypeParameter {
-                name,
-                constraint,
-                default,
-            } => {
-                let interned_constraint = constraint.map(|c| {
-                    let id = self.intern_deep(*c);
-                    Box::new(self.get(id).clone())
-                });
-                let interned_default = default.map(|d| {
-                    let id = self.intern_deep(*d);
-                    Box::new(self.get(id).clone())
-                });
-                self.intern(Type::TypeParameter {
-                    name,
-                    constraint: interned_constraint,
-                    default: interned_default,
-                })
-            }
-
-            Type::KeyOf(inner) => {
-                let inner_id = self.intern_deep(*inner);
-                self.intern(Type::KeyOf(Box::new(self.get(inner_id).clone())))
-            }
-
-            Type::IndexedAccess {
-                object_type,
-                index_type,
-            } => {
-                let obj_id = self.intern_deep(*object_type);
-                let idx_id = self.intern_deep(*index_type);
-                self.intern(Type::IndexedAccess {
-                    object_type: Box::new(self.get(obj_id).clone()),
-                    index_type: Box::new(self.get(idx_id).clone()),
-                })
-            }
-
-            Type::MappedType {
-                type_param,
-                constraint,
-                template,
-                readonly_modifier,
-                optional_modifier,
-            } => {
-                let constraint_id = self.intern_deep(*constraint);
-                let template_id = self.intern_deep(*template);
-                self.intern(Type::MappedType {
-                    type_param,
-                    constraint: Box::new(self.get(constraint_id).clone()),
-                    template: Box::new(self.get(template_id).clone()),
-                    readonly_modifier,
-                    optional_modifier,
-                })
-            }
-
-            Type::ConditionalType {
-                check_type,
-                extends_type,
-                true_type,
-                false_type,
-            } => {
-                let check_id = self.intern_deep(*check_type);
-                let extends_id = self.intern_deep(*extends_type);
-                let true_id = self.intern_deep(*true_type);
-                let false_id = self.intern_deep(*false_type);
-                self.intern(Type::ConditionalType {
-                    check_type: Box::new(self.get(check_id).clone()),
-                    extends_type: Box::new(self.get(extends_id).clone()),
-                    true_type: Box::new(self.get(true_id).clone()),
-                    false_type: Box::new(self.get(false_id).clone()),
-                })
-            }
-
-            Type::InferType { name, constraint } => {
-                let interned_constraint = constraint.map(|c| {
-                    let id = self.intern_deep(*c);
-                    Box::new(self.get(id).clone())
-                });
-                self.intern(Type::InferType {
-                    name,
-                    constraint: interned_constraint,
-                })
-            }
-
-            Type::TemplateLiteralType { texts, types } => {
-                let interned_types: Vec<Type> = types
-                    .into_iter()
-                    .map(|t| {
-                        let id = self.intern_deep(t);
-                        self.get(id).clone()
-                    })
-                    .collect();
-                self.intern(Type::TemplateLiteralType {
-                    texts,
-                    types: interned_types,
-                })
-            }
-        }
-    }
-
-    /// Helper to intern a type parameter's constraint and default.
-    fn intern_type_param(&mut self, tp: TypeParam) -> TypeParam {
-        let constraint = tp.constraint.map(|c| {
-            let id = self.intern_deep(*c);
-            Box::new(self.get(id).clone())
-        });
-        let default = tp.default.map(|d| {
-            let id = self.intern_deep(*d);
-            Box::new(self.get(id).clone())
-        });
-        TypeParam {
-            name: tp.name,
-            constraint,
-            default,
-        }
     }
 
     /// Get a type by its ID.
@@ -523,20 +220,21 @@ impl TypeArena {
 
     /// Get the TypeId for a primitive type, if it matches.
     ///
-    /// This is faster than interning for known primitives.
+    /// This is faster than interning for known primitives - O(1) constant lookup.
+    #[inline]
     pub fn primitive_id(&self, ty: &Type) -> Option<TypeId> {
         match ty {
-            Type::String => Some(self.primitives.string),
-            Type::Number => Some(self.primitives.number),
-            Type::Boolean => Some(self.primitives.boolean),
-            Type::Null => Some(self.primitives.null),
-            Type::Undefined => Some(self.primitives.undefined),
-            Type::Void => Some(self.primitives.void),
-            Type::Any => Some(self.primitives.any),
-            Type::Unknown => Some(self.primitives.unknown),
-            Type::Never => Some(self.primitives.never),
-            Type::BooleanLiteral(true) => Some(self.primitives.true_literal),
-            Type::BooleanLiteral(false) => Some(self.primitives.false_literal),
+            Type::String => Some(TypeId::STRING),
+            Type::Number => Some(TypeId::NUMBER),
+            Type::Boolean => Some(TypeId::BOOLEAN),
+            Type::Null => Some(TypeId::NULL),
+            Type::Undefined => Some(TypeId::UNDEFINED),
+            Type::Void => Some(TypeId::VOID),
+            Type::Any => Some(TypeId::ANY),
+            Type::Unknown => Some(TypeId::UNKNOWN),
+            Type::Never => Some(TypeId::NEVER),
+            Type::BooleanLiteral(true) => Some(TypeId::TRUE),
+            Type::BooleanLiteral(false) => Some(TypeId::FALSE),
             _ => None,
         }
     }
@@ -544,6 +242,226 @@ impl TypeArena {
     #[inline]
     pub fn intern_fast(&mut self, ty: Type) -> TypeId {
         self.primitive_id(&ty).unwrap_or_else(|| self.intern(ty))
+    }
+
+    // =====================================================
+    // Convenience methods for creating and interning types
+    // =====================================================
+
+    /// Create and intern an array type.
+    #[inline]
+    pub fn array(&mut self, element: TypeId) -> TypeId {
+        self.intern(Type::Array(element))
+    }
+
+    /// Create and intern a tuple type.
+    #[inline]
+    pub fn tuple(&mut self, types: Vec<TypeId>) -> TypeId {
+        self.intern(Type::Tuple(types))
+    }
+
+    /// Create and intern a union type. Filters out duplicates and never types.
+    pub fn union(&mut self, types: Vec<TypeId>) -> TypeId {
+        // Filter out never types and deduplicate
+        let mut filtered: Vec<TypeId> = types
+            .into_iter()
+            .filter(|&id| id != TypeId::NEVER)
+            .collect();
+
+        // Deduplicate by sorting
+        filtered.sort_by_key(|id| id.0);
+        filtered.dedup();
+
+        match filtered.len() {
+            0 => TypeId::NEVER,
+            1 => filtered[0],
+            _ => self.intern(Type::Union(filtered)),
+        }
+    }
+
+    /// Create and intern an intersection type. Returns never if any element is never.
+    pub fn intersection(&mut self, types: Vec<TypeId>) -> TypeId {
+        // If any is never, result is never
+        if types.iter().any(|&id| id == TypeId::NEVER) {
+            return TypeId::NEVER;
+        }
+
+        // Deduplicate
+        let mut deduped: Vec<TypeId> = types;
+        deduped.sort_by_key(|id| id.0);
+        deduped.dedup();
+
+        match deduped.len() {
+            0 => TypeId::UNKNOWN,
+            1 => deduped[0],
+            _ => self.intern(Type::Intersection(deduped)),
+        }
+    }
+
+    /// Create and intern a function type.
+    pub fn function(&mut self, params: Vec<Param>, return_type: TypeId) -> TypeId {
+        self.intern(Type::Function {
+            params,
+            return_type,
+            type_params: vec![],
+            type_predicate: None,
+        })
+    }
+
+    /// Create and intern a generic function type.
+    pub fn generic_function(
+        &mut self,
+        type_params: Vec<TypeParam>,
+        params: Vec<Param>,
+        return_type: TypeId,
+    ) -> TypeId {
+        self.intern(Type::Function {
+            params,
+            return_type,
+            type_params,
+            type_predicate: None,
+        })
+    }
+
+    /// Create and intern an object type.
+    pub fn object(&mut self, properties: Vec<Property>) -> TypeId {
+        self.intern(Type::Object {
+            properties,
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        })
+    }
+
+    /// Create and intern an object type with inheritance.
+    pub fn object_with_extends(&mut self, properties: Vec<Property>, extends: Vec<TypeId>) -> TypeId {
+        self.intern(Type::Object {
+            properties,
+            index_signature: None,
+            extends,
+            type_params: vec![],
+        })
+    }
+
+    /// Create and intern a generic object type.
+    pub fn generic_object(
+        &mut self,
+        type_params: Vec<TypeParam>,
+        properties: Vec<Property>,
+        extends: Vec<TypeId>,
+    ) -> TypeId {
+        self.intern(Type::Object {
+            properties,
+            index_signature: None,
+            extends,
+            type_params,
+        })
+    }
+
+    /// Create and intern a type reference.
+    pub fn type_ref(&mut self, name: impl Into<String>, type_args: Vec<TypeId>) -> TypeId {
+        self.intern(Type::TypeRef {
+            name: name.into(),
+            type_args,
+        })
+    }
+
+    /// Create and intern a string literal type.
+    pub fn string_literal(&mut self, value: impl Into<String>) -> TypeId {
+        self.intern(Type::StringLiteral(value.into()))
+    }
+
+    /// Create and intern a number literal type.
+    pub fn number_literal(&mut self, value: f64) -> TypeId {
+        self.intern(Type::NumberLiteral(value))
+    }
+
+    /// Create and intern a keyof type.
+    pub fn keyof(&mut self, inner: TypeId) -> TypeId {
+        self.intern(Type::KeyOf(inner))
+    }
+
+    /// Create and intern an indexed access type.
+    pub fn indexed_access(&mut self, object_type: TypeId, index_type: TypeId) -> TypeId {
+        self.intern(Type::IndexedAccess {
+            object_type,
+            index_type,
+        })
+    }
+
+    /// Create and intern a mapped type.
+    pub fn mapped_type(
+        &mut self,
+        type_param: String,
+        constraint: TypeId,
+        template: TypeId,
+        readonly_modifier: Option<bool>,
+        optional_modifier: Option<bool>,
+    ) -> TypeId {
+        self.intern(Type::MappedType {
+            type_param,
+            constraint,
+            template,
+            readonly_modifier,
+            optional_modifier,
+        })
+    }
+
+    /// Create and intern a conditional type.
+    pub fn conditional_type(
+        &mut self,
+        check_type: TypeId,
+        extends_type: TypeId,
+        true_type: TypeId,
+        false_type: TypeId,
+    ) -> TypeId {
+        self.intern(Type::ConditionalType {
+            check_type,
+            extends_type,
+            true_type,
+            false_type,
+        })
+    }
+
+    /// Create and intern an infer type.
+    pub fn infer_type(&mut self, name: impl Into<String>, constraint: Option<TypeId>) -> TypeId {
+        self.intern(Type::InferType {
+            name: name.into(),
+            constraint,
+        })
+    }
+
+    /// Create and intern a type parameter.
+    pub fn type_parameter(
+        &mut self,
+        name: impl Into<String>,
+        constraint: Option<TypeId>,
+        default: Option<TypeId>,
+    ) -> TypeId {
+        self.intern(Type::TypeParameter {
+            name: name.into(),
+            constraint,
+            default,
+        })
+    }
+
+    /// Create and intern a template literal type.
+    pub fn template_literal_type(&mut self, texts: Vec<String>, types: Vec<TypeId>) -> TypeId {
+        self.intern(Type::TemplateLiteralType { texts, types })
+    }
+
+    /// Create and intern a class constructor type.
+    pub fn class_constructor(
+        &mut self,
+        params: Vec<Param>,
+        type_params: Vec<TypeParam>,
+        static_members: Vec<Property>,
+    ) -> TypeId {
+        self.intern(Type::ClassConstructor {
+            params,
+            type_params,
+            static_members,
+        })
     }
 }
 
@@ -560,23 +478,43 @@ mod tests {
     #[test]
     fn test_primitive_ids_are_stable() {
         let arena = TypeArena::new();
-        assert_eq!(arena.primitives().string, TypeId(0));
-        assert_eq!(arena.primitives().number, TypeId(1));
-        assert_eq!(arena.primitives().boolean, TypeId(2));
-        assert_eq!(arena.primitives().null, TypeId(3));
-        assert_eq!(arena.primitives().undefined, TypeId(4));
-        assert_eq!(arena.primitives().void, TypeId(5));
-        assert_eq!(arena.primitives().any, TypeId(6));
-        assert_eq!(arena.primitives().unknown, TypeId(7));
-        assert_eq!(arena.primitives().never, TypeId(8));
+        // Verify PrimitiveTypes struct matches TypeId constants
+        assert_eq!(arena.primitives().string, TypeId::STRING);
+        assert_eq!(arena.primitives().number, TypeId::NUMBER);
+        assert_eq!(arena.primitives().boolean, TypeId::BOOLEAN);
+        assert_eq!(arena.primitives().null, TypeId::NULL);
+        assert_eq!(arena.primitives().undefined, TypeId::UNDEFINED);
+        assert_eq!(arena.primitives().void, TypeId::VOID);
+        assert_eq!(arena.primitives().any, TypeId::ANY);
+        assert_eq!(arena.primitives().unknown, TypeId::UNKNOWN);
+        assert_eq!(arena.primitives().never, TypeId::NEVER);
+        assert_eq!(arena.primitives().true_literal, TypeId::TRUE);
+        assert_eq!(arena.primitives().false_literal, TypeId::FALSE);
+
+        // Verify the actual numeric values for stability across rebuilds
+        assert_eq!(TypeId::STRING.as_raw(), 0);
+        assert_eq!(TypeId::NUMBER.as_raw(), 1);
+        assert_eq!(TypeId::BOOLEAN.as_raw(), 2);
+        assert_eq!(TypeId::NEVER.as_raw(), 8);
     }
 
     #[test]
     fn test_intern_deduplicates() {
         let mut arena = TypeArena::new();
 
-        let obj1 = Type::object(vec![Property::new("x", Type::Number)]);
-        let obj2 = Type::object(vec![Property::new("x", Type::Number)]);
+        // Create two identical object types with TypeId-based properties
+        let obj1 = Type::Object {
+            properties: vec![Property::new("x", TypeId::NUMBER)],
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        };
+        let obj2 = Type::Object {
+            properties: vec![Property::new("x", TypeId::NUMBER)],
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        };
 
         let id1 = arena.intern(obj1);
         let id2 = arena.intern(obj2);
@@ -588,7 +526,12 @@ mod tests {
     fn test_get_returns_correct_type() {
         let mut arena = TypeArena::new();
 
-        let obj = Type::object(vec![Property::new("name", Type::String)]);
+        let obj = Type::Object {
+            properties: vec![Property::new("name", TypeId::STRING)],
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        };
         let id = arena.intern(obj.clone());
 
         assert_eq!(arena.get(id), &obj);
@@ -606,20 +549,25 @@ mod tests {
             arena.primitive_id(&Type::Number),
             Some(arena.primitives().number)
         );
-        assert_eq!(arena.primitive_id(&Type::object(vec![])), None);
+        // Object types don't have a primitive ID
+        let obj = Type::Object {
+            properties: vec![],
+            index_signature: None,
+            extends: vec![],
+            type_params: vec![],
+        };
+        assert_eq!(arena.primitive_id(&obj), None);
     }
 
     #[test]
-    fn test_intern_deep_handles_nested() {
+    fn test_union_with_type_ids() {
         let mut arena = TypeArena::new();
 
-        let nested = Type::Union(vec![
-            Type::Array(Box::new(Type::String)),
-            Type::object(vec![Property::new("x", Type::Number)]),
-        ]);
+        // Create a union of primitive types using TypeIds
+        let union = Type::Union(vec![TypeId::STRING, TypeId::NUMBER]);
+        let id = arena.intern(union.clone());
 
-        let id = arena.intern_deep(nested.clone());
-        assert_eq!(arena.get(id), &nested);
+        assert_eq!(arena.get(id), &union);
     }
 
     #[test]

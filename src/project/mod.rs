@@ -248,9 +248,15 @@ impl Project {
                         let local_name = spec.local.name().as_str();
                         let exported_name = spec.exported.name().as_str();
                         if let Some(sym) = binder.symbols.lookup(local_name) {
-                            exports.insert(exported_name.to_string(), sym.ty.clone());
+                            exports.insert(
+                                exported_name.to_string(),
+                                binder.symbols.arena.get(sym.ty).clone(),
+                            );
                         } else if let Some(sym) = binder.symbols.lookup_type(local_name) {
-                            exports.insert(exported_name.to_string(), sym.ty.clone());
+                            exports.insert(
+                                exported_name.to_string(),
+                                binder.symbols.arena.get(sym.ty).clone(),
+                            );
                         }
                     }
                 }
@@ -312,10 +318,12 @@ impl Project {
 
                                     if let Some(ty) = module_info.exports.get(imported_name) {
                                         let span = s.local.span;
-                                        let _ = symbols.define(local_name, ty.clone(), SymbolKind::Variable, span);
+                                        // Intern the type into the importing file's arena
+                                        let ty_id = symbols.arena.intern(ty.clone());
+                                        let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
                                         // Also add to type namespace if it's a type
                                         if matches!(ty, Type::Object { .. } | Type::TypeRef { .. }) {
-                                            let _ = symbols.define_type(local_name, ty.clone(), SymbolKind::TypeAlias, span);
+                                            let _ = symbols.define_type(local_name, ty_id, SymbolKind::TypeAlias, span);
                                         }
                                     } else {
                                         errors.push(ProjectError::ModuleNotFound {
@@ -330,7 +338,9 @@ impl Project {
 
                                     if let Some(ty) = &module_info.default_export {
                                         let span = s.local.span;
-                                        let _ = symbols.define(local_name, ty.clone(), SymbolKind::Variable, span);
+                                        // Intern the type into the importing file's arena
+                                        let ty_id = symbols.arena.intern(ty.clone());
+                                        let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
                                     } else {
                                         errors.push(ProjectError::ModuleNotFound {
                                             specifier: format!("{} (default)", specifier),
@@ -345,10 +355,14 @@ impl Project {
                                     let span = s.local.span;
 
                                     // Create an object type with all exports as properties
+                                    // First intern each property type into the importing file's arena
                                     let properties: Vec<_> = module_info
                                         .exports
                                         .iter()
-                                        .map(|(name, ty)| crate::types::Property::new(name.clone(), ty.clone()))
+                                        .map(|(name, ty)| {
+                                            let ty_id = symbols.arena.intern(ty.clone());
+                                            crate::types::Property::new(name.clone(), ty_id)
+                                        })
                                         .collect();
 
                                     let namespace_type = Type::Object {
@@ -358,7 +372,8 @@ impl Project {
                                         type_params: vec![],
                                     };
 
-                                    let _ = symbols.define(local_name, namespace_type, SymbolKind::Variable, span);
+                                    let ty_id = symbols.arena.intern(namespace_type);
+                                    let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
                                 }
                             }
                         }
@@ -393,7 +408,7 @@ impl Project {
                     if let oxc_ast::ast::BindingPattern::BindingIdentifier(ident) = &declarator.id {
                         let name = ident.name.as_str();
                         if let Some(sym) = symbols.lookup(name) {
-                            exports.insert(name.to_string(), sym.ty.clone());
+                            exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                         }
                     }
                 }
@@ -402,7 +417,7 @@ impl Project {
                 if let Some(ident) = &func.id {
                     let name = ident.name.as_str();
                     if let Some(sym) = symbols.lookup(name) {
-                        exports.insert(name.to_string(), sym.ty.clone());
+                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                     }
                 }
             }
@@ -410,24 +425,24 @@ impl Project {
                 if let Some(ident) = &class.id {
                     let name = ident.name.as_str();
                     if let Some(sym) = symbols.lookup(name) {
-                        exports.insert(name.to_string(), sym.ty.clone());
+                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                     }
                     // Also export the type
                     if let Some(sym) = symbols.lookup_type(name) {
-                        exports.insert(name.to_string(), sym.ty.clone());
+                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                     }
                 }
             }
             oxc_ast::ast::Declaration::TSInterfaceDeclaration(iface) => {
                 let name = iface.id.name.as_str();
                 if let Some(sym) = symbols.lookup_type(name) {
-                    exports.insert(name.to_string(), sym.ty.clone());
+                    exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                 }
             }
             oxc_ast::ast::Declaration::TSTypeAliasDeclaration(alias) => {
                 let name = alias.id.name.as_str();
                 if let Some(sym) = symbols.lookup_type(name) {
-                    exports.insert(name.to_string(), sym.ty.clone());
+                    exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
                 }
             }
             _ => {}
@@ -443,21 +458,23 @@ impl Project {
         match decl {
             oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
                 if let Some(ident) = &func.id
-                    && let Some(sym) = symbols.lookup(ident.name.as_str()) {
-                        return sym.ty.clone();
-                    }
+                    && let Some(sym) = symbols.lookup(ident.name.as_str())
+                {
+                    return symbols.arena.get(sym.ty).clone();
+                }
                 Type::Any
             }
             oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(ident) = &class.id
-                    && let Some(sym) = symbols.lookup(ident.name.as_str()) {
-                        return sym.ty.clone();
-                    }
+                    && let Some(sym) = symbols.lookup(ident.name.as_str())
+                {
+                    return symbols.arena.get(sym.ty).clone();
+                }
                 Type::Any
             }
             oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
                 if let Some(sym) = symbols.lookup_type(iface.id.name.as_str()) {
-                    return sym.ty.clone();
+                    return symbols.arena.get(sym.ty).clone();
                 }
                 Type::Any
             }

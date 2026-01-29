@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use oxc_span::Span;
 use serde::Serialize;
 
-use crate::types::Type;
+use crate::types::{TypeArena, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub usize);
@@ -66,7 +66,7 @@ pub enum SymbolKind {
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub name: String,
-    pub ty: Type,
+    pub ty: TypeId,
     pub kind: SymbolKind,
     pub span: Span,     // Location in source code
     pub scope: ScopeId, // Which scope it's declared in
@@ -75,7 +75,7 @@ pub struct Symbol {
 impl Symbol {
     pub fn new(
         name: impl Into<String>,
-        ty: Type,
+        ty: TypeId,
         kind: SymbolKind,
         span: Span,
         scope: ScopeId,
@@ -128,6 +128,7 @@ pub struct SymbolTable {
     pub symbols: Vec<Symbol>,
     pub scopes: Vec<Scope>,
     pub current_scope: ScopeId,
+    pub arena: TypeArena,
 }
 
 impl Default for SymbolTable {
@@ -144,7 +145,18 @@ impl SymbolTable {
             symbols: Vec::new(),
             scopes: vec![global_scope],
             current_scope: ScopeId(0),
+            arena: TypeArena::new(),
         }
+    }
+
+    /// Get a type by its TypeId from the arena.
+    pub fn get_type(&self, id: TypeId) -> &crate::types::Type {
+        self.arena.get(id)
+    }
+
+    /// Intern a type in the arena and return its TypeId.
+    pub fn intern(&mut self, ty: crate::types::Type) -> TypeId {
+        self.arena.intern(ty)
     }
 
     pub fn push_scope(&mut self, kind: ScopeKind) -> ScopeId {
@@ -167,7 +179,7 @@ impl SymbolTable {
     pub fn define(
         &mut self,
         name: impl Into<String>,
-        ty: Type,
+        ty: TypeId,
         kind: SymbolKind,
         span: Span,
     ) -> Result<SymbolId, DuplicateSymbolError> {
@@ -196,7 +208,7 @@ impl SymbolTable {
     pub fn define_type(
         &mut self,
         name: impl Into<String>,
-        ty: Type,
+        ty: TypeId,
         kind: SymbolKind,
         span: Span,
     ) -> Result<SymbolId, DuplicateSymbolError> {
@@ -289,22 +301,22 @@ mod tests {
     fn test_define_and_lookup() {
         let mut table = SymbolTable::new();
         table
-            .define("x", Type::Number, SymbolKind::Variable, span(0, 10))
+            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
             .unwrap();
 
         let sym = table.lookup("x").unwrap();
         assert_eq!(sym.name, "x");
-        assert_eq!(sym.ty, Type::Number);
+        assert_eq!(sym.ty, TypeId::NUMBER);
     }
 
     #[test]
     fn test_duplicate_detection() {
         let mut table = SymbolTable::new();
         table
-            .define("x", Type::Number, SymbolKind::Variable, span(0, 10))
+            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
             .unwrap();
 
-        let result = table.define("x", Type::String, SymbolKind::Variable, span(20, 30));
+        let result = table.define("x", TypeId::STRING, SymbolKind::Variable, span(20, 30));
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -317,14 +329,14 @@ mod tests {
     fn test_scope_chain_lookup() {
         let mut table = SymbolTable::new();
         table
-            .define("x", Type::Number, SymbolKind::Variable, span(0, 10))
+            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
             .unwrap();
 
         table.push_scope(ScopeKind::Function);
         assert!(table.lookup("x").is_some());
 
         table
-            .define("y", Type::String, SymbolKind::Variable, span(20, 30))
+            .define("y", TypeId::STRING, SymbolKind::Variable, span(20, 30))
             .unwrap();
         assert!(table.lookup("y").is_some());
 
@@ -337,40 +349,32 @@ mod tests {
     fn test_shadowing() {
         let mut table = SymbolTable::new();
         table
-            .define("x", Type::Number, SymbolKind::Variable, span(0, 10))
+            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
             .unwrap();
 
         table.push_scope(ScopeKind::Function);
         table
-            .define("x", Type::String, SymbolKind::Variable, span(20, 30))
+            .define("x", TypeId::STRING, SymbolKind::Variable, span(20, 30))
             .unwrap();
 
-        assert_eq!(table.lookup("x").unwrap().ty, Type::String);
+        assert_eq!(table.lookup("x").unwrap().ty, TypeId::STRING);
 
         table.pop_scope();
-        assert_eq!(table.lookup("x").unwrap().ty, Type::Number);
+        assert_eq!(table.lookup("x").unwrap().ty, TypeId::NUMBER);
     }
 
     #[test]
     fn test_type_namespace() {
         let mut table = SymbolTable::new();
 
+        let empty_object = table.arena.object(vec![]);
         table
-            .define_type(
-                "User",
-                Type::object(vec![]),
-                SymbolKind::Interface,
-                span(0, 20),
-            )
+            .define_type("User", empty_object, SymbolKind::Interface, span(0, 20))
             .unwrap();
 
+        let empty_object2 = table.arena.object(vec![]);
         table
-            .define(
-                "User",
-                Type::object(vec![]),
-                SymbolKind::Variable,
-                span(30, 50),
-            )
+            .define("User", empty_object2, SymbolKind::Variable, span(30, 50))
             .unwrap();
 
         // Both namespaces have User
@@ -397,17 +401,17 @@ mod tests {
         let mut table = SymbolTable::new();
 
         table
-            .define("a", Type::Number, SymbolKind::Variable, span(0, 5))
+            .define("a", TypeId::NUMBER, SymbolKind::Variable, span(0, 5))
             .unwrap();
 
         table.push_scope(ScopeKind::Function);
         table
-            .define("b", Type::Number, SymbolKind::Variable, span(10, 15))
+            .define("b", TypeId::NUMBER, SymbolKind::Variable, span(10, 15))
             .unwrap();
 
         table.push_scope(ScopeKind::Block);
         table
-            .define("c", Type::Number, SymbolKind::Variable, span(20, 25))
+            .define("c", TypeId::NUMBER, SymbolKind::Variable, span(20, 25))
             .unwrap();
 
         // All visible from innermost

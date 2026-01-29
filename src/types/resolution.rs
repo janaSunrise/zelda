@@ -4,53 +4,72 @@
 
 use oxc_ast::ast::*;
 
-use super::{IndexSignature, Param, Property, Type, TypeParam};
+use super::{IndexSignature, Param, Property, Type, TypeArena, TypeId, TypeParam};
 
 /// Convert an oxc TSType AST node to our Type representation.
-pub fn resolve_ts_type(ts_type: &TSType) -> Type {
+pub fn resolve_ts_type(ts_type: &TSType, arena: &mut TypeArena) -> TypeId {
     match ts_type {
-        // Primitive keywords
-        TSType::TSStringKeyword(_) => Type::String,
-        TSType::TSNumberKeyword(_) => Type::Number,
-        TSType::TSBooleanKeyword(_) => Type::Boolean,
-        TSType::TSNullKeyword(_) => Type::Null,
-        TSType::TSUndefinedKeyword(_) => Type::Undefined,
-        TSType::TSVoidKeyword(_) => Type::Void,
-        TSType::TSAnyKeyword(_) => Type::Any,
-        TSType::TSUnknownKeyword(_) => Type::Unknown,
-        TSType::TSNeverKeyword(_) => Type::Never,
+        // Primitive keywords - use pre-cached TypeId constants
+        TSType::TSStringKeyword(_) => TypeId::STRING,
+        TSType::TSNumberKeyword(_) => TypeId::NUMBER,
+        TSType::TSBooleanKeyword(_) => TypeId::BOOLEAN,
+        TSType::TSNullKeyword(_) => TypeId::NULL,
+        TSType::TSUndefinedKeyword(_) => TypeId::UNDEFINED,
+        TSType::TSVoidKeyword(_) => TypeId::VOID,
+        TSType::TSAnyKeyword(_) => TypeId::ANY,
+        TSType::TSUnknownKeyword(_) => TypeId::UNKNOWN,
+        TSType::TSNeverKeyword(_) => TypeId::NEVER,
 
         // Literal types
         TSType::TSLiteralType(lit) => match &lit.literal {
-            TSLiteral::StringLiteral(s) => Type::StringLiteral(s.value.to_string()),
-            TSLiteral::NumericLiteral(n) => Type::NumberLiteral(n.value),
-            TSLiteral::BooleanLiteral(b) => Type::BooleanLiteral(b.value),
-            _ => Type::Any,
+            TSLiteral::StringLiteral(s) => {
+                arena.intern(Type::StringLiteral(s.value.to_string()))
+            }
+            TSLiteral::NumericLiteral(n) => arena.intern(Type::NumberLiteral(n.value)),
+            TSLiteral::BooleanLiteral(b) => {
+                if b.value {
+                    TypeId::TRUE
+                } else {
+                    TypeId::FALSE
+                }
+            }
+            _ => TypeId::ANY,
         },
 
         // Array types
-        TSType::TSArrayType(arr) => Type::Array(Box::new(resolve_ts_type(&arr.element_type))),
+        TSType::TSArrayType(arr) => {
+            let elem_id = resolve_ts_type(&arr.element_type, arena);
+            arena.array(elem_id)
+        }
 
         // Tuple types
         TSType::TSTupleType(tuple) => {
-            let types: Vec<Type> = tuple
+            let types: Vec<TypeId> = tuple
                 .element_types
                 .iter()
-                .map(resolve_tuple_element)
+                .map(|e| resolve_tuple_element(e, arena))
                 .collect();
-            Type::Tuple(types)
+            arena.tuple(types)
         }
 
         // Union types
         TSType::TSUnionType(union) => {
-            let types: Vec<Type> = union.types.iter().map(resolve_ts_type).collect();
-            Type::Union(types)
+            let types: Vec<TypeId> = union
+                .types
+                .iter()
+                .map(|t| resolve_ts_type(t, arena))
+                .collect();
+            arena.union(types)
         }
 
         // Intersection types
         TSType::TSIntersectionType(inter) => {
-            let types: Vec<Type> = inter.types.iter().map(resolve_ts_type).collect();
-            Type::Intersection(types)
+            let types: Vec<TypeId> = inter
+                .types
+                .iter()
+                .map(|t| resolve_ts_type(t, arena))
+                .collect();
+            arena.intersection(types)
         }
 
         // Type references (e.g., Array<T>, Promise<T>, custom types)
@@ -61,46 +80,51 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
                 TSTypeName::ThisExpression(_) => "this".to_string(),
             };
 
-            let type_args: Vec<Type> = type_ref
+            let type_args: Vec<TypeId> = type_ref
                 .type_arguments
                 .as_ref()
-                .map(|params| params.params.iter().map(resolve_ts_type).collect())
+                .map(|params| params.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
                 .unwrap_or_default();
 
-            Type::TypeRef { name, type_args }
+            arena.type_ref(name, type_args)
         }
 
         // Function types
-        TSType::TSFunctionType(func) => resolve_function_type(func),
+        TSType::TSFunctionType(func) => resolve_function_type(func, arena),
 
         // Type literals (inline object types)
-        TSType::TSTypeLiteral(lit) => resolve_type_literal(lit),
+        TSType::TSTypeLiteral(lit) => resolve_type_literal(lit, arena),
 
         // Parenthesized types
-        TSType::TSParenthesizedType(paren) => resolve_ts_type(&paren.type_annotation),
+        TSType::TSParenthesizedType(paren) => resolve_ts_type(&paren.type_annotation, arena),
 
         // Type operators (keyof, unique, readonly)
         TSType::TSTypeOperatorType(op) => {
             match op.operator {
                 TSTypeOperatorOperator::Keyof => {
-                    Type::KeyOf(Box::new(resolve_ts_type(&op.type_annotation)))
+                    let inner_id = resolve_ts_type(&op.type_annotation, arena);
+                    arena.intern(Type::KeyOf(inner_id))
                 }
                 TSTypeOperatorOperator::Readonly => {
                     // For now, pass through (readonly modifier on mapped types)
-                    resolve_ts_type(&op.type_annotation)
+                    resolve_ts_type(&op.type_annotation, arena)
                 }
                 TSTypeOperatorOperator::Unique => {
                     // unique symbol - just treat as the underlying type
-                    resolve_ts_type(&op.type_annotation)
+                    resolve_ts_type(&op.type_annotation, arena)
                 }
             }
         }
 
         // Indexed access types: T[K]
-        TSType::TSIndexedAccessType(access) => Type::IndexedAccess {
-            object_type: Box::new(resolve_ts_type(&access.object_type)),
-            index_type: Box::new(resolve_ts_type(&access.index_type)),
-        },
+        TSType::TSIndexedAccessType(access) => {
+            let object_id = resolve_ts_type(&access.object_type, arena);
+            let index_id = resolve_ts_type(&access.index_type, arena);
+            arena.intern(Type::IndexedAccess {
+                object_type: object_id,
+                index_type: index_id,
+            })
+        }
 
         // Mapped types: { [K in keyof T]: T[K] }
         TSType::TSMappedType(mapped) => {
@@ -108,14 +132,14 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
             let type_param = mapped.key.name.to_string();
 
             // The constraint (e.g., "keyof T" in [P in keyof T])
-            let constraint = resolve_ts_type(&mapped.constraint);
+            let constraint_id = resolve_ts_type(&mapped.constraint, arena);
 
             // The template is the value type (e.g., "T[K]" in "{ [K in keyof T]: T[K] }")
-            let template = mapped
+            let template_id = mapped
                 .type_annotation
                 .as_ref()
-                .map(|a| resolve_ts_type(a))
-                .unwrap_or(Type::Any);
+                .map(|a| resolve_ts_type(a, arena))
+                .unwrap_or(TypeId::ANY);
 
             // Handle modifiers
             // readonly_modifier: +readonly, -readonly, or none
@@ -134,26 +158,32 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
                 )
             });
 
-            Type::MappedType {
+            arena.intern(Type::MappedType {
                 type_param,
-                constraint: Box::new(constraint),
-                template: Box::new(template),
+                constraint: constraint_id,
+                template: template_id,
                 readonly_modifier,
                 optional_modifier,
-            }
+            })
         }
 
         // Type predicates resolve to boolean when used as standalone types.
         // The predicate details are extracted in build_function_type for narrowing.
-        TSType::TSTypePredicate(_) => Type::Boolean,
+        TSType::TSTypePredicate(_) => TypeId::BOOLEAN,
 
         // Conditional types: T extends U ? X : Y
-        TSType::TSConditionalType(cond) => Type::ConditionalType {
-            check_type: Box::new(resolve_ts_type(&cond.check_type)),
-            extends_type: Box::new(resolve_ts_type(&cond.extends_type)),
-            true_type: Box::new(resolve_ts_type(&cond.true_type)),
-            false_type: Box::new(resolve_ts_type(&cond.false_type)),
-        },
+        TSType::TSConditionalType(cond) => {
+            let check_id = resolve_ts_type(&cond.check_type, arena);
+            let extends_id = resolve_ts_type(&cond.extends_type, arena);
+            let true_id = resolve_ts_type(&cond.true_type, arena);
+            let false_id = resolve_ts_type(&cond.false_type, arena);
+            arena.intern(Type::ConditionalType {
+                check_type: check_id,
+                extends_type: extends_id,
+                true_type: true_id,
+                false_type: false_id,
+            })
+        }
 
         // Infer types: infer R (used in conditional type extends clauses)
         TSType::TSInferType(infer) => {
@@ -161,11 +191,11 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
                 .type_parameter
                 .constraint
                 .as_ref()
-                .map(|c| Box::new(resolve_ts_type(c)));
-            Type::InferType {
+                .map(|c| resolve_ts_type(c, arena));
+            arena.intern(Type::InferType {
                 name: infer.type_parameter.name.name.to_string(),
                 constraint,
-            }
+            })
         }
 
         // Template literal types: `hello${string}world`
@@ -177,14 +207,14 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
             for (i, quasi) in template.quasis.iter().enumerate() {
                 texts.push(quasi.value.raw.to_string());
                 if let Some(ty) = template.types.get(i) {
-                    types.push(resolve_ts_type(ty));
+                    types.push(resolve_ts_type(ty, arena));
                 }
             }
 
-            Type::TemplateLiteralType { texts, types }
+            arena.intern(Type::TemplateLiteralType { texts, types })
         }
 
-        _ => Type::Any,
+        _ => TypeId::ANY,
     }
 }
 
@@ -195,34 +225,31 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
 /// - Optional: `[string, number?]`
 /// - Rest: `[string, ...number[]]`
 /// - Named: `[name: string, age: number]`
-pub fn resolve_tuple_element(elem: &TSTupleElement) -> Type {
+pub fn resolve_tuple_element(elem: &TSTupleElement, arena: &mut TypeArena) -> TypeId {
     match elem {
-        TSTupleElement::TSOptionalType(opt) => resolve_ts_type(&opt.type_annotation),
-        TSTupleElement::TSRestType(rest) => resolve_ts_type(&rest.type_annotation),
-        TSTupleElement::TSNamedTupleMember(named) => resolve_tuple_element(&named.element_type),
+        TSTupleElement::TSOptionalType(opt) => resolve_ts_type(&opt.type_annotation, arena),
+        TSTupleElement::TSRestType(rest) => resolve_ts_type(&rest.type_annotation, arena),
+        TSTupleElement::TSNamedTupleMember(named) => {
+            resolve_tuple_element(&named.element_type, arena)
+        }
         _ => {
             if let Some(ty) = elem.as_ts_type() {
-                resolve_ts_type(ty)
+                resolve_ts_type(ty, arena)
             } else {
-                Type::Any
+                TypeId::ANY
             }
         }
     }
 }
 
-pub fn resolve_function_type(func: &TSFunctionType) -> Type {
-    let params = resolve_formal_parameters(&func.params);
-    let return_type = resolve_ts_type(&func.return_type.type_annotation);
+pub fn resolve_function_type(func: &TSFunctionType, arena: &mut TypeArena) -> TypeId {
+    let params = resolve_formal_parameters(&func.params, arena);
+    let return_type_id = resolve_ts_type(&func.return_type.type_annotation, arena);
 
-    Type::Function {
-        params,
-        return_type: Box::new(return_type),
-        type_params: vec![],
-        type_predicate: None,
-    }
+    arena.function(params, return_type_id)
 }
 
-pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
+pub fn resolve_type_literal(lit: &TSTypeLiteral, arena: &mut TypeArena) -> TypeId {
     let mut properties = Vec::new();
     let mut index_signature = None;
 
@@ -230,12 +257,12 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
         match member {
             TSSignature::TSPropertySignature(prop) => {
                 if let Some(name) = get_property_key_name(&prop.key) {
-                    let ty = prop
+                    let ty_id = prop
                         .type_annotation
                         .as_ref()
-                        .map(|ann| resolve_ts_type(&ann.type_annotation))
-                        .unwrap_or(Type::Any);
-                    let mut property = Property::new(name, ty);
+                        .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                        .unwrap_or(TypeId::ANY);
+                    let mut property = Property::new(name, ty_id);
                     if prop.optional {
                         property = property.optional();
                     }
@@ -247,19 +274,14 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
             }
             TSSignature::TSMethodSignature(method) => {
                 if let Some(name) = get_property_key_name(&method.key) {
-                    let params = resolve_formal_parameters(&method.params);
-                    let return_type = method
+                    let params = resolve_formal_parameters(&method.params, arena);
+                    let return_type_id = method
                         .return_type
                         .as_ref()
-                        .map(|ann| resolve_ts_type(&ann.type_annotation))
-                        .unwrap_or(Type::Void);
-                    let ty = Type::Function {
-                        params,
-                        return_type: Box::new(return_type),
-                        type_params: vec![],
-                        type_predicate: None,
-                    };
-                    let mut property = Property::new(name, ty);
+                        .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                        .unwrap_or(TypeId::VOID);
+                    let method_ty_id = arena.function(params, return_type_id);
+                    let mut property = Property::new(name, method_ty_id);
                     if method.optional {
                         property = property.optional();
                     }
@@ -269,11 +291,11 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
             TSSignature::TSIndexSignature(idx) => {
                 // Index signature: [key: string]: T or [key: number]: T
                 if let Some(param) = idx.parameters.first() {
-                    let key_type = resolve_ts_type(&param.type_annotation.type_annotation);
-                    let value_type = resolve_ts_type(&idx.type_annotation.type_annotation);
+                    let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
+                    let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
                     index_signature = Some(IndexSignature {
-                        key_type: Box::new(key_type),
-                        value_type: Box::new(value_type),
+                        key_type: key_type_id,
+                        value_type: value_type_id,
                     });
                 }
             }
@@ -281,15 +303,15 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral) -> Type {
         }
     }
 
-    Type::Object {
+    arena.intern(Type::Object {
         properties,
         index_signature,
         extends: vec![],
         type_params: vec![],
-    }
+    })
 }
 
-pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
+pub fn resolve_formal_parameters(params: &FormalParameters, arena: &mut TypeArena) -> Vec<Param> {
     let mut result: Vec<Param> = params
         .items
         .iter()
@@ -298,12 +320,12 @@ pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
                 BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
                 _ => "_".to_string(),
             };
-            let ty = p
+            let ty_id = p
                 .type_annotation
                 .as_ref()
-                .map(|ann| resolve_ts_type(&ann.type_annotation))
-                .unwrap_or(Type::Any);
-            let mut param = Param::new(name, ty);
+                .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                .unwrap_or(TypeId::ANY);
+            let mut param = Param::new(name, ty_id);
             if p.optional {
                 param = param.optional();
             }
@@ -319,12 +341,12 @@ pub fn resolve_formal_parameters(params: &FormalParameters) -> Vec<Param> {
             _ => "args".to_string(),
         };
         // Rest parameter type should be the array type (e.g., any[] for ...data: any[])
-        let ty = rest_param
+        let ty_id = rest_param
             .type_annotation
             .as_ref()
-            .map(|ann| resolve_ts_type(&ann.type_annotation))
-            .unwrap_or(Type::Array(Box::new(Type::Any)));
-        result.push(Param::new(name, ty).rest());
+            .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+            .unwrap_or_else(|| arena.array(TypeId::ANY));
+        result.push(Param::new(name, ty_id).rest());
     }
 
     result
@@ -340,7 +362,7 @@ pub fn get_property_key_name(key: &PropertyKey) -> Option<String> {
 }
 
 /// Build a function type from a Function AST node.
-pub fn build_function_type(func: &Function) -> Type {
+pub fn build_function_type(func: &Function, arena: &mut TypeArena) -> TypeId {
     let mut params: Vec<Param> = func
         .params
         .items
@@ -350,12 +372,12 @@ pub fn build_function_type(func: &Function) -> Type {
                 BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
                 _ => "_".to_string(),
             };
-            let ty = p
+            let ty_id = p
                 .type_annotation
                 .as_ref()
-                .map(|ann| resolve_ts_type(&ann.type_annotation))
-                .unwrap_or(Type::Any);
-            let mut param = Param::new(name, ty);
+                .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                .unwrap_or(TypeId::ANY);
+            let mut param = Param::new(name, ty_id);
             if p.optional {
                 param = param.optional();
             }
@@ -373,20 +395,20 @@ pub fn build_function_type(func: &Function) -> Type {
             _ => "args".to_string(),
         };
         // Rest parameter type should be the array type (e.g., number[])
-        let ty = rest_param
+        let ty_id = rest_param
             .type_annotation
             .as_ref()
-            .map(|ann| resolve_ts_type(&ann.type_annotation))
-            .unwrap_or(Type::Array(Box::new(Type::Any)));
+            .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+            .unwrap_or_else(|| arena.array(TypeId::ANY));
 
-        let param = Param::new(name, ty).rest();
+        let param = Param::new(name, ty_id).rest();
         params.push(param);
     }
 
     // Handle type predicates specially. Assertion functions like "asserts val is string"
     // have void as their effective return type since they throw on failure. Regular type
     // guards like "val is string" return boolean.
-    let (return_type, type_predicate) = if let Some(ann) = &func.return_type {
+    let (return_type_id, type_predicate) = if let Some(ann) = &func.return_type {
         if let TSType::TSTypePredicate(pred) = &ann.type_annotation {
             let parameter_name = match &pred.parameter_name {
                 TSTypePredicateName::Identifier(ident) => ident.name.to_string(),
@@ -396,7 +418,7 @@ pub fn build_function_type(func: &Function) -> Type {
             let type_annotation = pred
                 .type_annotation
                 .as_ref()
-                .map(|ann| Box::new(resolve_ts_type(&ann.type_annotation)));
+                .map(|ann| resolve_ts_type(&ann.type_annotation, arena));
 
             let predicate = super::TypePredicate {
                 parameter_name,
@@ -404,17 +426,17 @@ pub fn build_function_type(func: &Function) -> Type {
                 type_annotation,
             };
 
-            let ret = if pred.asserts {
-                Type::Void
+            let ret_id = if pred.asserts {
+                TypeId::VOID
             } else {
-                Type::Boolean
+                TypeId::BOOLEAN
             };
-            (ret, Some(predicate))
+            (ret_id, Some(predicate))
         } else {
-            (resolve_ts_type(&ann.type_annotation), None)
+            (resolve_ts_type(&ann.type_annotation, arena), None)
         }
     } else {
-        (Type::Void, None)
+        (TypeId::VOID, None)
     };
 
     let type_params: Vec<TypeParam> = func
@@ -427,7 +449,7 @@ pub fn build_function_type(func: &Function) -> Type {
                 .map(|p| {
                     let mut tp = TypeParam::new(p.name.name.to_string());
                     if let Some(constraint) = &p.constraint {
-                        tp = tp.with_constraint(resolve_ts_type(constraint));
+                        tp = tp.with_constraint(resolve_ts_type(constraint, arena));
                     }
                     tp
                 })
@@ -435,16 +457,16 @@ pub fn build_function_type(func: &Function) -> Type {
         })
         .unwrap_or_default();
 
-    Type::Function {
+    arena.intern(Type::Function {
         params,
-        return_type: Box::new(return_type),
+        return_type: return_type_id,
         type_params,
         type_predicate,
-    }
+    })
 }
 
 /// Build an object type from an interface declaration.
-pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
+pub fn build_interface_type(decl: &TSInterfaceDeclaration, arena: &mut TypeArena) -> TypeId {
     let mut properties = Vec::new();
     let mut index_signature = None;
 
@@ -459,10 +481,10 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
                 .map(|p| {
                     let mut tp = TypeParam::new(p.name.name.to_string());
                     if let Some(constraint) = &p.constraint {
-                        tp = tp.with_constraint(resolve_ts_type(constraint));
+                        tp = tp.with_constraint(resolve_ts_type(constraint, arena));
                     }
                     if let Some(default) = &p.default {
-                        tp = tp.with_default(resolve_ts_type(default));
+                        tp = tp.with_default(resolve_ts_type(default, arena));
                     }
                     tp
                 })
@@ -470,20 +492,20 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
         })
         .unwrap_or_default();
 
-    let extends: Vec<Type> = decl
+    let extends: Vec<TypeId> = decl
         .extends
         .iter()
         .map(|heritage| {
             let name = match &heritage.expression {
                 Expression::Identifier(ident) => ident.name.to_string(),
-                _ => return Type::Any,
+                _ => return TypeId::ANY,
             };
-            let type_args: Vec<Type> = heritage
+            let type_args: Vec<TypeId> = heritage
                 .type_arguments
                 .as_ref()
-                .map(|args| args.params.iter().map(resolve_ts_type).collect())
+                .map(|args| args.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
                 .unwrap_or_default();
-            Type::TypeRef { name, type_args }
+            arena.type_ref(name, type_args)
         })
         .collect();
 
@@ -491,12 +513,12 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
         match member {
             TSSignature::TSPropertySignature(prop) => {
                 if let Some(name) = get_property_key_name(&prop.key) {
-                    let ty = prop
+                    let ty_id = prop
                         .type_annotation
                         .as_ref()
-                        .map(|ann| resolve_ts_type(&ann.type_annotation))
-                        .unwrap_or(Type::Any);
-                    let mut property = Property::new(name, ty);
+                        .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                        .unwrap_or(TypeId::ANY);
+                    let mut property = Property::new(name, ty_id);
                     if prop.optional {
                         property = property.optional();
                     }
@@ -508,19 +530,14 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
             }
             TSSignature::TSMethodSignature(method) => {
                 if let Some(name) = get_property_key_name(&method.key) {
-                    let params = resolve_formal_parameters(&method.params);
-                    let return_type = method
+                    let params = resolve_formal_parameters(&method.params, arena);
+                    let return_type_id = method
                         .return_type
                         .as_ref()
-                        .map(|ann| resolve_ts_type(&ann.type_annotation))
-                        .unwrap_or(Type::Void);
-                    let ty = Type::Function {
-                        params,
-                        return_type: Box::new(return_type),
-                        type_params: vec![],
-                        type_predicate: None,
-                    };
-                    let mut property = Property::new(name, ty);
+                        .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                        .unwrap_or(TypeId::VOID);
+                    let method_ty_id = arena.function(params, return_type_id);
+                    let mut property = Property::new(name, method_ty_id);
                     if method.optional {
                         property = property.optional();
                     }
@@ -530,11 +547,11 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
             TSSignature::TSIndexSignature(idx) => {
                 // Index signature: [key: string]: T or [key: number]: T
                 if let Some(param) = idx.parameters.first() {
-                    let key_type = resolve_ts_type(&param.type_annotation.type_annotation);
-                    let value_type = resolve_ts_type(&idx.type_annotation.type_annotation);
+                    let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
+                    let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
                     index_signature = Some(IndexSignature {
-                        key_type: Box::new(key_type),
-                        value_type: Box::new(value_type),
+                        key_type: key_type_id,
+                        value_type: value_type_id,
                     });
                 }
             }
@@ -542,24 +559,24 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration) -> Type {
         }
     }
 
-    Type::Object {
+    arena.intern(Type::Object {
         properties,
         index_signature,
         extends,
         type_params,
-    }
+    })
 }
 
 /// Build an object type from a class declaration.
 ///
-/// Returns three types:
+/// Returns three TypeIds:
 /// - instance_type: The type of instances (properties and methods)
 /// - constructor_type: The type of the constructor function
 /// - static_type: Object type with static properties and methods
-pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
+pub fn build_class_type(decl: &Class, arena: &mut TypeArena) -> (TypeId, Option<TypeId>, TypeId) {
     let mut properties = Vec::new();
     let mut static_properties = Vec::new();
-    let mut constructor_type = None;
+    let mut constructor_type_id = None;
 
     // Extract type parameters for generic classes
     let type_params: Vec<TypeParam> = decl
@@ -572,10 +589,10 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                 .map(|p| {
                     let mut tp = TypeParam::new(p.name.name.to_string());
                     if let Some(constraint) = &p.constraint {
-                        tp = tp.with_constraint(resolve_ts_type(constraint));
+                        tp = tp.with_constraint(resolve_ts_type(constraint, arena));
                     }
                     if let Some(default) = &p.default {
-                        tp = tp.with_default(resolve_ts_type(default));
+                        tp = tp.with_default(resolve_ts_type(default, arena));
                     }
                     tp
                 })
@@ -584,32 +601,29 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
         .unwrap_or_default();
 
     // Build extends list from super class
-    let extends: Vec<Type> = if let Some(Expression::Identifier(ident)) = decl.super_class.as_ref()
-    {
-        let type_args: Vec<Type> = decl
-            .super_type_arguments
-            .as_ref()
-            .map(|args| args.params.iter().map(resolve_ts_type).collect())
-            .unwrap_or_default();
-        vec![Type::TypeRef {
-            name: ident.name.to_string(),
-            type_args,
-        }]
-    } else {
-        vec![]
-    };
+    let extends: Vec<TypeId> =
+        if let Some(Expression::Identifier(ident)) = decl.super_class.as_ref() {
+            let type_args: Vec<TypeId> = decl
+                .super_type_arguments
+                .as_ref()
+                .map(|args| args.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
+                .unwrap_or_default();
+            vec![arena.type_ref(ident.name.to_string(), type_args)]
+        } else {
+            vec![]
+        };
 
     // Process class elements
     for element in &decl.body.body {
         match element {
             ClassElement::PropertyDefinition(prop) => {
                 if let Some(name) = get_property_key_name(&prop.key) {
-                    let ty = prop
+                    let ty_id = prop
                         .type_annotation
                         .as_ref()
-                        .map(|ann| resolve_ts_type(&ann.type_annotation))
-                        .unwrap_or(Type::Any);
-                    let mut property = Property::new(name, ty);
+                        .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                        .unwrap_or(TypeId::ANY);
+                    let mut property = Property::new(name, ty_id);
                     if prop.optional {
                         property = property.optional();
                     }
@@ -637,12 +651,12 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                                 BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
                                 _ => "_".to_string(),
                             };
-                            let ty = p
+                            let ty_id = p
                                 .type_annotation
                                 .as_ref()
-                                .map(|ann| resolve_ts_type(&ann.type_annotation))
-                                .unwrap_or(Type::Any);
-                            let mut param = Param::new(name, ty);
+                                .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                                .unwrap_or(TypeId::ANY);
+                            let mut param = Param::new(name, ty_id);
                             if p.optional {
                                 param = param.optional();
                             }
@@ -655,33 +669,34 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                         // Parameter property if it has accessibility modifier or readonly
                         let is_param_property = p.accessibility.is_some() || p.readonly;
                         if is_param_property
-                            && let BindingPattern::BindingIdentifier(ident) = &p.pattern {
-                                let name = ident.name.to_string();
-                                let ty = p
-                                    .type_annotation
-                                    .as_ref()
-                                    .map(|ann| resolve_ts_type(&ann.type_annotation))
-                                    .unwrap_or(Type::Any);
-                                let mut property = Property::new(name, ty);
-                                if p.readonly {
-                                    property = property.readonly();
-                                }
-                                properties.push(property);
+                            && let BindingPattern::BindingIdentifier(ident) = &p.pattern
+                        {
+                            let name = ident.name.to_string();
+                            let ty_id = p
+                                .type_annotation
+                                .as_ref()
+                                .map(|ann| resolve_ts_type(&ann.type_annotation, arena))
+                                .unwrap_or(TypeId::ANY);
+                            let mut property = Property::new(name, ty_id);
+                            if p.readonly {
+                                property = property.readonly();
                             }
+                            properties.push(property);
+                        }
                     }
 
-                    constructor_type = Some(Type::Function {
+                    constructor_type_id = Some(arena.intern(Type::Function {
                         params,
-                        return_type: Box::new(Type::Void), // Constructor's "return" is the instance
-                        type_params: type_params.clone(),  // Use class's type parameters
+                        return_type: TypeId::VOID, // Constructor's "return" is the instance
+                        type_params: type_params.clone(), // Use class's type parameters
                         type_predicate: None,
-                    });
+                    }));
                     continue;
                 }
 
                 if let Some(name) = get_property_key_name(&method.key) {
-                    let func_type = build_function_type(&method.value);
-                    let mut property = Property::new(name, func_type);
+                    let func_type_id = build_function_type(&method.value, arena);
+                    let mut property = Property::new(name, func_type_id);
                     if method.optional {
                         property = property.optional();
                     }
@@ -697,21 +712,16 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
         }
     }
 
-    let instance_type = Type::Object {
+    let instance_type_id = arena.intern(Type::Object {
         properties,
         index_signature: None,
         extends,
         type_params,
-    };
+    });
 
-    let static_type = Type::Object {
-        properties: static_properties,
-        index_signature: None,
-        extends: vec![],
-        type_params: vec![],
-    };
+    let static_type_id = arena.object(static_properties);
 
-    (instance_type, constructor_type, static_type)
+    (instance_type_id, constructor_type_id, static_type_id)
 }
 
 /// Widen literal types to their base types.
@@ -722,32 +732,63 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
 /// - `true` -> `boolean`
 ///
 /// Also handles nested types (arrays, tuples, objects, unions).
-pub fn widen_type(ty: Type) -> Type {
+pub fn widen_type(ty_id: TypeId, arena: &mut TypeArena) -> TypeId {
+    // Handle boolean literals (TRUE and FALSE need widening to BOOLEAN)
+    if ty_id == TypeId::TRUE || ty_id == TypeId::FALSE {
+        return TypeId::BOOLEAN;
+    }
+
+    // Fast path: primitives don't need widening
+    if ty_id.is_primitive() {
+        return ty_id;
+    }
+
+    // Clone the type to avoid borrow issues
+    let ty = arena.get(ty_id).clone();
+
     match ty {
-        Type::StringLiteral(_) => Type::String,
-        Type::NumberLiteral(_) => Type::Number,
-        Type::BooleanLiteral(_) => Type::Boolean,
-        Type::Array(inner) => Type::Array(Box::new(widen_type(*inner))),
-        Type::Tuple(types) => Type::Tuple(types.into_iter().map(widen_type).collect()),
-        Type::Union(types) => Type::Union(types.into_iter().map(widen_type).collect()),
+        Type::StringLiteral(_) => TypeId::STRING,
+        Type::NumberLiteral(_) => TypeId::NUMBER,
+        Type::BooleanLiteral(_) => TypeId::BOOLEAN,
+        Type::Array(inner_id) => {
+            let widened_inner = widen_type(inner_id, arena);
+            arena.array(widened_inner)
+        }
+        Type::Tuple(type_ids) => {
+            let widened: Vec<TypeId> = type_ids
+                .into_iter()
+                .map(|id| widen_type(id, arena))
+                .collect();
+            arena.tuple(widened)
+        }
+        Type::Union(type_ids) => {
+            let widened: Vec<TypeId> = type_ids
+                .into_iter()
+                .map(|id| widen_type(id, arena))
+                .collect();
+            arena.union(widened)
+        }
         Type::Object {
             properties,
             index_signature,
             extends,
             type_params,
-        } => Type::Object {
-            properties: properties
+        } => {
+            let widened_properties: Vec<Property> = properties
                 .into_iter()
                 .map(|mut p| {
-                    p.ty = widen_type(p.ty);
+                    p.ty = widen_type(p.ty, arena);
                     p
                 })
-                .collect(),
-            index_signature,
-            extends,
-            type_params,
-        },
-        other => other,
+                .collect();
+            arena.intern(Type::Object {
+                properties: widened_properties,
+                index_signature,
+                extends,
+                type_params,
+            })
+        }
+        _ => ty_id,
     }
 }
 
@@ -757,56 +798,63 @@ mod tests {
 
     #[test]
     fn test_widen_string_literal() {
-        assert_eq!(
-            widen_type(Type::StringLiteral("hello".into())),
-            Type::String
-        );
+        let mut arena = TypeArena::new();
+        let str_lit_id = arena.intern(Type::StringLiteral("hello".into()));
+        assert_eq!(widen_type(str_lit_id, &mut arena), TypeId::STRING);
     }
 
     #[test]
     fn test_widen_number_literal() {
-        assert_eq!(widen_type(Type::NumberLiteral(42.0)), Type::Number);
+        let mut arena = TypeArena::new();
+        let num_lit_id = arena.intern(Type::NumberLiteral(42.0));
+        assert_eq!(widen_type(num_lit_id, &mut arena), TypeId::NUMBER);
     }
 
     #[test]
     fn test_widen_boolean_literal() {
-        assert_eq!(widen_type(Type::BooleanLiteral(true)), Type::Boolean);
+        let mut arena = TypeArena::new();
+        // BooleanLiteral(true) is pre-cached as TypeId::TRUE
+        assert_eq!(widen_type(TypeId::TRUE, &mut arena), TypeId::BOOLEAN);
     }
 
     #[test]
     fn test_widen_array() {
-        let arr = Type::Array(Box::new(Type::StringLiteral("test".into())));
-        assert_eq!(widen_type(arr), Type::Array(Box::new(Type::String)));
+        let mut arena = TypeArena::new();
+        let str_lit_id = arena.intern(Type::StringLiteral("test".into()));
+        let arr_id = arena.array(str_lit_id);
+        let widened_id = widen_type(arr_id, &mut arena);
+        // Should become string[]
+        let expected_id = arena.array(TypeId::STRING);
+        assert_eq!(widened_id, expected_id);
     }
 
     #[test]
     fn test_widen_tuple() {
-        let tuple = Type::Tuple(vec![
-            Type::StringLiteral("a".into()),
-            Type::NumberLiteral(1.0),
-        ]);
-        assert_eq!(
-            widen_type(tuple),
-            Type::Tuple(vec![Type::String, Type::Number])
-        );
+        let mut arena = TypeArena::new();
+        let str_lit_id = arena.intern(Type::StringLiteral("a".into()));
+        let num_lit_id = arena.intern(Type::NumberLiteral(1.0));
+        let tuple_id = arena.tuple(vec![str_lit_id, num_lit_id]);
+        let widened_id = widen_type(tuple_id, &mut arena);
+        let expected_id = arena.tuple(vec![TypeId::STRING, TypeId::NUMBER]);
+        assert_eq!(widened_id, expected_id);
     }
 
     #[test]
     fn test_widen_union() {
-        let union = Type::Union(vec![
-            Type::StringLiteral("a".into()),
-            Type::NumberLiteral(1.0),
-        ]);
-        assert_eq!(
-            widen_type(union),
-            Type::Union(vec![Type::String, Type::Number])
-        );
+        let mut arena = TypeArena::new();
+        let str_lit_id = arena.intern(Type::StringLiteral("a".into()));
+        let num_lit_id = arena.intern(Type::NumberLiteral(1.0));
+        let union_id = arena.union(vec![str_lit_id, num_lit_id]);
+        let widened_id = widen_type(union_id, &mut arena);
+        let expected_id = arena.union(vec![TypeId::STRING, TypeId::NUMBER]);
+        assert_eq!(widened_id, expected_id);
     }
 
     #[test]
     fn test_widen_preserves_primitives() {
-        assert_eq!(widen_type(Type::String), Type::String);
-        assert_eq!(widen_type(Type::Number), Type::Number);
-        assert_eq!(widen_type(Type::Boolean), Type::Boolean);
+        let mut arena = TypeArena::new();
+        assert_eq!(widen_type(TypeId::STRING, &mut arena), TypeId::STRING);
+        assert_eq!(widen_type(TypeId::NUMBER, &mut arena), TypeId::NUMBER);
+        assert_eq!(widen_type(TypeId::BOOLEAN, &mut arena), TypeId::BOOLEAN);
     }
 }

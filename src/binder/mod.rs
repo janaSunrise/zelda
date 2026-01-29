@@ -324,17 +324,8 @@ impl Binder {
         };
 
         // Modules are registered as empty objects for now
-        let _ = self.symbols.define_type(
-            name,
-            crate::types::Type::Object {
-                properties: vec![],
-                index_signature: None,
-                extends: vec![],
-                type_params: vec![],
-            },
-            SymbolKind::TypeAlias,
-            span,
-        );
+        let empty_object_id = self.symbols.arena.object(vec![]);
+        let _ = self.symbols.define_type(name, empty_object_id, SymbolKind::TypeAlias, span);
     }
 
     /// Bind an export default declaration.

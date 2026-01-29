@@ -23,6 +23,8 @@
 mod arena;
 pub mod resolution;
 
+pub use arena::{TypeArena, TypeId};
+
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -45,25 +47,25 @@ pub enum Type {
     NumberLiteral(f64),
     BooleanLiteral(bool),
 
-    // Compound types
-    Array(Box<Type>),
-    Tuple(Vec<Type>),
-    Union(Vec<Type>),
-    Intersection(Vec<Type>),
+    // Compound types - use TypeId handles instead of Box<Type>
+    Array(TypeId),
+    Tuple(Vec<TypeId>),
+    Union(Vec<TypeId>),
+    Intersection(Vec<TypeId>),
 
     // Structural types
     Object {
         properties: Vec<Property>,
         index_signature: Option<IndexSignature>,
-        /// Base interfaces/types this interface extends (stored as TypeRefs).
+        /// Base interfaces/types this interface extends (stored as TypeIds).
         /// Empty for plain object types. Resolved during type checking.
-        extends: Vec<Type>,
+        extends: Vec<TypeId>,
         /// Type parameters for generic interfaces: interface Box<T> { ... }
         type_params: Vec<TypeParam>,
     },
     Function {
         params: Vec<Param>,
-        return_type: Box<Type>,
+        return_type: TypeId,
         type_params: Vec<TypeParam>,
         /// Assertion predicate for assertion functions like `asserts val is string`
         type_predicate: Option<TypePredicate>,
@@ -83,28 +85,28 @@ pub enum Type {
     // Named type reference with `type`: Array<string>, Map<K,V>, User, etc.
     TypeRef {
         name: String,
-        type_args: Vec<Type>,
+        type_args: Vec<TypeId>,
     },
 
     // Type parameter in a generic definition: the T in <T extends Foo>
     TypeParameter {
         name: String,
-        constraint: Option<Box<Type>>,
-        default: Option<Box<Type>>,
+        constraint: Option<TypeId>,
+        default: Option<TypeId>,
     },
 
     /// keyof T - union of property name literals
     ///
     /// `keyof { x: number; y: string }` = `"x" | "y"`
-    KeyOf(Box<Type>),
+    KeyOf(TypeId),
 
     /// Indexed access type: T[K]
     ///
     /// `Person["name"]` gets the type of the "name" property
     /// `T[keyof T]` gets a union of all property value types
     IndexedAccess {
-        object_type: Box<Type>,
-        index_type: Box<Type>,
+        object_type: TypeId,
+        index_type: TypeId,
     },
 
     /// Mapped type: { [K in keyof T]: T[K] }
@@ -115,9 +117,9 @@ pub enum Type {
         /// The type parameter variable name (e.g., "K" in [K in keyof T])
         type_param: String,
         /// The constraint on the type parameter (e.g., keyof T)
-        constraint: Box<Type>,
+        constraint: TypeId,
         /// The template for each property value (e.g., T[K])
-        template: Box<Type>,
+        template: TypeId,
         /// Modifier for readonly: Some(true) = +readonly, Some(false) = -readonly, None = unchanged
         readonly_modifier: Option<bool>,
         /// Modifier for optional: Some(true) = +?, Some(false) = -?, None = unchanged
@@ -131,13 +133,13 @@ pub enum Type {
     /// `(A | B) extends U ? X : Y` becomes `(A extends U ? X : Y) | (B extends U ? X : Y)`
     ConditionalType {
         /// The type being checked (e.g., T in `T extends U ? X : Y`)
-        check_type: Box<Type>,
+        check_type: TypeId,
         /// The type to compare against (e.g., U in `T extends U ? X : Y`)
-        extends_type: Box<Type>,
+        extends_type: TypeId,
         /// The type if the check succeeds (e.g., X in `T extends U ? X : Y`)
-        true_type: Box<Type>,
+        true_type: TypeId,
         /// The type if the check fails (e.g., Y in `T extends U ? X : Y`)
-        false_type: Box<Type>,
+        false_type: TypeId,
     },
 
     /// Infer type: `infer R` in conditional types
@@ -148,7 +150,7 @@ pub enum Type {
         /// The name of the type variable to infer (e.g., "R" in `infer R`)
         name: String,
         /// Optional constraint on the inferred type (e.g., `infer R extends SomeType`)
-        constraint: Option<Box<Type>>,
+        constraint: Option<TypeId>,
     },
 
     /// Template literal type: `hello${string}world`
@@ -161,7 +163,7 @@ pub enum Type {
         texts: Vec<String>,
         /// The type placeholders between text parts
         /// For `hello${T}world`, this is [T]
-        types: Vec<Type>,
+        types: Vec<TypeId>,
     },
 }
 
@@ -174,6 +176,8 @@ impl Eq for Type {}
 /// (like +0.0 vs -0.0) would need special handling, and NaN has no meaningful hash.
 /// We solve this by converting f64 to its raw bits via `to_bits()`, giving us a
 /// consistent u64 that we can hash normally.
+///
+/// TypeId is Copy + Hash, so hashing compound types is fast.
 impl Hash for Type {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -330,6 +334,7 @@ impl PartialOrd for Type {
 }
 
 /// See `PartialOrd` above, this uses `total_cmp()` for the `NumberLiteral` variant.
+/// TypeId is Ord, so comparison of compound types is straightforward.
 impl Ord for Type {
     fn cmp(&self, other: &Self) -> Ordering {
         // First compare by discriminant using explicit ordering
@@ -338,7 +343,7 @@ impl Ord for Type {
             ord => return ord,
         }
 
-        // Then compare by content
+        // Then compare by content - TypeId is Copy + Ord
         match (self, other) {
             (Type::String, Type::String) => Ordering::Equal,
             (Type::Number, Type::Number) => Ordering::Equal,
@@ -502,6 +507,7 @@ impl Ord for Type {
 }
 
 impl Type {
+    /// Create an object type with the given properties.
     pub fn object(properties: Vec<Property>) -> Self {
         Self::Object {
             properties,
@@ -512,7 +518,7 @@ impl Type {
     }
 
     /// Create an object type with inheritance (for interfaces with extends).
-    pub fn object_with_extends(properties: Vec<Property>, extends: Vec<Type>) -> Self {
+    pub fn object_with_extends(properties: Vec<Property>, extends: Vec<TypeId>) -> Self {
         Self::Object {
             properties,
             index_signature: None,
@@ -521,10 +527,11 @@ impl Type {
         }
     }
 
+    /// Create a generic object type with type parameters.
     pub fn generic_object(
         type_params: Vec<TypeParam>,
         properties: Vec<Property>,
-        extends: Vec<Type>,
+        extends: Vec<TypeId>,
     ) -> Self {
         Self::Object {
             properties,
@@ -534,47 +541,54 @@ impl Type {
         }
     }
 
-    pub fn function(params: Vec<Param>, return_type: Type) -> Self {
+    /// Create a function type.
+    pub fn function(params: Vec<Param>, return_type: TypeId) -> Self {
         Self::Function {
             params,
-            return_type: Box::new(return_type),
+            return_type,
             type_params: Vec::new(),
             type_predicate: None,
         }
     }
 
+    /// Create a generic function type.
     pub fn generic_function(
         type_params: Vec<TypeParam>,
         params: Vec<Param>,
-        return_type: Type,
+        return_type: TypeId,
     ) -> Self {
         Self::Function {
             params,
-            return_type: Box::new(return_type),
+            return_type,
             type_params,
             type_predicate: None,
         }
     }
 
-    pub fn array(element_type: Type) -> Self {
-        Self::Array(Box::new(element_type))
+    /// Create an array type.
+    pub fn array(element_type: TypeId) -> Self {
+        Self::Array(element_type)
     }
 
-    pub fn union(types: Vec<Type>) -> Self {
+    /// Create a union type.
+    pub fn union(types: Vec<TypeId>) -> Self {
         Self::Union(types)
     }
 
-    pub fn intersection(types: Vec<Type>) -> Self {
+    /// Create an intersection type.
+    pub fn intersection(types: Vec<TypeId>) -> Self {
         Self::Intersection(types)
     }
 
-    pub fn type_ref(name: impl Into<String>, type_args: Vec<Type>) -> Self {
+    /// Create a type reference.
+    pub fn type_ref(name: impl Into<String>, type_args: Vec<TypeId>) -> Self {
         Self::TypeRef {
             name: name.into(),
             type_args,
         }
     }
 
+    /// Check if this is a primitive type.
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
@@ -584,66 +598,77 @@ impl Type {
 
     /// Simplify a type by applying normalization rules.
     ///
-    /// - `T | never` -> `T` (never is identity for union)
-    /// - `T & never` -> `never` (never absorbs intersection)
+    /// Note: This simplified version works at the TypeId level.
+    /// For full simplification with nested type resolution, use TypeArena::simplify().
+    ///
+    /// - Flatten nested unions/intersections
+    /// - Deduplicate elements
+    /// - Filter out never from unions
     /// - Single-element union/intersection -> unwrap
     /// - Empty union -> `never`
-    /// - Flatten nested unions/intersections
-    pub fn simplify(self) -> Self {
+    /// - Empty intersection -> `unknown`
+    pub fn simplify(self, arena: &TypeArena) -> Self {
         match self {
-            Type::Union(types) => {
-                // Flatten nested unions and filter out never
-                let mut simplified: Vec<Type> = types
-                    .into_iter()
-                    .flat_map(|t| {
-                        let t = t.simplify();
-                        if let Type::Union(inner) = t {
-                            inner
-                        } else {
-                            vec![t]
+            Type::Union(type_ids) => {
+                // Flatten nested unions and collect all elements
+                let mut flattened: Vec<TypeId> = Vec::new();
+                for id in type_ids {
+                    match arena.get(id) {
+                        Type::Union(inner_ids) => {
+                            // Flatten: add inner union's elements
+                            flattened.extend(inner_ids.iter().copied());
                         }
-                    })
-                    .filter(|t| !matches!(t, Type::Never))
+                        Type::Never => {
+                            // Filter out never types
+                        }
+                        _ => {
+                            flattened.push(id);
+                        }
+                    }
+                }
+
+                // Deduplicate while preserving order
+                let mut seen = std::collections::HashSet::new();
+                let deduped: Vec<TypeId> = flattened
+                    .into_iter()
+                    .filter(|id| seen.insert(*id))
                     .collect();
 
-                // Deduplicate
-                simplified.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                simplified.dedup();
-
-                match simplified.len() {
+                match deduped.len() {
                     0 => Type::Never,
-                    1 => simplified.into_iter().next().unwrap(),
-                    _ => Type::Union(simplified),
+                    1 => arena.get(deduped[0]).clone(),
+                    _ => Type::Union(deduped),
                 }
             }
-            Type::Intersection(types) => {
-                // If any member is never, the whole intersection is never
-                let simplified: Vec<Type> = types.into_iter().map(|t| t.simplify()).collect();
-
-                if simplified.iter().any(|t| matches!(t, Type::Never)) {
-                    return Type::Never;
+            Type::Intersection(type_ids) => {
+                // Flatten nested intersections
+                let mut flattened: Vec<TypeId> = Vec::new();
+                for id in type_ids {
+                    match arena.get(id) {
+                        Type::Intersection(inner_ids) => {
+                            flattened.extend(inner_ids.iter().copied());
+                        }
+                        Type::Never => {
+                            // If any member is never, the whole intersection is never
+                            return Type::Never;
+                        }
+                        _ => {
+                            flattened.push(id);
+                        }
+                    }
                 }
 
-                // Flatten nested intersections
-                let mut flattened: Vec<Type> = simplified
+                // Deduplicate while preserving order
+                let mut seen = std::collections::HashSet::new();
+                let deduped: Vec<TypeId> = flattened
                     .into_iter()
-                    .flat_map(|t| {
-                        if let Type::Intersection(inner) = t {
-                            inner
-                        } else {
-                            vec![t]
-                        }
-                    })
+                    .filter(|id| seen.insert(*id))
                     .collect();
 
-                // Deduplicate
-                flattened.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                flattened.dedup();
-
-                match flattened.len() {
-                    0 => Type::Unknown, // Empty intersection is unknown (top type)
-                    1 => flattened.into_iter().next().unwrap(),
-                    _ => Type::Intersection(flattened),
+                match deduped.len() {
+                    0 => Type::Unknown,
+                    1 => arena.get(deduped[0]).clone(),
+                    _ => Type::Intersection(deduped),
                 }
             }
             other => other,
@@ -651,8 +676,27 @@ impl Type {
     }
 }
 
-impl fmt::Display for Type {
+/// Display wrapper for Type that has access to the arena.
+/// Use this for displaying types that contain TypeId references.
+pub struct TypeDisplay<'a> {
+    pub ty: &'a Type,
+    pub arena: &'a TypeArena,
+}
+
+impl<'a> fmt::Display for TypeDisplay<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.ty.fmt_with_arena(f, self.arena)
+    }
+}
+
+impl Type {
+    /// Create a display wrapper that can show nested types.
+    pub fn display<'a>(&'a self, arena: &'a TypeArena) -> TypeDisplay<'a> {
+        TypeDisplay { ty: self, arena }
+    }
+
+    /// Format this type with access to the arena for nested types.
+    pub fn fmt_with_arena(&self, f: &mut fmt::Formatter<'_>, arena: &TypeArena) -> fmt::Result {
         match self {
             Type::String => write!(f, "string"),
             Type::Number => write!(f, "number"),
@@ -668,41 +712,45 @@ impl fmt::Display for Type {
             Type::NumberLiteral(n) => write!(f, "{}", n),
             Type::BooleanLiteral(b) => write!(f, "{}", b),
 
-            Type::Array(elem) => write!(f, "{}[]", elem),
-            Type::Tuple(types) => {
+            Type::Array(elem_id) => {
+                write!(f, "{}[]", arena.get(*elem_id).display(arena))
+            }
+            Type::Tuple(type_ids) => {
                 write!(f, "[")?;
-                for (i, ty) in types.iter().enumerate() {
+                for (i, &id) in type_ids.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", ty)?;
+                    write!(f, "{}", arena.get(id).display(arena))?;
                 }
                 write!(f, "]")
             }
-            Type::Union(types) => {
-                for (i, ty) in types.iter().enumerate() {
+            Type::Union(type_ids) => {
+                for (i, &id) in type_ids.iter().enumerate() {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
+                    let ty = arena.get(id);
                     // Wrap function types: ((x: number) => void) | string
                     if matches!(ty, Type::Function { .. }) {
-                        write!(f, "({})", ty)?;
+                        write!(f, "({})", ty.display(arena))?;
                     } else {
-                        write!(f, "{}", ty)?;
+                        write!(f, "{}", ty.display(arena))?;
                     }
                 }
                 Ok(())
             }
-            Type::Intersection(types) => {
-                for (i, ty) in types.iter().enumerate() {
+            Type::Intersection(type_ids) => {
+                for (i, &id) in type_ids.iter().enumerate() {
                     if i > 0 {
                         write!(f, " & ")?;
                     }
+                    let ty = arena.get(id);
                     // Wrap unions and functions with parentheses
                     if matches!(ty, Type::Union(_) | Type::Function { .. }) {
-                        write!(f, "({})", ty)?;
+                        write!(f, "({})", ty.display(arena))?;
                     } else {
-                        write!(f, "{}", ty)?;
+                        write!(f, "{}", ty.display(arena))?;
                     }
                 }
                 Ok(())
@@ -722,11 +770,11 @@ impl fmt::Display for Type {
                             write!(f, ", ")?;
                         }
                         write!(f, "{}", tp.name)?;
-                        if let Some(constraint) = &tp.constraint {
-                            write!(f, " extends {}", constraint)?;
+                        if let Some(constraint_id) = tp.constraint {
+                            write!(f, " extends {}", arena.get(constraint_id).display(arena))?;
                         }
-                        if let Some(default) = &tp.default {
-                            write!(f, " = {}", default)?;
+                        if let Some(default_id) = tp.default {
+                            write!(f, " = {}", arena.get(default_id).display(arena))?;
                         }
                     }
                     write!(f, ">")?;
@@ -745,13 +793,15 @@ impl fmt::Display for Type {
                     if prop.optional {
                         write!(f, "?")?;
                     }
-                    write!(f, ": {}", prop.ty)?;
+                    write!(f, ": {}", arena.get(prop.ty).display(arena))?;
                 }
                 if let Some(idx) = index_signature {
                     if !first {
                         write!(f, "; ")?;
                     }
-                    write!(f, "[key: {}]: {}", idx.key_type, idx.value_type)?;
+                    write!(f, "[key: {}]: {}",
+                        arena.get(idx.key_type).display(arena),
+                        arena.get(idx.value_type).display(arena))?;
                 }
                 write!(f, " }}")
             }
@@ -769,11 +819,11 @@ impl fmt::Display for Type {
                             write!(f, ", ")?;
                         }
                         write!(f, "{}", tp.name)?;
-                        if let Some(constraint) = &tp.constraint {
-                            write!(f, " extends {}", constraint)?;
+                        if let Some(constraint_id) = tp.constraint {
+                            write!(f, " extends {}", arena.get(constraint_id).display(arena))?;
                         }
-                        if let Some(default) = &tp.default {
-                            write!(f, " = {}", default)?;
+                        if let Some(default_id) = tp.default {
+                            write!(f, " = {}", arena.get(default_id).display(arena))?;
                         }
                     }
                     write!(f, ">")?;
@@ -790,9 +840,9 @@ impl fmt::Display for Type {
                     if param.optional {
                         write!(f, "?")?;
                     }
-                    write!(f, ": {}", param.ty)?;
+                    write!(f, ": {}", arena.get(param.ty).display(arena))?;
                 }
-                write!(f, ") => {}", return_type)
+                write!(f, ") => {}", arena.get(*return_type).display(arena))
             }
 
             Type::ClassConstructor {
@@ -817,7 +867,7 @@ impl fmt::Display for Type {
                         if i > 0 {
                             write!(f, "; ")?;
                         }
-                        write!(f, "static {}: {}", prop.name, prop.ty)?;
+                        write!(f, "static {}: {}", prop.name, arena.get(prop.ty).display(arena))?;
                     }
                     write!(f, " }}")?;
                 }
@@ -826,7 +876,7 @@ impl fmt::Display for Type {
                     " (constructor: ({}) => instance)",
                     params
                         .iter()
-                        .map(|p| format!("{}: {}", p.name, p.ty))
+                        .map(|p| format!("{}: {}", p.name, arena.get(p.ty).display(arena)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -836,11 +886,11 @@ impl fmt::Display for Type {
                 write!(f, "{}", name)?;
                 if !type_args.is_empty() {
                     write!(f, "<")?;
-                    for (i, arg) in type_args.iter().enumerate() {
+                    for (i, &arg_id) in type_args.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", arg)?;
+                        write!(f, "{}", arena.get(arg_id).display(arena))?;
                     }
                     write!(f, ">")?;
                 }
@@ -853,22 +903,24 @@ impl fmt::Display for Type {
                 default,
             } => {
                 write!(f, "{}", name)?;
-                if let Some(constraint) = constraint {
-                    write!(f, " extends {}", constraint)?;
+                if let Some(constraint_id) = constraint {
+                    write!(f, " extends {}", arena.get(*constraint_id).display(arena))?;
                 }
-                if let Some(default) = default {
-                    write!(f, " = {}", default)?;
+                if let Some(default_id) = default {
+                    write!(f, " = {}", arena.get(*default_id).display(arena))?;
                 }
                 Ok(())
             }
 
-            Type::KeyOf(inner) => write!(f, "keyof {}", inner),
+            Type::KeyOf(inner_id) => write!(f, "keyof {}", arena.get(*inner_id).display(arena)),
 
             Type::IndexedAccess {
                 object_type,
                 index_type,
             } => {
-                write!(f, "{}[{}]", object_type, index_type)
+                write!(f, "{}[{}]",
+                    arena.get(*object_type).display(arena),
+                    arena.get(*index_type).display(arena))
             }
 
             Type::MappedType {
@@ -886,14 +938,14 @@ impl fmt::Display for Type {
                     None => {}
                 }
                 // Key mapping
-                write!(f, "[{} in {}]", type_param, constraint)?;
+                write!(f, "[{} in {}]", type_param, arena.get(*constraint).display(arena))?;
                 // Optional modifier
                 match optional_modifier {
                     Some(true) => write!(f, "?")?,
                     Some(false) => write!(f, "-?")?,
                     None => {}
                 }
-                write!(f, ": {}; }}", template)
+                write!(f, ": {}; }}", arena.get(*template).display(arena))
             }
 
             Type::ConditionalType {
@@ -905,14 +957,17 @@ impl fmt::Display for Type {
                 write!(
                     f,
                     "{} extends {} ? {} : {}",
-                    check_type, extends_type, true_type, false_type
+                    arena.get(*check_type).display(arena),
+                    arena.get(*extends_type).display(arena),
+                    arena.get(*true_type).display(arena),
+                    arena.get(*false_type).display(arena)
                 )
             }
 
             Type::InferType { name, constraint } => {
                 write!(f, "infer {}", name)?;
-                if let Some(c) = constraint {
-                    write!(f, " extends {}", c)?;
+                if let Some(constraint_id) = constraint {
+                    write!(f, " extends {}", arena.get(*constraint_id).display(arena))?;
                 }
                 Ok(())
             }
@@ -921,8 +976,8 @@ impl fmt::Display for Type {
                 write!(f, "`")?;
                 for (i, text) in texts.iter().enumerate() {
                     write!(f, "{}", text)?;
-                    if let Some(ty) = types.get(i) {
-                        write!(f, "${{{}}}", ty)?;
+                    if let Some(&type_id) = types.get(i) {
+                        write!(f, "${{{}}}", arena.get(type_id).display(arena))?;
                     }
                 }
                 write!(f, "`")
@@ -931,17 +986,54 @@ impl fmt::Display for Type {
     }
 }
 
+/// Simple Display implementation for primitive types.
+/// For compound types that need arena access, use `ty.display(arena)`.
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::String => write!(f, "string"),
+            Type::Number => write!(f, "number"),
+            Type::Boolean => write!(f, "boolean"),
+            Type::Null => write!(f, "null"),
+            Type::Undefined => write!(f, "undefined"),
+            Type::Void => write!(f, "void"),
+            Type::Any => write!(f, "any"),
+            Type::Unknown => write!(f, "unknown"),
+            Type::Never => write!(f, "never"),
+            Type::StringLiteral(s) => write!(f, "\"{}\"", s),
+            Type::NumberLiteral(n) => write!(f, "{}", n),
+            Type::BooleanLiteral(b) => write!(f, "{}", b),
+            // For compound types, show a simplified representation without nested details
+            Type::Array(_) => write!(f, "<array>"),
+            Type::Tuple(_) => write!(f, "<tuple>"),
+            Type::Union(_) => write!(f, "<union>"),
+            Type::Intersection(_) => write!(f, "<intersection>"),
+            Type::Object { .. } => write!(f, "<object>"),
+            Type::Function { .. } => write!(f, "<function>"),
+            Type::ClassConstructor { .. } => write!(f, "<class>"),
+            Type::TypeRef { name, .. } => write!(f, "{}", name),
+            Type::TypeParameter { name, .. } => write!(f, "{}", name),
+            Type::KeyOf(_) => write!(f, "keyof <type>"),
+            Type::IndexedAccess { .. } => write!(f, "<indexed-access>"),
+            Type::MappedType { .. } => write!(f, "<mapped-type>"),
+            Type::ConditionalType { .. } => write!(f, "<conditional>"),
+            Type::InferType { name, .. } => write!(f, "infer {}", name),
+            Type::TemplateLiteralType { .. } => write!(f, "<template-literal>"),
+        }
+    }
+}
+
 /// Property in an object type: { name: string, age?: number }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Property {
     pub name: String,
-    pub ty: Type,
+    pub ty: TypeId,
     pub optional: bool,
     pub readonly: bool,
 }
 
 impl Property {
-    pub fn new(name: impl Into<String>, ty: Type) -> Self {
+    pub fn new(name: impl Into<String>, ty: TypeId) -> Self {
         Self {
             name: name.into(),
             ty,
@@ -965,13 +1057,13 @@ impl Property {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Param {
     pub name: String,
-    pub ty: Type,
+    pub ty: TypeId,
     pub optional: bool,
     pub rest: bool,
 }
 
 impl Param {
-    pub fn new(name: impl Into<String>, ty: Type) -> Self {
+    pub fn new(name: impl Into<String>, ty: TypeId) -> Self {
         Self {
             name: name.into(),
             ty,
@@ -994,9 +1086,9 @@ impl Param {
 /// Type parameter in a generic: <T extends Constraint = Default>
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParam {
-    pub name: String,                  // T
-    pub constraint: Option<Box<Type>>, // extends SomeType
-    pub default: Option<Box<Type>>,    // = DefaultType
+    pub name: String,               // T
+    pub constraint: Option<TypeId>, // extends SomeType
+    pub default: Option<TypeId>,    // = DefaultType
 }
 
 impl TypeParam {
@@ -1008,13 +1100,13 @@ impl TypeParam {
         }
     }
 
-    pub fn with_constraint(mut self, constraint: Type) -> Self {
-        self.constraint = Some(Box::new(constraint));
+    pub fn with_constraint(mut self, constraint: TypeId) -> Self {
+        self.constraint = Some(constraint);
         self
     }
 
-    pub fn with_default(mut self, default: Type) -> Self {
-        self.default = Some(Box::new(default));
+    pub fn with_default(mut self, default: TypeId) -> Self {
+        self.default = Some(default);
         self
     }
 }
@@ -1022,8 +1114,8 @@ impl TypeParam {
 /// Index signature: { [key: string]: number }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndexSignature {
-    pub key_type: Box<Type>,
-    pub value_type: Box<Type>,
+    pub key_type: TypeId,
+    pub value_type: TypeId,
 }
 
 /// Type predicate for assertion functions: `asserts val is string`
@@ -1039,19 +1131,19 @@ pub struct TypePredicate {
     /// Whether this is an assertion predicate (true) or a regular type guard (false)
     pub asserts: bool,
     /// The type being asserted, if any (None for just `asserts val`)
-    pub type_annotation: Option<Box<Type>>,
+    pub type_annotation: Option<TypeId>,
 }
 
 impl TypePredicate {
     pub fn new(
         parameter_name: impl Into<String>,
         asserts: bool,
-        type_annotation: Option<Type>,
+        type_annotation: Option<TypeId>,
     ) -> Self {
         Self {
             parameter_name: parameter_name.into(),
             asserts,
-            type_annotation: type_annotation.map(Box::new),
+            type_annotation,
         }
     }
 }
@@ -1059,6 +1151,7 @@ impl TypePredicate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::arena::TypeArena;
 
     #[test]
     fn test_primitive_display() {
@@ -1082,113 +1175,129 @@ mod tests {
 
     #[test]
     fn test_array_display() {
-        assert_eq!(Type::array(Type::String).to_string(), "string[]");
-        assert_eq!(Type::array(Type::Number).to_string(), "number[]");
-        assert_eq!(
-            Type::array(Type::array(Type::String)).to_string(),
-            "string[][]"
-        );
+        let mut arena = TypeArena::new();
+        let arr = Type::array(TypeId::STRING);
+        let arr_id = arena.intern(arr.clone());
+        assert_eq!(arena.get(arr_id).display(&arena).to_string(), "string[]");
+
+        let arr2 = Type::array(TypeId::NUMBER);
+        let arr2_id = arena.intern(arr2.clone());
+        assert_eq!(arena.get(arr2_id).display(&arena).to_string(), "number[]");
     }
 
     #[test]
     fn test_tuple_display() {
-        assert_eq!(
-            Type::Tuple(vec![Type::String, Type::Number]).to_string(),
-            "[string, number]"
-        );
+        let mut arena = TypeArena::new();
+        let tuple = Type::Tuple(vec![TypeId::STRING, TypeId::NUMBER]);
+        let tuple_id = arena.intern(tuple.clone());
+        assert_eq!(arena.get(tuple_id).display(&arena).to_string(), "[string, number]");
     }
 
     #[test]
     fn test_union_display() {
-        assert_eq!(
-            Type::union(vec![Type::String, Type::Number]).to_string(),
-            "string | number"
-        );
-        assert_eq!(
-            Type::union(vec![Type::String, Type::Null, Type::Undefined]).to_string(),
-            "string | null | undefined"
-        );
+        let mut arena = TypeArena::new();
+        let union = Type::union(vec![TypeId::STRING, TypeId::NUMBER]);
+        let union_id = arena.intern(union.clone());
+        assert_eq!(arena.get(union_id).display(&arena).to_string(), "string | number");
     }
 
     #[test]
     fn test_intersection_display() {
-        let a = Type::object(vec![Property::new("a", Type::String)]);
-        let b = Type::object(vec![Property::new("b", Type::Number)]);
+        let mut arena = TypeArena::new();
+        let obj_a = Type::object(vec![Property::new("a", TypeId::STRING)]);
+        let obj_b = Type::object(vec![Property::new("b", TypeId::NUMBER)]);
+        let a_id = arena.intern(obj_a);
+        let b_id = arena.intern(obj_b);
+        let intersection = Type::intersection(vec![a_id, b_id]);
+        let int_id = arena.intern(intersection);
         assert_eq!(
-            Type::intersection(vec![a, b]).to_string(),
+            arena.get(int_id).display(&arena).to_string(),
             "{ a: string } & { b: number }"
         );
     }
 
     #[test]
     fn test_object_display() {
+        let mut arena = TypeArena::new();
         let obj = Type::object(vec![
-            Property::new("name", Type::String),
-            Property::new("age", Type::Number).optional(),
+            Property::new("name", TypeId::STRING),
+            Property::new("age", TypeId::NUMBER).optional(),
         ]);
-        assert_eq!(obj.to_string(), "{ name: string; age?: number }");
+        let obj_id = arena.intern(obj);
+        assert_eq!(arena.get(obj_id).display(&arena).to_string(), "{ name: string; age?: number }");
 
-        let readonly_obj = Type::object(vec![Property::new("id", Type::Number).readonly()]);
-        assert_eq!(readonly_obj.to_string(), "{ readonly id: number }");
+        let readonly_obj = Type::object(vec![Property::new("id", TypeId::NUMBER).readonly()]);
+        let readonly_id = arena.intern(readonly_obj);
+        assert_eq!(arena.get(readonly_id).display(&arena).to_string(), "{ readonly id: number }");
     }
 
     #[test]
     fn test_function_display() {
+        let mut arena = TypeArena::new();
         let func = Type::function(
-            vec![Param::new("x", Type::Number), Param::new("y", Type::Number)],
-            Type::Number,
+            vec![Param::new("x", TypeId::NUMBER), Param::new("y", TypeId::NUMBER)],
+            TypeId::NUMBER,
         );
-        assert_eq!(func.to_string(), "(x: number, y: number) => number");
+        let func_id = arena.intern(func);
+        assert_eq!(arena.get(func_id).display(&arena).to_string(), "(x: number, y: number) => number");
 
         let func_optional = Type::function(
             vec![
-                Param::new("x", Type::Number),
-                Param::new("y", Type::Number).optional(),
+                Param::new("x", TypeId::NUMBER),
+                Param::new("y", TypeId::NUMBER).optional(),
             ],
-            Type::Number,
+            TypeId::NUMBER,
         );
+        let func_opt_id = arena.intern(func_optional);
         assert_eq!(
-            func_optional.to_string(),
+            arena.get(func_opt_id).display(&arena).to_string(),
             "(x: number, y?: number) => number"
         );
 
+        let arr_num = arena.intern(Type::array(TypeId::NUMBER));
         let func_rest = Type::function(
-            vec![Param::new("args", Type::array(Type::Number)).rest()],
-            Type::Number,
+            vec![Param::new("args", arr_num).rest()],
+            TypeId::NUMBER,
         );
-        assert_eq!(func_rest.to_string(), "(...args: number[]) => number");
+        let func_rest_id = arena.intern(func_rest);
+        assert_eq!(arena.get(func_rest_id).display(&arena).to_string(), "(...args: number[]) => number");
     }
 
     #[test]
     fn test_generic_function_display() {
+        let mut arena = TypeArena::new();
+        let t_ref = arena.intern(Type::type_ref("T", vec![]));
         let func = Type::generic_function(
             vec![TypeParam::new("T")],
-            vec![Param::new("x", Type::type_ref("T", vec![]))],
-            Type::type_ref("T", vec![]),
+            vec![Param::new("x", t_ref)],
+            t_ref,
         );
-        assert_eq!(func.to_string(), "<T>(x: T) => T");
+        let func_id = arena.intern(func);
+        assert_eq!(arena.get(func_id).display(&arena).to_string(), "<T>(x: T) => T");
 
         let func_constrained = Type::generic_function(
-            vec![TypeParam::new("T").with_constraint(Type::String)],
-            vec![Param::new("x", Type::type_ref("T", vec![]))],
-            Type::type_ref("T", vec![]),
+            vec![TypeParam::new("T").with_constraint(TypeId::STRING)],
+            vec![Param::new("x", t_ref)],
+            t_ref,
         );
+        let func_constr_id = arena.intern(func_constrained);
         assert_eq!(
-            func_constrained.to_string(),
+            arena.get(func_constr_id).display(&arena).to_string(),
             "<T extends string>(x: T) => T"
         );
     }
 
     #[test]
     fn test_type_ref_display() {
-        assert_eq!(
-            Type::type_ref("Array", vec![Type::String]).to_string(),
-            "Array<string>"
-        );
-        assert_eq!(
-            Type::type_ref("Map", vec![Type::String, Type::Number]).to_string(),
-            "Map<string, number>"
-        );
+        let mut arena = TypeArena::new();
+        let arr_str = Type::type_ref("Array", vec![TypeId::STRING]);
+        let arr_id = arena.intern(arr_str);
+        assert_eq!(arena.get(arr_id).display(&arena).to_string(), "Array<string>");
+
+        let map_type = Type::type_ref("Map", vec![TypeId::STRING, TypeId::NUMBER]);
+        let map_id = arena.intern(map_type);
+        assert_eq!(arena.get(map_id).display(&arena).to_string(), "Map<string, number>");
+
         assert_eq!(Type::type_ref("User", vec![]).to_string(), "User");
     }
 
@@ -1198,62 +1307,70 @@ mod tests {
         assert!(Type::Number.is_primitive());
         assert!(Type::Boolean.is_primitive());
         assert!(!Type::Any.is_primitive());
-        assert!(!Type::array(Type::String).is_primitive());
+        assert!(!Type::array(TypeId::STRING).is_primitive());
     }
 
     #[test]
     fn test_object_with_index_signature() {
+        let mut arena = TypeArena::new();
         let obj = Type::Object {
             properties: vec![],
             index_signature: Some(IndexSignature {
-                key_type: Box::new(Type::String),
-                value_type: Box::new(Type::Number),
+                key_type: TypeId::STRING,
+                value_type: TypeId::NUMBER,
             }),
             extends: vec![],
             type_params: vec![],
         };
-        assert_eq!(obj.to_string(), "{ [key: string]: number }");
+        let obj_id = arena.intern(obj);
+        assert_eq!(arena.get(obj_id).display(&arena).to_string(), "{ [key: string]: number }");
     }
 
     #[test]
     fn test_simplify_union_with_never() {
-        let union = Type::Union(vec![Type::String, Type::Never]);
-        assert_eq!(union.simplify(), Type::String);
+        let arena = TypeArena::new();
+        let union = Type::Union(vec![TypeId::STRING, TypeId::NEVER]);
+        assert_eq!(union.simplify(&arena), Type::String);
     }
 
     #[test]
     fn test_simplify_union_all_never() {
-        let union = Type::Union(vec![Type::Never, Type::Never]);
-        assert_eq!(union.simplify(), Type::Never);
+        let arena = TypeArena::new();
+        let union = Type::Union(vec![TypeId::NEVER, TypeId::NEVER]);
+        assert_eq!(union.simplify(&arena), Type::Never);
     }
 
     #[test]
     fn test_simplify_union_single_element() {
-        let union = Type::Union(vec![Type::String]);
-        assert_eq!(union.simplify(), Type::String);
+        let arena = TypeArena::new();
+        let union = Type::Union(vec![TypeId::STRING]);
+        assert_eq!(union.simplify(&arena), Type::String);
     }
 
     #[test]
     fn test_simplify_intersection_with_never() {
-        let intersection = Type::Intersection(vec![Type::String, Type::Never]);
-        assert_eq!(intersection.simplify(), Type::Never);
+        let arena = TypeArena::new();
+        let intersection = Type::Intersection(vec![TypeId::STRING, TypeId::NEVER]);
+        assert_eq!(intersection.simplify(&arena), Type::Never);
     }
 
     #[test]
     fn test_simplify_intersection_single_element() {
-        let intersection = Type::Intersection(vec![Type::String]);
-        assert_eq!(intersection.simplify(), Type::String);
+        let arena = TypeArena::new();
+        let intersection = Type::Intersection(vec![TypeId::STRING]);
+        assert_eq!(intersection.simplify(&arena), Type::String);
     }
 
     #[test]
     fn test_simplify_nested_union() {
-        let nested = Type::Union(vec![
-            Type::String,
-            Type::Union(vec![Type::Number, Type::Boolean]),
-        ]);
-        let simplified = nested.simplify();
-        if let Type::Union(types) = simplified {
-            assert_eq!(types.len(), 3);
+        let mut arena = TypeArena::new();
+        // Create inner union first
+        let inner_union = arena.intern(Type::Union(vec![TypeId::NUMBER, TypeId::BOOLEAN]));
+        // Create outer union with the inner union id
+        let nested = Type::Union(vec![TypeId::STRING, inner_union]);
+        let simplified = nested.simplify(&arena);
+        if let Type::Union(type_ids) = simplified {
+            assert_eq!(type_ids.len(), 3);
         } else {
             panic!("Expected Union");
         }
@@ -1261,10 +1378,11 @@ mod tests {
 
     #[test]
     fn test_simplify_deduplicates() {
-        let union = Type::Union(vec![Type::String, Type::String, Type::Number]);
-        let simplified = union.simplify();
-        if let Type::Union(types) = simplified {
-            assert_eq!(types.len(), 2);
+        let arena = TypeArena::new();
+        let union = Type::Union(vec![TypeId::STRING, TypeId::STRING, TypeId::NUMBER]);
+        let simplified = union.simplify(&arena);
+        if let Type::Union(type_ids) = simplified {
+            assert_eq!(type_ids.len(), 2);
         } else {
             panic!("Expected Union");
         }
@@ -1280,7 +1398,7 @@ mod tests {
         );
         assert!(
             Type::BooleanLiteral(true).discriminant_order()
-                < Type::Array(Box::new(Type::String)).discriminant_order()
+                < Type::Array(TypeId::STRING).discriminant_order()
         );
     }
 
