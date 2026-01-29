@@ -9,7 +9,7 @@ use oxc_ast::ast::*;
 
 use crate::symbols::{ScopeKind, SymbolKind};
 use crate::types::resolution;
-use crate::types::Type;
+use crate::types::{Type, TypeParam};
 
 use super::Binder;
 
@@ -257,10 +257,50 @@ impl Binder {
     /// Bind a type alias declaration.
     ///
     /// Type aliases only exist in the type namespace.
+    /// For generic type aliases like `type Foo<T> = ...`, we wrap the body in a
+    /// GenericTypeAlias structure to preserve type parameters for later instantiation.
     pub(super) fn bind_type_alias_declaration(&mut self, decl: &TSTypeAliasDeclaration) {
         let name = decl.id.name.as_str();
         let span = decl.id.span;
-        let ty = self.resolve_ts_type(&decl.type_annotation);
+        let body_type = self.resolve_ts_type(&decl.type_annotation);
+
+        // Extract type parameters for generic type aliases
+        let type_params: Vec<TypeParam> = decl
+            .type_parameters
+            .as_ref()
+            .map(|params| {
+                params
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let mut tp = TypeParam::new(p.name.name.to_string());
+                        if let Some(constraint) = &p.constraint {
+                            tp = tp.with_constraint(self.resolve_ts_type(constraint));
+                        }
+                        if let Some(default) = &p.default {
+                            tp = tp.with_default(self.resolve_ts_type(default));
+                        }
+                        tp
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // For generic type aliases, wrap in a Function type to preserve type params
+        // This is a bit of a hack but allows reusing existing infrastructure
+        // The return_type is the actual alias body, params are empty
+        let ty = if type_params.is_empty() {
+            body_type
+        } else {
+            // Store as a generic "alias function" - the return type is the alias body
+            // When resolved with type args, we substitute and return the return type
+            Type::Function {
+                params: vec![],
+                return_type: Box::new(body_type),
+                type_params,
+                type_predicate: None,
+            }
+        };
 
         if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, span) {
             self.errors.push(err.into());

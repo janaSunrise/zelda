@@ -423,6 +423,44 @@ impl TypeArena {
                     optional_modifier,
                 })
             }
+
+            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+                let check_id = self.intern_deep(*check_type);
+                let extends_id = self.intern_deep(*extends_type);
+                let true_id = self.intern_deep(*true_type);
+                let false_id = self.intern_deep(*false_type);
+                self.intern(Type::ConditionalType {
+                    check_type: Box::new(self.get(check_id).clone()),
+                    extends_type: Box::new(self.get(extends_id).clone()),
+                    true_type: Box::new(self.get(true_id).clone()),
+                    false_type: Box::new(self.get(false_id).clone()),
+                })
+            }
+
+            Type::InferType { name, constraint } => {
+                let interned_constraint = constraint.map(|c| {
+                    let id = self.intern_deep(*c);
+                    Box::new(self.get(id).clone())
+                });
+                self.intern(Type::InferType {
+                    name,
+                    constraint: interned_constraint,
+                })
+            }
+
+            Type::TemplateLiteralType { texts, types } => {
+                let interned_types: Vec<Type> = types
+                    .into_iter()
+                    .map(|t| {
+                        let id = self.intern_deep(t);
+                        self.get(id).clone()
+                    })
+                    .collect();
+                self.intern(Type::TemplateLiteralType {
+                    texts,
+                    types: interned_types,
+                })
+            }
         }
     }
 

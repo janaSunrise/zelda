@@ -1,33 +1,55 @@
 //! Type relation checking (assignability and compatibility).
-//!
-//! It determines if types are assignable and structurally compatible.
 
 use crate::types::{Property, Type};
 
 use super::Checker;
 
 impl<'a> Checker<'a> {
-    /// Resolve a TypeRef to its underlying type by looking it up in the type namespace.
-    /// If the resolved type is generic and type arguments are provided, instantiate it.
     fn resolve_type_ref(&self, name: &str) -> Option<Type> {
         self.symbols.lookup_type(name).map(|s| s.ty.clone())
     }
 
     /// Resolve a TypeRef with type arguments, instantiating generic types.
-    ///
-    /// For `Box<number>` where Box is `{ value: T }`, this returns `{ value: number }`.
-    /// For `Container` where Container has default `<T = string>`, this applies the defaults.
+    /// `Box<number>` where `Box = { value: T }` becomes `{ value: number }`.
     pub(super) fn resolve_type_ref_with_args(&self, name: &str, type_args: &[Type]) -> Option<Type> {
+        // Intrinsic string types are built into the compiler, not defined in lib.d.ts
+        if matches!(name, "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize") {
+            if let Some(arg) = type_args.first() {
+                let resolved_arg = if let Type::TypeRef { name: ref_name, type_args: ref_args } = arg {
+                    self.resolve_type_ref_with_args(ref_name, ref_args).unwrap_or_else(|| arg.clone())
+                } else {
+                    arg.clone()
+                };
+                return Some(self.evaluate_intrinsic_string_type(name, &resolved_arg));
+            }
+            return Some(Type::String);
+        }
+
         let symbol = self.symbols.lookup_type(name)?;
         let base_type = symbol.ty.clone();
 
-        // Extract type parameters from the base type and instantiate
         match &base_type {
-            Type::Object { type_params, .. } if !type_params.is_empty() => {
-                // Build substitution map - this handles both explicit args and defaults
+            // Generic type alias: we abuse Function with empty params to store alias body in return_type
+            Type::Function { params, return_type, type_params, .. }
+                if params.is_empty() && !type_params.is_empty() =>
+            {
                 let subs = self.build_substitution_map(type_params, type_args);
                 if subs.is_empty() {
-                    // No substitutions possible (no args and no defaults)
+                    Some((**return_type).clone())
+                } else {
+                    let substituted = self.substitute_type_params(return_type, &subs);
+                    if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = &substituted {
+                        Some(self.evaluate_conditional_type(check_type, extends_type, true_type, false_type))
+                    } else if let Type::TemplateLiteralType { texts, types } = &substituted {
+                        Some(self.evaluate_template_literal_type(texts, types))
+                    } else {
+                        Some(substituted)
+                    }
+                }
+            }
+            Type::Object { type_params, .. } if !type_params.is_empty() => {
+                let subs = self.build_substitution_map(type_params, type_args);
+                if subs.is_empty() {
                     Some(base_type)
                 } else {
                     Some(self.substitute_type_params(&base_type, &subs))
@@ -113,6 +135,40 @@ impl<'a> Checker<'a> {
         if let Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } = target {
             let resolved = self.resolve_mapped_type(type_param, constraint, template, *readonly_modifier, *optional_modifier);
             return self.is_assignable(source, &resolved);
+        }
+
+        // Resolve ConditionalType by evaluating it
+        if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = source {
+            let resolved = self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
+            return self.is_assignable(&resolved, target);
+        }
+        if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = target {
+            let resolved = self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
+            return self.is_assignable(source, &resolved);
+        }
+
+        // Resolve TemplateLiteralType by evaluating it
+        if let Type::TemplateLiteralType { texts, types } = source {
+            let resolved = self.evaluate_template_literal_type(texts, types);
+            // If evaluation returns same template literal (not concrete), handle specially
+            if !matches!(&resolved, Type::TemplateLiteralType { .. }) {
+                return self.is_assignable(&resolved, target);
+            }
+            // Template literal with non-concrete types matches string
+            return matches!(target, Type::String | Type::Any);
+        }
+        if let Type::TemplateLiteralType { texts, types } = target {
+            let resolved = self.evaluate_template_literal_type(texts, types);
+            // If evaluation returns same template literal (not concrete), handle specially
+            if !matches!(&resolved, Type::TemplateLiteralType { .. }) {
+                return self.is_assignable(source, &resolved);
+            }
+            // Check if source is a string literal that matches the pattern
+            if let Type::StringLiteral(s) = source {
+                return self.string_matches_template_pattern(s, texts, types);
+            }
+            // Any string can potentially match a string pattern
+            return matches!(source, Type::String | Type::Any);
         }
 
         // Handle TypeRef resolution with type argument instantiation
@@ -446,6 +502,64 @@ impl<'a> Checker<'a> {
             }
         }
 
+        true
+    }
+
+    /// Check if a string literal matches a template literal pattern.
+    ///
+    /// For example, "Hello, World!" matches `Hello, ${string}!`
+    fn string_matches_template_pattern(&self, s: &str, texts: &[String], types: &[Type]) -> bool {
+        // Simple pattern matching: check prefix and suffix
+        if texts.is_empty() {
+            return false;
+        }
+
+        // Must start with first text segment
+        if !s.starts_with(&texts[0]) {
+            return false;
+        }
+
+        // Must end with last text segment (if there's more than one)
+        if texts.len() > 1 {
+            if !s.ends_with(texts.last().unwrap()) {
+                return false;
+            }
+        }
+
+        // For complex patterns with multiple placeholders, use regex-like matching
+        // For now, simple check: if there's one placeholder with string type, allow any string in between
+        if types.len() == 1 && matches!(&types[0], Type::String) {
+            // Check that prefix and suffix don't overlap
+            let prefix = &texts[0];
+            let suffix = texts.get(1).map(|s| s.as_str()).unwrap_or("");
+            if prefix.len() + suffix.len() <= s.len() {
+                let middle = &s[prefix.len()..s.len() - suffix.len()];
+                // Any middle string is valid for ${string}
+                return !middle.is_empty() || (prefix.len() + suffix.len() == s.len());
+            }
+            return false;
+        }
+
+        // For union placeholders, check if the middle part is in the union
+        if types.len() == 1 {
+            if let Type::Union(union_types) = &types[0] {
+                let prefix = &texts[0];
+                let suffix = texts.get(1).map(|s| s.as_str()).unwrap_or("");
+                if s.len() >= prefix.len() + suffix.len() {
+                    let middle = &s[prefix.len()..s.len() - suffix.len()];
+                    // Check if middle is one of the union options
+                    return union_types.iter().any(|t| {
+                        if let Type::StringLiteral(lit) = t {
+                            lit == middle
+                        } else {
+                            false
+                        }
+                    });
+                }
+            }
+        }
+
+        // For other patterns, do a simple structural match
         true
     }
 }

@@ -143,6 +143,45 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
         // The predicate details are extracted in build_function_type for narrowing.
         TSType::TSTypePredicate(_) => Type::Boolean,
 
+        // Conditional types: T extends U ? X : Y
+        TSType::TSConditionalType(cond) => {
+            Type::ConditionalType {
+                check_type: Box::new(resolve_ts_type(&cond.check_type)),
+                extends_type: Box::new(resolve_ts_type(&cond.extends_type)),
+                true_type: Box::new(resolve_ts_type(&cond.true_type)),
+                false_type: Box::new(resolve_ts_type(&cond.false_type)),
+            }
+        }
+
+        // Infer types: infer R (used in conditional type extends clauses)
+        TSType::TSInferType(infer) => {
+            let constraint = infer
+                .type_parameter
+                .constraint
+                .as_ref()
+                .map(|c| Box::new(resolve_ts_type(c)));
+            Type::InferType {
+                name: infer.type_parameter.name.name.to_string(),
+                constraint,
+            }
+        }
+
+        // Template literal types: `hello${string}world`
+        TSType::TSTemplateLiteralType(template) => {
+            let mut texts = Vec::new();
+            let mut types = Vec::new();
+
+            // Build texts and types from quasis and types
+            for (i, quasi) in template.quasis.iter().enumerate() {
+                texts.push(quasi.value.raw.to_string());
+                if let Some(ty) = template.types.get(i) {
+                    types.push(resolve_ts_type(ty));
+                }
+            }
+
+            Type::TemplateLiteralType { texts, types }
+        }
+
         _ => Type::Any,
     }
 }

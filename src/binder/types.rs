@@ -35,8 +35,212 @@ impl Binder {
     }
 
     /// Convert oxc's TSType AST node to our Type representation.
+    ///
+    /// This method handles TSTypeQuery (typeof x) specially since it requires
+    /// symbol table access. For types that can contain nested TSTypeQuery,
+    /// we recursively resolve them here instead of delegating to resolution.
     pub(super) fn resolve_ts_type(&self, ts_type: &TSType) -> Type {
-        resolution::resolve_ts_type(ts_type)
+        use crate::types::{IndexSignature, TypeParam};
+
+        match ts_type {
+            // Handle TSTypeQuery (typeof x) - needs symbol table access
+            TSType::TSTypeQuery(query) => self.resolve_type_query(query),
+
+            // Handle TSTypeReference with type arguments that might contain typeof
+            TSType::TSTypeReference(type_ref) => {
+                let name = match &type_ref.type_name {
+                    TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
+                    TSTypeName::QualifiedName(qual) => qual.right.name.to_string(),
+                    TSTypeName::ThisExpression(_) => "this".to_string(),
+                };
+
+                let type_args: Vec<Type> = type_ref
+                    .type_arguments
+                    .as_ref()
+                    .map(|params| params.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                    .unwrap_or_default();
+
+                Type::TypeRef { name, type_args }
+            }
+
+            // Handle union types with nested typeof
+            TSType::TSUnionType(union) => {
+                let types: Vec<Type> = union.types.iter().map(|t| self.resolve_ts_type(t)).collect();
+                Type::Union(types)
+            }
+
+            // Handle intersection types with nested typeof
+            TSType::TSIntersectionType(inter) => {
+                let types: Vec<Type> = inter.types.iter().map(|t| self.resolve_ts_type(t)).collect();
+                Type::Intersection(types)
+            }
+
+            // Handle array types with nested typeof
+            TSType::TSArrayType(arr) => {
+                Type::Array(Box::new(self.resolve_ts_type(&arr.element_type)))
+            }
+
+            // Handle tuple types with nested typeof
+            TSType::TSTupleType(tuple) => {
+                let types: Vec<Type> = tuple.element_types.iter().map(|elem| {
+                    match elem {
+                        TSTupleElement::TSOptionalType(opt) => self.resolve_ts_type(&opt.type_annotation),
+                        TSTupleElement::TSRestType(rest) => self.resolve_ts_type(&rest.type_annotation),
+                        _ => resolution::resolve_tuple_element(elem),
+                    }
+                }).collect();
+                Type::Tuple(types)
+            }
+
+            // Handle conditional types with nested typeof
+            TSType::TSConditionalType(cond) => {
+                Type::ConditionalType {
+                    check_type: Box::new(self.resolve_ts_type(&cond.check_type)),
+                    extends_type: Box::new(self.resolve_ts_type(&cond.extends_type)),
+                    true_type: Box::new(self.resolve_ts_type(&cond.true_type)),
+                    false_type: Box::new(self.resolve_ts_type(&cond.false_type)),
+                }
+            }
+
+            // Handle function types with nested typeof
+            TSType::TSFunctionType(func) => {
+                let params: Vec<Param> = func.params.items.iter().map(|p| {
+                    let name = match &p.pattern {
+                        BindingPattern::BindingIdentifier(ident) => ident.name.to_string(),
+                        _ => "_".to_string(),
+                    };
+                    let ty = p.type_annotation.as_ref()
+                        .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                        .unwrap_or(Type::Any);
+                    let mut param = Param::new(name, ty);
+                    if p.optional { param = param.optional(); }
+                    param
+                }).collect();
+
+                let return_type = self.resolve_ts_type(&func.return_type.type_annotation);
+
+                let type_params: Vec<TypeParam> = func.type_parameters.as_ref()
+                    .map(|tps| tps.params.iter().map(|p| {
+                        let mut tp = TypeParam::new(p.name.name.to_string());
+                        if let Some(c) = &p.constraint {
+                            tp = tp.with_constraint(self.resolve_ts_type(c));
+                        }
+                        if let Some(d) = &p.default {
+                            tp = tp.with_default(self.resolve_ts_type(d));
+                        }
+                        tp
+                    }).collect())
+                    .unwrap_or_default();
+
+                Type::Function {
+                    params,
+                    return_type: Box::new(return_type),
+                    type_params,
+                    type_predicate: None,
+                }
+            }
+
+            // Handle type literals (object types) with nested typeof
+            TSType::TSTypeLiteral(lit) => {
+                let mut properties = Vec::new();
+                let mut index_signature = None;
+
+                for member in &lit.members {
+                    match member {
+                        TSSignature::TSPropertySignature(prop) => {
+                            if let Some(name) = resolution::get_property_key_name(&prop.key) {
+                                let ty = prop.type_annotation.as_ref()
+                                    .map(|ann| self.resolve_ts_type(&ann.type_annotation))
+                                    .unwrap_or(Type::Any);
+                                let mut p = Property::new(name, ty);
+                                if prop.optional { p = p.optional(); }
+                                if prop.readonly { p = p.readonly(); }
+                                properties.push(p);
+                            }
+                        }
+                        TSSignature::TSIndexSignature(idx) => {
+                            // Index signature: [key: string]: T or [key: number]: T
+                            if let Some(param) = idx.parameters.first() {
+                                let key_type = self.resolve_ts_type(&param.type_annotation.type_annotation);
+                                let value_type = self.resolve_ts_type(&idx.type_annotation.type_annotation);
+                                index_signature = Some(IndexSignature {
+                                    key_type: Box::new(key_type),
+                                    value_type: Box::new(value_type),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Type::Object {
+                    properties,
+                    index_signature,
+                    extends: vec![],
+                    type_params: vec![],
+                }
+            }
+
+            // Handle parenthesized types
+            TSType::TSParenthesizedType(paren) => self.resolve_ts_type(&paren.type_annotation),
+
+            // Handle keyof with nested typeof
+            TSType::TSTypeOperatorType(op) => {
+                match op.operator {
+                    TSTypeOperatorOperator::Keyof => {
+                        Type::KeyOf(Box::new(self.resolve_ts_type(&op.type_annotation)))
+                    }
+                    _ => resolution::resolve_ts_type(ts_type),
+                }
+            }
+
+            // Handle indexed access types with nested typeof
+            TSType::TSIndexedAccessType(access) => {
+                Type::IndexedAccess {
+                    object_type: Box::new(self.resolve_ts_type(&access.object_type)),
+                    index_type: Box::new(self.resolve_ts_type(&access.index_type)),
+                }
+            }
+
+            // For all other types, delegate to the stateless resolution
+            _ => resolution::resolve_ts_type(ts_type),
+        }
+    }
+
+    /// Resolve a typeof query to the type of the referenced value.
+    ///
+    /// `typeof getString` -> the function type of getString
+    fn resolve_type_query(&self, query: &TSTypeQuery) -> Type {
+        match &query.expr_name {
+            TSTypeQueryExprName::IdentifierReference(ident) => {
+                // Look up the identifier in the symbol table
+                let name = ident.name.as_str();
+                if let Some(symbol) = self.symbols.lookup(name) {
+                    symbol.ty.clone()
+                } else {
+                    // Symbol not found - return any for now
+                    Type::Any
+                }
+            }
+            TSTypeQueryExprName::QualifiedName(qual) => {
+                // For qualified names like A.B.C, look up just the last part for simplicity
+                // A proper implementation would resolve the full chain
+                let name = qual.right.name.as_str();
+                if let Some(symbol) = self.symbols.lookup(name) {
+                    symbol.ty.clone()
+                } else {
+                    Type::Any
+                }
+            }
+            TSTypeQueryExprName::TSImportType(_) => {
+                // import('foo') type query - not yet implemented
+                Type::Any
+            }
+            TSTypeQueryExprName::ThisExpression(_) => {
+                // typeof this - return Any for now
+                Type::Any
+            }
+        }
     }
 
     /// Build a function type from a Function AST node.

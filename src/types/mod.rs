@@ -125,6 +125,46 @@ pub enum Type {
         /// Modifier for optional: Some(true) = +?, Some(false) = -?, None = unchanged
         optional_modifier: Option<bool>,
     },
+
+    /// Conditional type: T extends U ? X : Y
+    ///
+    /// Evaluates to true_type if check_type extends extends_type, otherwise false_type.
+    /// When check_type is a naked type parameter with a union, the conditional distributes:
+    /// `(A | B) extends U ? X : Y` becomes `(A extends U ? X : Y) | (B extends U ? X : Y)`
+    ConditionalType {
+        /// The type being checked (e.g., T in `T extends U ? X : Y`)
+        check_type: Box<Type>,
+        /// The type to compare against (e.g., U in `T extends U ? X : Y`)
+        extends_type: Box<Type>,
+        /// The type if the check succeeds (e.g., X in `T extends U ? X : Y`)
+        true_type: Box<Type>,
+        /// The type if the check fails (e.g., Y in `T extends U ? X : Y`)
+        false_type: Box<Type>,
+    },
+
+    /// Infer type: `infer R` in conditional types
+    ///
+    /// Used in conditional type extends clauses to infer a type variable.
+    /// `T extends (...args: infer P) => any ? P : never` extracts parameter types.
+    InferType {
+        /// The name of the type variable to infer (e.g., "R" in `infer R`)
+        name: String,
+        /// Optional constraint on the inferred type (e.g., `infer R extends SomeType`)
+        constraint: Option<Box<Type>>,
+    },
+
+    /// Template literal type: `hello${string}world`
+    ///
+    /// Represents a string type built from literal strings and type placeholders.
+    /// Used for typed event names, CSS-in-JS patterns, etc.
+    TemplateLiteralType {
+        /// The static string parts (one more than types.len())
+        /// For `hello${T}world`, this is ["hello", "world"]
+        texts: Vec<String>,
+        /// The type placeholders between text parts
+        /// For `hello${T}world`, this is [T]
+        types: Vec<Type>,
+    },
 }
 
 /// We can't derive `Eq` because `f64` doesn't implement it (NaN != NaN violates reflexivity).
@@ -212,6 +252,20 @@ impl Hash for Type {
                 readonly_modifier.hash(state);
                 optional_modifier.hash(state);
             }
+            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+                check_type.hash(state);
+                extends_type.hash(state);
+                true_type.hash(state);
+                false_type.hash(state);
+            }
+            Type::InferType { name, constraint } => {
+                name.hash(state);
+                constraint.hash(state);
+            }
+            Type::TemplateLiteralType { texts, types } => {
+                texts.hash(state);
+                types.hash(state);
+            }
         }
     }
 }
@@ -247,6 +301,9 @@ impl Type {
             Type::KeyOf(_) => 21,
             Type::IndexedAccess { .. } => 22,
             Type::MappedType { .. } => 23,
+            Type::ConditionalType { .. } => 24,
+            Type::InferType { .. } => 25,
+            Type::TemplateLiteralType { .. } => 26,
         }
     }
 }
@@ -376,6 +433,21 @@ impl Ord for Type {
                 .then_with(|| ta.cmp(tb))
                 .then_with(|| ra.cmp(rb))
                 .then_with(|| oa.cmp(ob)),
+            (
+                Type::ConditionalType { check_type: ca, extends_type: ea, true_type: ta, false_type: fa },
+                Type::ConditionalType { check_type: cb, extends_type: eb, true_type: tb, false_type: fb },
+            ) => ca.cmp(cb)
+                .then_with(|| ea.cmp(eb))
+                .then_with(|| ta.cmp(tb))
+                .then_with(|| fa.cmp(fb)),
+            (
+                Type::InferType { name: na, constraint: ca },
+                Type::InferType { name: nb, constraint: cb },
+            ) => na.cmp(nb).then_with(|| ca.cmp(cb)),
+            (
+                Type::TemplateLiteralType { texts: ta, types: tya },
+                Type::TemplateLiteralType { texts: tb, types: tyb },
+            ) => ta.cmp(tb).then_with(|| tya.cmp(tyb)),
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
     }
@@ -770,6 +842,29 @@ impl fmt::Display for Type {
                     None => {}
                 }
                 write!(f, ": {}; }}", template)
+            }
+
+            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+                write!(f, "{} extends {} ? {} : {}", check_type, extends_type, true_type, false_type)
+            }
+
+            Type::InferType { name, constraint } => {
+                write!(f, "infer {}", name)?;
+                if let Some(c) = constraint {
+                    write!(f, " extends {}", c)?;
+                }
+                Ok(())
+            }
+
+            Type::TemplateLiteralType { texts, types } => {
+                write!(f, "`")?;
+                for (i, text) in texts.iter().enumerate() {
+                    write!(f, "{}", text)?;
+                    if let Some(ty) = types.get(i) {
+                        write!(f, "${{{}}}", ty)?;
+                    }
+                }
+                write!(f, "`")
             }
         }
     }
