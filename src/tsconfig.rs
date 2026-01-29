@@ -170,7 +170,11 @@ mod tests {
         let config = TsConfig::load(temp.path()).unwrap();
         let mappings = config.get_path_mappings();
         assert_eq!(mappings.len(), 1);
-        assert!(mappings.iter().any(|(k, v)| k == "@/*" && v == &vec!["src/*".to_string()]));
+        assert!(
+            mappings
+                .iter()
+                .any(|(k, v)| k == "@/*" && v == &vec!["src/*".to_string()])
+        );
     }
 
     #[test]

@@ -79,7 +79,11 @@ impl ModuleResolver {
 
     /// Resolve an import specifier to a file path.
     /// Tries: relative -> path mappings -> baseUrl -> node_modules
-    pub fn resolve(&self, specifier: &str, from_file: &Path) -> Result<ResolvedModule, ResolveError> {
+    pub fn resolve(
+        &self,
+        specifier: &str,
+        from_file: &Path,
+    ) -> Result<ResolvedModule, ResolveError> {
         if specifier.starts_with("./") || specifier.starts_with("../") {
             return self.resolve_relative(specifier, from_file);
         }
@@ -154,7 +158,9 @@ impl ModuleResolver {
             if ext_str == "ts" || ext_str == "tsx" || ext_str == "js" || ext_str == "jsx" {
                 if base_path.exists() {
                     return Ok(ResolvedModule {
-                        path: base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf()),
+                        path: base_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| base_path.to_path_buf()),
                         is_declaration: ext_str == "d.ts",
                     });
                 }
@@ -186,7 +192,11 @@ impl ModuleResolver {
     }
 
     /// Resolve relative imports (./foo or ../bar).
-    fn resolve_relative(&self, specifier: &str, from_file: &Path) -> Result<ResolvedModule, ResolveError> {
+    fn resolve_relative(
+        &self,
+        specifier: &str,
+        from_file: &Path,
+    ) -> Result<ResolvedModule, ResolveError> {
         let base_dir = from_file.parent().unwrap_or(Path::new("."));
         let relative_path = Path::new(specifier);
         let base_path = base_dir.join(relative_path);
@@ -200,7 +210,9 @@ impl ModuleResolver {
                 if base_path.exists() {
                     let is_decl = ext_str == "d.ts";
                     return Ok(ResolvedModule {
-                        path: base_path.canonicalize().unwrap_or_else(|_| base_path.clone()),
+                        path: base_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| base_path.clone()),
                         is_declaration: is_decl,
                     });
                 }
@@ -218,9 +230,7 @@ impl ModuleResolver {
             };
 
             if try_path.exists() {
-                let is_declaration = try_path
-                    .to_string_lossy()
-                    .ends_with(".d.ts");
+                let is_declaration = try_path.to_string_lossy().ends_with(".d.ts");
                 return Ok(ResolvedModule {
                     path: try_path.canonicalize().unwrap_or(try_path),
                     is_declaration,
@@ -236,7 +246,11 @@ impl ModuleResolver {
     }
 
     /// Resolve a node module import (lodash, @types/node).
-    fn resolve_node_module(&self, specifier: &str, from_file: &Path) -> Result<ResolvedModule, ResolveError> {
+    fn resolve_node_module(
+        &self,
+        specifier: &str,
+        from_file: &Path,
+    ) -> Result<ResolvedModule, ResolveError> {
         let mut current_dir = from_file.parent();
         let mut tried_paths = Vec::new();
 
@@ -359,7 +373,9 @@ mod tests {
 
         assert!(result.is_ok());
         let resolved = result.unwrap();
-        assert!(resolved.path.ends_with("utils/index.ts") || resolved.path.ends_with("utils\\index.ts"));
+        assert!(
+            resolved.path.ends_with("utils/index.ts") || resolved.path.ends_with("utils\\index.ts")
+        );
     }
 
     #[test]
@@ -367,7 +383,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        let main_file = create_test_file(dir, "src/components/Button.ts", "import { theme } from '../theme';");
+        let main_file = create_test_file(
+            dir,
+            "src/components/Button.ts",
+            "import { theme } from '../theme';",
+        );
         create_test_file(dir, "src/theme.ts", "export const theme = {};");
 
         let resolver = ModuleResolver::new(ResolverConfig::new());
@@ -389,7 +409,11 @@ mod tests {
         let result = resolver.resolve("./nonexistent", &main_file);
 
         assert!(result.is_err());
-        if let Err(ResolveError::ModuleNotFound { specifier, tried_paths }) = result {
+        if let Err(ResolveError::ModuleNotFound {
+            specifier,
+            tried_paths,
+        }) = result
+        {
             assert_eq!(specifier, "./nonexistent");
             assert!(!tried_paths.is_empty());
         } else {
@@ -449,7 +473,9 @@ mod tests {
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         let resolved = result.unwrap();
-        assert!(resolved.path.ends_with("src/utils.ts") || resolved.path.ends_with("src\\utils.ts"));
+        assert!(
+            resolved.path.ends_with("src/utils.ts") || resolved.path.ends_with("src\\utils.ts")
+        );
     }
 
     #[test]
@@ -458,8 +484,16 @@ mod tests {
         let dir = temp.path();
 
         // Create src/components/Button.ts
-        create_test_file(dir, "src/components/Button.ts", "export const Button = () => {};");
-        let main_file = create_test_file(dir, "main.ts", "import { Button } from '@/components/Button';");
+        create_test_file(
+            dir,
+            "src/components/Button.ts",
+            "export const Button = () => {};",
+        );
+        let main_file = create_test_file(
+            dir,
+            "main.ts",
+            "import { Button } from '@/components/Button';",
+        );
 
         let config = ResolverConfig::new()
             .with_paths(vec![("@/*".to_string(), vec!["src/*".to_string()])])

@@ -50,7 +50,11 @@ impl<'a> Checker<'a> {
 
                     // Check for object literal specific errors (missing/excess properties)
                     if let Expression::ObjectExpression(obj) = init {
-                        self.check_object_literal_against_type(obj, &declared_type, declarator.span);
+                        self.check_object_literal_against_type(
+                            obj,
+                            &declared_type,
+                            declarator.span,
+                        );
                     } else if let Expression::ArrayExpression(arr) = init {
                         // Contextual typing: check array literal against tuple type
                         self.check_array_literal_against_type(arr, &declared_type, declarator.span);
@@ -104,7 +108,8 @@ impl<'a> Checker<'a> {
                 _ => continue,
             };
             if self.symbols.lookup_type(&name).is_none() {
-                self.errors.push(TypeError::undefined_type(&name, heritage.span));
+                self.errors
+                    .push(TypeError::undefined_type(&name, heritage.span));
             }
         }
     }
@@ -136,7 +141,12 @@ impl<'a> Checker<'a> {
             let type_args: Vec<Type> = heritage
                 .type_arguments
                 .as_ref()
-                .map(|args| args.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                .map(|args| {
+                    args.params
+                        .iter()
+                        .map(|t| self.resolve_ts_type(t))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // Resolve the interface type with type arguments
@@ -144,8 +154,17 @@ impl<'a> Checker<'a> {
 
             if let Some(interface_type) = interface_type {
                 // Check that class implements all required members
-                if let Type::Object { properties: interface_props, .. } = &interface_type {
-                    let class_props = if let Type::Object { properties, extends, .. } = &class_type {
+                if let Type::Object {
+                    properties: interface_props,
+                    ..
+                } = &interface_type
+                {
+                    let class_props = if let Type::Object {
+                        properties,
+                        extends,
+                        ..
+                    } = &class_type
+                    {
                         self.resolve_object_properties(properties, extends)
                     } else {
                         vec![]
@@ -156,7 +175,9 @@ impl<'a> Checker<'a> {
 
                     for interface_prop in interface_props {
                         // Check if property exists in class
-                        if !interface_prop.optional && !class_prop_names.contains(interface_prop.name.as_str()) {
+                        if !interface_prop.optional
+                            && !class_prop_names.contains(interface_prop.name.as_str())
+                        {
                             self.errors.push(TypeError::incorrectly_implements(
                                 class_name,
                                 &interface_name,
@@ -166,7 +187,9 @@ impl<'a> Checker<'a> {
                         }
 
                         // Check type compatibility if property exists
-                        if let Some(class_prop) = class_props.iter().find(|p| p.name == interface_prop.name) {
+                        if let Some(class_prop) =
+                            class_props.iter().find(|p| p.name == interface_prop.name)
+                        {
                             if !self.is_assignable(&class_prop.ty, &interface_prop.ty) {
                                 self.errors.push(TypeError::incorrectly_implements(
                                     class_name,
@@ -213,8 +236,14 @@ impl<'a> Checker<'a> {
             if let Some(type_params) = &func.type_parameters {
                 for param in &type_params.params {
                     let name = param.name.name.as_str();
-                    let constraint = param.constraint.as_ref().map(|c| crate::types::resolution::resolve_ts_type(c));
-                    let default = param.default.as_ref().map(|d| crate::types::resolution::resolve_ts_type(d));
+                    let constraint = param
+                        .constraint
+                        .as_ref()
+                        .map(|c| crate::types::resolution::resolve_ts_type(c));
+                    let default = param
+                        .default
+                        .as_ref()
+                        .map(|d| crate::types::resolution::resolve_ts_type(d));
 
                     let ty = Type::TypeParameter {
                         name: name.to_string(),
@@ -222,7 +251,9 @@ impl<'a> Checker<'a> {
                         default: default.map(Box::new),
                     };
 
-                    let _ = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, param.name.span);
+                    let _ =
+                        self.symbols
+                            .define_type(name, ty, SymbolKind::TypeAlias, param.name.span);
                 }
             }
 

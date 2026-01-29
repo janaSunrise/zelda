@@ -1,6 +1,8 @@
 //! Type resolution and manipulation.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+
+use rustc_hash::FxHashMap;
 
 use oxc_ast::ast::*;
 
@@ -8,6 +10,42 @@ use crate::types::resolution;
 use crate::types::{IndexSignature, Param, Property, Type, TypeParam};
 
 use super::Checker;
+
+/// Filter substitutions to exclude bound names, using Cow to avoid cloning when not needed.
+fn filter_substitutions<'a>(
+    substitutions: &'a FxHashMap<String, Type>,
+    bound_names: &rustc_hash::FxHashSet<String>,
+) -> Cow<'a, FxHashMap<String, Type>> {
+    if bound_names.is_empty() {
+        Cow::Borrowed(substitutions)
+    } else {
+        Cow::Owned(
+            substitutions
+                .iter()
+                .filter(|(k, _)| !bound_names.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+}
+
+/// Filter substitutions to exclude a single bound name, using Cow to avoid cloning when not needed.
+fn filter_substitution_single<'a>(
+    substitutions: &'a FxHashMap<String, Type>,
+    bound_name: &str,
+) -> Cow<'a, FxHashMap<String, Type>> {
+    if !substitutions.contains_key(bound_name) {
+        Cow::Borrowed(substitutions)
+    } else {
+        Cow::Owned(
+            substitutions
+                .iter()
+                .filter(|(k, _)| k.as_str() != bound_name)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+}
 
 impl<'a> Checker<'a> {
     pub(super) fn resolve_ts_type(&self, ts_type: &TSType) -> Type {
@@ -20,17 +58,23 @@ impl<'a> Checker<'a> {
 
     /// `typeof x` -> look up x's type in symbol table
     fn resolve_type_query(&self, query: &oxc_ast::ast::TSTypeQuery) -> Type {
-        use oxc_ast::ast::{TSTypeQueryExprName, TSTypeName};
+        use oxc_ast::ast::{TSTypeName, TSTypeQueryExprName};
 
         match &query.expr_name {
             TSTypeQueryExprName::IdentifierReference(ident) => {
                 let name = ident.name.as_str();
-                self.symbols.lookup(name).map(|s| s.ty.clone()).unwrap_or(Type::Any)
+                self.symbols
+                    .lookup(name)
+                    .map(|s| s.ty.clone())
+                    .unwrap_or(Type::Any)
             }
             // TODO: resolve full qualified chain instead of just the last part
             TSTypeQueryExprName::QualifiedName(qual) => {
                 let name = qual.right.name.as_str();
-                self.symbols.lookup(name).map(|s| s.ty.clone()).unwrap_or(Type::Any)
+                self.symbols
+                    .lookup(name)
+                    .map(|s| s.ty.clone())
+                    .unwrap_or(Type::Any)
             }
             TSTypeQueryExprName::TSImportType(_) => Type::Any,
             TSTypeQueryExprName::ThisExpression(_) => Type::Any,
@@ -85,11 +129,16 @@ impl<'a> Checker<'a> {
 
     /// Replace type parameters with concrete types.
     /// `Array<T>` with {T -> string} => `Array<string>`
-    pub fn substitute_type_params(&self, ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+    pub fn substitute_type_params(
+        &self,
+        ty: &Type,
+        substitutions: &FxHashMap<String, Type>,
+    ) -> Type {
         match ty {
-            Type::TypeParameter { name, .. } => {
-                substitutions.get(name).cloned().unwrap_or_else(|| ty.clone())
-            }
+            Type::TypeParameter { name, .. } => substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| ty.clone()),
 
             Type::TypeRef { name, type_args } => {
                 // Bare TypeRef with no args might be a type parameter reference
@@ -115,19 +164,33 @@ impl<'a> Checker<'a> {
                 Type::Array(Box::new(self.substitute_type_params(elem, substitutions)))
             }
 
-            Type::Tuple(types) => {
-                Type::Tuple(types.iter().map(|t| self.substitute_type_params(t, substitutions)).collect())
-            }
+            Type::Tuple(types) => Type::Tuple(
+                types
+                    .iter()
+                    .map(|t| self.substitute_type_params(t, substitutions))
+                    .collect(),
+            ),
 
-            Type::Union(types) => {
-                Type::Union(types.iter().map(|t| self.substitute_type_params(t, substitutions)).collect())
-            }
+            Type::Union(types) => Type::Union(
+                types
+                    .iter()
+                    .map(|t| self.substitute_type_params(t, substitutions))
+                    .collect(),
+            ),
 
-            Type::Intersection(types) => {
-                Type::Intersection(types.iter().map(|t| self.substitute_type_params(t, substitutions)).collect())
-            }
+            Type::Intersection(types) => Type::Intersection(
+                types
+                    .iter()
+                    .map(|t| self.substitute_type_params(t, substitutions))
+                    .collect(),
+            ),
 
-            Type::Object { properties, index_signature, extends, type_params } => {
+            Type::Object {
+                properties,
+                index_signature,
+                extends,
+                type_params,
+            } => {
                 // Substitute type parameters in properties
                 // Note: When instantiating Box<number>, we DO want to substitute T -> number in properties
                 let new_props: Vec<Property> = properties
@@ -142,7 +205,9 @@ impl<'a> Checker<'a> {
 
                 let new_idx = index_signature.as_ref().map(|idx| IndexSignature {
                     key_type: Box::new(self.substitute_type_params(&idx.key_type, substitutions)),
-                    value_type: Box::new(self.substitute_type_params(&idx.value_type, substitutions)),
+                    value_type: Box::new(
+                        self.substitute_type_params(&idx.value_type, substitutions),
+                    ),
                 });
 
                 let new_extends: Vec<Type> = extends
@@ -166,14 +231,16 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            Type::Function { params, return_type, type_params, type_predicate } => {
+            Type::Function {
+                params,
+                return_type,
+                type_params,
+                type_predicate,
+            } => {
                 // Don't substitute the function's own type parameters, only free variables
-                let bound_names: std::collections::HashSet<_> = type_params.iter().map(|tp| tp.name.clone()).collect();
-                let filtered_subs: HashMap<String, Type> = substitutions
-                    .iter()
-                    .filter(|(k, _)| !bound_names.contains(*k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let bound_names: rustc_hash::FxHashSet<_> =
+                    type_params.iter().map(|tp| tp.name.clone()).collect();
+                let filtered_subs = filter_substitutions(substitutions, &bound_names);
 
                 let new_params: Vec<Param> = params
                     .iter()
@@ -192,16 +259,27 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|tp| TypeParam {
                         name: tp.name.clone(),
-                        constraint: tp.constraint.as_ref().map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
-                        default: tp.default.as_ref().map(|d| Box::new(self.substitute_type_params(d, &filtered_subs))),
+                        constraint: tp
+                            .constraint
+                            .as_ref()
+                            .map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
+                        default: tp
+                            .default
+                            .as_ref()
+                            .map(|d| Box::new(self.substitute_type_params(d, &filtered_subs))),
                     })
                     .collect();
 
-                let new_predicate = type_predicate.as_ref().map(|tp| crate::types::TypePredicate {
-                    parameter_name: tp.parameter_name.clone(),
-                    asserts: tp.asserts,
-                    type_annotation: tp.type_annotation.as_ref().map(|ty| Box::new(self.substitute_type_params(ty, &filtered_subs))),
-                });
+                let new_predicate = type_predicate
+                    .as_ref()
+                    .map(|tp| crate::types::TypePredicate {
+                        parameter_name: tp.parameter_name.clone(),
+                        asserts: tp.asserts,
+                        type_annotation: tp
+                            .type_annotation
+                            .as_ref()
+                            .map(|ty| Box::new(self.substitute_type_params(ty, &filtered_subs))),
+                    });
 
                 Type::Function {
                     params: new_params,
@@ -211,14 +289,15 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            Type::ClassConstructor { params, type_params, static_members } => {
+            Type::ClassConstructor {
+                params,
+                type_params,
+                static_members,
+            } => {
                 // Similar to Function, don't substitute the constructor's own type parameters
-                let bound_names: std::collections::HashSet<_> = type_params.iter().map(|tp| tp.name.clone()).collect();
-                let filtered_subs: HashMap<String, Type> = substitutions
-                    .iter()
-                    .filter(|(k, _)| !bound_names.contains(*k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let bound_names: rustc_hash::FxHashSet<_> =
+                    type_params.iter().map(|tp| tp.name.clone()).collect();
+                let filtered_subs = filter_substitutions(substitutions, &bound_names);
 
                 let new_params: Vec<Param> = params
                     .iter()
@@ -234,8 +313,14 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|tp| TypeParam {
                         name: tp.name.clone(),
-                        constraint: tp.constraint.as_ref().map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
-                        default: tp.default.as_ref().map(|d| Box::new(self.substitute_type_params(d, &filtered_subs))),
+                        constraint: tp
+                            .constraint
+                            .as_ref()
+                            .map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
+                        default: tp
+                            .default
+                            .as_ref()
+                            .map(|d| Box::new(self.substitute_type_params(d, &filtered_subs))),
                     })
                     .collect();
 
@@ -262,21 +347,24 @@ impl<'a> Checker<'a> {
             }
 
             // IndexedAccess: substitute into both parts
-            Type::IndexedAccess { object_type, index_type } => {
-                Type::IndexedAccess {
-                    object_type: Box::new(self.substitute_type_params(object_type, substitutions)),
-                    index_type: Box::new(self.substitute_type_params(index_type, substitutions)),
-                }
-            }
+            Type::IndexedAccess {
+                object_type,
+                index_type,
+            } => Type::IndexedAccess {
+                object_type: Box::new(self.substitute_type_params(object_type, substitutions)),
+                index_type: Box::new(self.substitute_type_params(index_type, substitutions)),
+            },
 
             // MappedType: substitute into constraint and template, but not the bound type_param
-            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+            Type::MappedType {
+                type_param,
+                constraint,
+                template,
+                readonly_modifier,
+                optional_modifier,
+            } => {
                 // The type_param is a bound variable in the mapped type, so filter it from substitutions
-                let filtered_subs: HashMap<String, Type> = substitutions
-                    .iter()
-                    .filter(|(k, _)| *k != type_param)
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let filtered_subs = filter_substitution_single(substitutions, type_param);
 
                 Type::MappedType {
                     type_param: type_param.clone(),
@@ -288,37 +376,39 @@ impl<'a> Checker<'a> {
             }
 
             // ConditionalType: substitute into all parts
-            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
-                Type::ConditionalType {
-                    check_type: Box::new(self.substitute_type_params(check_type, substitutions)),
-                    extends_type: Box::new(self.substitute_type_params(extends_type, substitutions)),
-                    true_type: Box::new(self.substitute_type_params(true_type, substitutions)),
-                    false_type: Box::new(self.substitute_type_params(false_type, substitutions)),
-                }
-            }
+            Type::ConditionalType {
+                check_type,
+                extends_type,
+                true_type,
+                false_type,
+            } => Type::ConditionalType {
+                check_type: Box::new(self.substitute_type_params(check_type, substitutions)),
+                extends_type: Box::new(self.substitute_type_params(extends_type, substitutions)),
+                true_type: Box::new(self.substitute_type_params(true_type, substitutions)),
+                false_type: Box::new(self.substitute_type_params(false_type, substitutions)),
+            },
 
             // InferType: the inferred variable should not be substituted (it's being defined)
             Type::InferType { name, constraint } => {
                 // Filter out the infer variable name from substitutions
-                let filtered_subs: HashMap<String, Type> = substitutions
-                    .iter()
-                    .filter(|(k, _)| *k != name)
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let filtered_subs = filter_substitution_single(substitutions, name);
 
                 Type::InferType {
                     name: name.clone(),
-                    constraint: constraint.as_ref().map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
+                    constraint: constraint
+                        .as_ref()
+                        .map(|c| Box::new(self.substitute_type_params(c, &filtered_subs))),
                 }
             }
 
             // TemplateLiteralType: substitute into the type placeholders
-            Type::TemplateLiteralType { texts, types } => {
-                Type::TemplateLiteralType {
-                    texts: texts.clone(),
-                    types: types.iter().map(|t| self.substitute_type_params(t, substitutions)).collect(),
-                }
-            }
+            Type::TemplateLiteralType { texts, types } => Type::TemplateLiteralType {
+                texts: texts.clone(),
+                types: types
+                    .iter()
+                    .map(|t| self.substitute_type_params(t, substitutions))
+                    .collect(),
+            },
 
             // Primitives and literals: no substitution needed
             Type::String
@@ -342,11 +432,13 @@ impl<'a> Checker<'a> {
     pub fn resolve_keyof(&self, ty: &Type) -> Type {
         // First resolve the type if it's a TypeRef
         let resolved = match ty {
-            Type::TypeRef { name, type_args } => {
-                self.resolve_type_ref_with_args(name, type_args)
-                    .unwrap_or_else(|| ty.clone())
-            }
-            Type::TypeParameter { constraint: Some(constraint), .. } => {
+            Type::TypeRef { name, type_args } => self
+                .resolve_type_ref_with_args(name, type_args)
+                .unwrap_or_else(|| ty.clone()),
+            Type::TypeParameter {
+                constraint: Some(constraint),
+                ..
+            } => {
                 // For a type parameter with constraint, keyof T extends C gives keyof C
                 return self.resolve_keyof(constraint);
             }
@@ -354,7 +446,11 @@ impl<'a> Checker<'a> {
         };
 
         match &resolved {
-            Type::Object { properties, extends, .. } => {
+            Type::Object {
+                properties,
+                extends,
+                ..
+            } => {
                 // Collect all property names including from extended interfaces
                 let all_props = self.resolve_object_properties(properties, extends);
                 let keys: Vec<Type> = all_props
@@ -372,10 +468,8 @@ impl<'a> Checker<'a> {
             }
             Type::Union(types) => {
                 // keyof (A | B) = (keyof A) & (keyof B)
-                let resolved_keys: Vec<Type> = types
-                    .iter()
-                    .map(|t| self.resolve_keyof(t))
-                    .collect();
+                let resolved_keys: Vec<Type> =
+                    types.iter().map(|t| self.resolve_keyof(t)).collect();
                 if resolved_keys.is_empty() {
                     Type::Never
                 } else if resolved_keys.len() == 1 {
@@ -386,10 +480,8 @@ impl<'a> Checker<'a> {
             }
             Type::Intersection(types) => {
                 // keyof (A & B) = (keyof A) | (keyof B)
-                let resolved_keys: Vec<Type> = types
-                    .iter()
-                    .map(|t| self.resolve_keyof(t))
-                    .collect();
+                let resolved_keys: Vec<Type> =
+                    types.iter().map(|t| self.resolve_keyof(t)).collect();
                 self.unify_types(resolved_keys)
             }
             Type::Any => Type::Union(vec![Type::String, Type::Number]),
@@ -420,12 +512,14 @@ impl<'a> Checker<'a> {
         let keys: Vec<Type> = match &resolved_constraint {
             Type::Union(types) => types.clone(),
             Type::StringLiteral(_) => vec![resolved_constraint.clone()],
-            Type::Never => return Type::Object {
-                properties: vec![],
-                index_signature: None,
-                extends: vec![],
-                type_params: vec![],
-            },
+            Type::Never => {
+                return Type::Object {
+                    properties: vec![],
+                    index_signature: None,
+                    extends: vec![],
+                    type_params: vec![],
+                };
+            }
             _ => return Type::Any, // Can't resolve mapped type with this constraint
         };
 
@@ -435,14 +529,18 @@ impl<'a> Checker<'a> {
         for key in keys {
             if let Type::StringLiteral(key_name) = &key {
                 // Create substitution map: type_param -> key
-                let mut subs = HashMap::new();
+                let mut subs = FxHashMap::default();
                 subs.insert(type_param.to_string(), key.clone());
 
                 // Substitute in the template to get the property type
                 let prop_type = self.substitute_type_params(template, &subs);
 
                 // If the template is an indexed access like T[K], resolve it
-                let resolved_prop_type = if let Type::IndexedAccess { object_type, index_type } = &prop_type {
+                let resolved_prop_type = if let Type::IndexedAccess {
+                    object_type,
+                    index_type,
+                } = &prop_type
+                {
                     self.resolve_indexed_access(object_type, index_type)
                 } else {
                     prop_type
@@ -484,18 +582,15 @@ impl<'a> Checker<'a> {
 
         // Resolve the object type if it's a TypeRef
         let resolved_object = match object_type {
-            Type::TypeRef { name, type_args } => {
-                self.resolve_type_ref_with_args(name, type_args)
-                    .unwrap_or_else(|| object_type.clone())
-            }
+            Type::TypeRef { name, type_args } => self
+                .resolve_type_ref_with_args(name, type_args)
+                .unwrap_or_else(|| object_type.clone()),
             other => other.clone(),
         };
 
         match &resolved_index {
             // String literal key: T["prop"]
-            Type::StringLiteral(key) => {
-                self.get_property_type(&resolved_object, key)
-            }
+            Type::StringLiteral(key) => self.get_property_type(&resolved_object, key),
             // Union of keys: T["a" | "b"] = T["a"] | T["b"]
             Type::Union(keys) => {
                 let types: Vec<Type> = keys
@@ -517,7 +612,11 @@ impl<'a> Checker<'a> {
             }
             // String index: get index signature value type
             Type::String => {
-                if let Type::Object { index_signature: Some(idx), .. } = &resolved_object {
+                if let Type::Object {
+                    index_signature: Some(idx),
+                    ..
+                } = &resolved_object
+                {
                     if matches!(*idx.key_type, Type::String) {
                         return (*idx.value_type).clone();
                     }
@@ -529,7 +628,11 @@ impl<'a> Checker<'a> {
                 if let Type::Array(elem) = &resolved_object {
                     return (**elem).clone();
                 }
-                if let Type::Object { index_signature: Some(idx), .. } = &resolved_object {
+                if let Type::Object {
+                    index_signature: Some(idx),
+                    ..
+                } = &resolved_object
+                {
                     if matches!(*idx.key_type, Type::Number) {
                         return (*idx.value_type).clone();
                     }
@@ -548,8 +651,8 @@ impl<'a> Checker<'a> {
         &self,
         type_params: &[TypeParam],
         type_args: &[Type],
-    ) -> HashMap<String, Type> {
-        let mut map = HashMap::new();
+    ) -> FxHashMap<String, Type> {
+        let mut map = FxHashMap::default();
 
         for (i, param) in type_params.iter().enumerate() {
             if let Some(arg) = type_args.get(i) {
@@ -575,8 +678,8 @@ impl<'a> Checker<'a> {
         type_params: &[TypeParam],
         params: &[Param],
         arg_types: &[Type],
-    ) -> HashMap<String, Type> {
-        let mut inferred = HashMap::new();
+    ) -> FxHashMap<String, Type> {
+        let mut inferred = FxHashMap::default();
 
         // For each parameter, try to infer type arguments from the corresponding argument
         for (i, param) in params.iter().enumerate() {
@@ -613,7 +716,7 @@ impl<'a> Checker<'a> {
         param_type: &Type,
         arg_type: &Type,
         type_params: &[TypeParam],
-        inferred: &mut HashMap<String, Type>,
+        inferred: &mut FxHashMap<String, Type>,
     ) {
         match param_type {
             // If param is a TypeRef to one of our type params, infer it
@@ -652,8 +755,17 @@ impl<'a> Checker<'a> {
             }
 
             // If param is a function, recurse into params and return
-            Type::Function { params: param_params, return_type: param_ret, .. } => {
-                if let Type::Function { params: arg_params, return_type: arg_ret, .. } = arg_type {
+            Type::Function {
+                params: param_params,
+                return_type: param_ret,
+                ..
+            } => {
+                if let Type::Function {
+                    params: arg_params,
+                    return_type: arg_ret,
+                    ..
+                } = arg_type
+                {
                     for (pp, ap) in param_params.iter().zip(arg_params.iter()) {
                         self.infer_from_types(&pp.ty, &ap.ty, type_params, inferred);
                     }
@@ -662,8 +774,15 @@ impl<'a> Checker<'a> {
             }
 
             // For objects, try to match properties
-            Type::Object { properties: param_props, .. } => {
-                if let Type::Object { properties: arg_props, .. } = arg_type {
+            Type::Object {
+                properties: param_props,
+                ..
+            } => {
+                if let Type::Object {
+                    properties: arg_props,
+                    ..
+                } = arg_type
+                {
                     for pp in param_props {
                         if let Some(ap) = arg_props.iter().find(|p| p.name == pp.name) {
                             self.infer_from_types(&pp.ty, &ap.ty, type_params, inferred);
@@ -740,9 +859,17 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|t| {
                         // If true_type was the union, substitute with current member
-                        let subst_true = if true_is_check { t.clone() } else { resolved_true.clone() };
+                        let subst_true = if true_is_check {
+                            t.clone()
+                        } else {
+                            resolved_true.clone()
+                        };
                         // If false_type was the union, substitute with current member
-                        let subst_false = if false_is_check { t.clone() } else { resolved_false.clone() };
+                        let subst_false = if false_is_check {
+                            t.clone()
+                        } else {
+                            resolved_false.clone()
+                        };
                         self.evaluate_conditional_type(t, extends_type, &subst_true, &subst_false)
                     })
                     .collect();
@@ -753,7 +880,7 @@ impl<'a> Checker<'a> {
         }
 
         // Check for infer types in extends_type and extract inferred variables
-        let mut inferred = HashMap::new();
+        let mut inferred = FxHashMap::default();
         let has_infer = self.collect_infer_types(extends_type);
 
         if !has_infer.is_empty() {
@@ -810,7 +937,11 @@ impl<'a> Checker<'a> {
                     self.collect_infer_types_inner(t, result);
                 }
             }
-            Type::Function { params, return_type, .. } => {
+            Type::Function {
+                params,
+                return_type,
+                ..
+            } => {
                 for p in params {
                     self.collect_infer_types_inner(&p.ty, result);
                 }
@@ -821,7 +952,12 @@ impl<'a> Checker<'a> {
                     self.collect_infer_types_inner(&p.ty, result);
                 }
             }
-            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+            Type::ConditionalType {
+                check_type,
+                extends_type,
+                true_type,
+                false_type,
+            } => {
                 self.collect_infer_types_inner(check_type, result);
                 self.collect_infer_types_inner(extends_type, result);
                 self.collect_infer_types_inner(true_type, result);
@@ -844,7 +980,7 @@ impl<'a> Checker<'a> {
         &self,
         check_type: &Type,
         extends_type: &Type,
-        inferred: &mut HashMap<String, Type>,
+        inferred: &mut FxHashMap<String, Type>,
     ) -> bool {
         match extends_type {
             // Infer type: capture the corresponding part of check_type
@@ -860,8 +996,17 @@ impl<'a> Checker<'a> {
             }
 
             // Function type: match params and return type
-            Type::Function { params: ext_params, return_type: ext_return, .. } => {
-                if let Type::Function { params: check_params, return_type: check_return, .. } = check_type {
+            Type::Function {
+                params: ext_params,
+                return_type: ext_return,
+                ..
+            } => {
+                if let Type::Function {
+                    params: check_params,
+                    return_type: check_return,
+                    ..
+                } = check_type
+                {
                     // Check if extends_type has a rest parameter with infer type
                     // This is the pattern (...args: infer P) => R which captures params as tuple
                     let ext_has_rest_infer = ext_params.len() == 1
@@ -879,7 +1024,8 @@ impl<'a> Checker<'a> {
                         if let Type::Array(elem) = &ext_params[0].ty {
                             if let Type::InferType { name, .. } = elem.as_ref() {
                                 // Create tuple from check_params
-                                let tuple_types: Vec<Type> = check_params.iter().map(|p| p.ty.clone()).collect();
+                                let tuple_types: Vec<Type> =
+                                    check_params.iter().map(|p| p.ty.clone()).collect();
                                 inferred.insert(name.clone(), Type::Tuple(tuple_types));
                             }
                         }
@@ -927,8 +1073,15 @@ impl<'a> Checker<'a> {
             }
 
             // Object type: match properties
-            Type::Object { properties: ext_props, .. } => {
-                if let Type::Object { properties: check_props, .. } = check_type {
+            Type::Object {
+                properties: ext_props,
+                ..
+            } => {
+                if let Type::Object {
+                    properties: check_props,
+                    ..
+                } = check_type
+                {
                     for ep in ext_props {
                         if let Some(cp) = check_props.iter().find(|p| p.name == ep.name) {
                             if !self.infer_from_conditional(&cp.ty, &ep.ty, inferred) {
@@ -946,7 +1099,10 @@ impl<'a> Checker<'a> {
 
             // TypeRef type: match generic type arguments
             // This handles cases like Promise<infer R> where check_type is Promise<string>
-            Type::TypeRef { name: ext_name, type_args: ext_args } => {
+            Type::TypeRef {
+                name: ext_name,
+                type_args: ext_args,
+            } => {
                 // Special case: Array<infer R> matches Type::Array
                 if ext_name == "Array" && ext_args.len() == 1 {
                     if let Type::Array(check_elem) = check_type {
@@ -954,7 +1110,11 @@ impl<'a> Checker<'a> {
                     }
                 }
 
-                if let Type::TypeRef { name: check_name, type_args: check_args } = check_type {
+                if let Type::TypeRef {
+                    name: check_name,
+                    type_args: check_args,
+                } = check_type
+                {
                     // Names must match (e.g., both Promise)
                     if ext_name != check_name {
                         return false;
@@ -991,7 +1151,8 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|ty| {
                 if let Type::TypeRef { name, type_args } = ty {
-                    self.resolve_type_ref_with_args(name, type_args).unwrap_or_else(|| ty.clone())
+                    self.resolve_type_ref_with_args(name, type_args)
+                        .unwrap_or_else(|| ty.clone())
                 } else {
                     ty.clone()
                 }

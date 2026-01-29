@@ -19,8 +19,12 @@ pub fn load_lib_dts(symbols: &mut SymbolTable) {
     let allocator = Allocator::default();
     let source_type = SourceType::d_ts();
 
-    let ParserReturn { program, errors, panicked, .. } =
-        Parser::new(&allocator, LIB_DTS, source_type).parse();
+    let ParserReturn {
+        program,
+        errors,
+        panicked,
+        ..
+    } = Parser::new(&allocator, LIB_DTS, source_type).parse();
 
     if panicked || !errors.is_empty() {
         // lib.d.ts should always parse successfully
@@ -53,11 +57,16 @@ mod tests {
         let allocator = Allocator::default();
         let source_type = SourceType::d_ts();
 
-        let ParserReturn { errors, panicked, .. } =
-            Parser::new(&allocator, LIB_DTS, source_type).parse();
+        let ParserReturn {
+            errors, panicked, ..
+        } = Parser::new(&allocator, LIB_DTS, source_type).parse();
 
         assert!(!panicked, "lib.d.ts should not cause parser panic");
-        assert!(errors.is_empty(), "lib.d.ts should parse without errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "lib.d.ts should parse without errors: {:?}",
+            errors
+        );
     }
 
     #[test]
@@ -66,18 +75,42 @@ mod tests {
         load_lib_dts(&mut symbols);
 
         // Check that some key types are defined
-        assert!(symbols.lookup_type("String").is_some(), "String should be defined");
-        assert!(symbols.lookup_type("Array").is_some(), "Array should be defined");
-        assert!(symbols.lookup_type("Map").is_some(), "Map should be defined");
-        assert!(symbols.lookup_type("Promise").is_some(), "Promise should be defined");
-        assert!(symbols.lookup_type("Console").is_some(), "Console should be defined");
+        assert!(
+            symbols.lookup_type("String").is_some(),
+            "String should be defined"
+        );
+        assert!(
+            symbols.lookup_type("Array").is_some(),
+            "Array should be defined"
+        );
+        assert!(
+            symbols.lookup_type("Map").is_some(),
+            "Map should be defined"
+        );
+        assert!(
+            symbols.lookup_type("Promise").is_some(),
+            "Promise should be defined"
+        );
+        assert!(
+            symbols.lookup_type("Console").is_some(),
+            "Console should be defined"
+        );
 
         // Check primitive wrapper interfaces
-        assert!(symbols.lookup_type("Number").is_some(), "Number should be defined");
-        assert!(symbols.lookup_type("Boolean").is_some(), "Boolean should be defined");
+        assert!(
+            symbols.lookup_type("Number").is_some(),
+            "Number should be defined"
+        );
+        assert!(
+            symbols.lookup_type("Boolean").is_some(),
+            "Boolean should be defined"
+        );
 
         // Check that some global values are defined
-        assert!(symbols.lookup("console").is_some(), "console should be defined");
+        assert!(
+            symbols.lookup("console").is_some(),
+            "console should be defined"
+        );
         assert!(symbols.lookup("Math").is_some(), "Math should be defined");
         assert!(symbols.lookup("JSON").is_some(), "JSON should be defined");
     }

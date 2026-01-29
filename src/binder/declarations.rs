@@ -45,7 +45,10 @@ impl Binder {
             // For class expressions, also register instance type in type namespace
             if let Some(Expression::ClassExpression(class)) = &declarator.init {
                 let (instance_type, _, _) = resolution::build_class_type(class);
-                if let Err(err) = self.symbols.define_type(name, instance_type, SymbolKind::Class, span) {
+                if let Err(err) =
+                    self.symbols
+                        .define_type(name, instance_type, SymbolKind::Class, span)
+                {
                     self.errors.push(err.into());
                 }
             }
@@ -97,15 +100,24 @@ impl Binder {
     ///
     /// For a function like `function id<T>(x: T): T`, this registers `T` as a
     /// type in the current scope so that parameter types like `T` can be resolved.
-    fn bind_type_parameters(&mut self, type_params: &Option<oxc_allocator::Box<TSTypeParameterDeclaration>>) {
+    fn bind_type_parameters(
+        &mut self,
+        type_params: &Option<oxc_allocator::Box<TSTypeParameterDeclaration>>,
+    ) {
         if let Some(params) = type_params {
             for param in &params.params {
                 let name = param.name.name.as_str();
                 let span = param.name.span;
 
                 // Build the TypeParameter type
-                let constraint = param.constraint.as_ref().map(|c| resolution::resolve_ts_type(c));
-                let default = param.default.as_ref().map(|d| resolution::resolve_ts_type(d));
+                let constraint = param
+                    .constraint
+                    .as_ref()
+                    .map(|c| resolution::resolve_ts_type(c));
+                let default = param
+                    .default
+                    .as_ref()
+                    .map(|d| resolution::resolve_ts_type(d));
 
                 let ty = Type::TypeParameter {
                     name: name.to_string(),
@@ -114,7 +126,10 @@ impl Binder {
                 };
 
                 // Register in type namespace
-                if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, span) {
+                if let Err(err) = self
+                    .symbols
+                    .define_type(name, ty, SymbolKind::TypeAlias, span)
+                {
                     self.errors.push(err.into());
                 }
             }
@@ -181,7 +196,12 @@ impl Binder {
             };
 
             // Value namespace: ClassConstructor with constructor params and static members
-            let value_type = if let Some(Type::Function { params, type_params, .. }) = constructor_type {
+            let value_type = if let Some(Type::Function {
+                params,
+                type_params,
+                ..
+            }) = constructor_type
+            {
                 Type::ClassConstructor {
                     params,
                     type_params,
@@ -196,11 +216,17 @@ impl Binder {
                 }
             };
 
-            if let Err(err) = self.symbols.define(name, value_type, SymbolKind::Class, span) {
+            if let Err(err) = self
+                .symbols
+                .define(name, value_type, SymbolKind::Class, span)
+            {
                 self.errors.push(err.into());
             }
             // Type namespace: the instance type (Object with properties)
-            if let Err(err) = self.symbols.define_type(name, instance_type, SymbolKind::Class, span) {
+            if let Err(err) = self
+                .symbols
+                .define_type(name, instance_type, SymbolKind::Class, span)
+            {
                 self.errors.push(err.into());
             }
         }
@@ -249,7 +275,10 @@ impl Binder {
         let span = decl.id.span;
         let ty = self.build_interface_type(decl);
 
-        if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::Interface, span) {
+        if let Err(err) = self
+            .symbols
+            .define_type(name, ty, SymbolKind::Interface, span)
+        {
             self.errors.push(err.into());
         }
     }
@@ -302,7 +331,10 @@ impl Binder {
             }
         };
 
-        if let Err(err) = self.symbols.define_type(name, ty, SymbolKind::TypeAlias, span) {
+        if let Err(err) = self
+            .symbols
+            .define_type(name, ty, SymbolKind::TypeAlias, span)
+        {
             self.errors.push(err.into());
         }
     }

@@ -9,7 +9,7 @@
 //! The `NarrowingContext` tracks narrowed types within a scope. When entering
 //! conditional branches (if/else), types are refined based on the condition.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use oxc_ast::ast::*;
 
@@ -19,10 +19,18 @@ use crate::types::Type;
 ///
 /// When we enter a conditional branch (if/else), we can narrow types
 /// based on the condition expression.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct NarrowingContext {
-    /// Variable name -> narrowed type
-    narrowed: HashMap<String, Type>,
+    /// Variable name -> narrowed type. Uses FxHashMap for faster lookups.
+    narrowed: FxHashMap<String, Type>,
+}
+
+impl Default for NarrowingContext {
+    fn default() -> Self {
+        Self {
+            narrowed: FxHashMap::default(),
+        }
+    }
 }
 
 impl NarrowingContext {
@@ -86,9 +94,7 @@ pub struct ExtractedGuard {
 pub fn extract_type_guard(expr: &Expression) -> Option<ExtractedGuard> {
     match expr {
         // typeof x === "string" or typeof x === "number" etc.
-        Expression::BinaryExpression(binary) => {
-            extract_from_binary(binary)
-        }
+        Expression::BinaryExpression(binary) => extract_from_binary(binary),
 
         // Unary negation: !x or !(typeof x === "string")
         Expression::UnaryExpression(unary) => {
@@ -104,18 +110,14 @@ pub fn extract_type_guard(expr: &Expression) -> Option<ExtractedGuard> {
         }
 
         // Bare identifier: if (x) - truthiness check
-        Expression::Identifier(ident) => {
-            Some(ExtractedGuard {
-                variable: ident.name.to_string(),
-                guard: TypeGuard::Truthy,
-                negated: false,
-            })
-        }
+        Expression::Identifier(ident) => Some(ExtractedGuard {
+            variable: ident.name.to_string(),
+            guard: TypeGuard::Truthy,
+            negated: false,
+        }),
 
         // Parenthesized expression
-        Expression::ParenthesizedExpression(paren) => {
-            extract_type_guard(&paren.expression)
-        }
+        Expression::ParenthesizedExpression(paren) => extract_type_guard(&paren.expression),
 
         _ => None,
     }
@@ -153,7 +155,10 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
 }
 
 /// Extract guard from equality/inequality expressions.
-fn extract_equality_guard(binary: &BinaryExpression, is_inequality: bool) -> Option<ExtractedGuard> {
+fn extract_equality_guard(
+    binary: &BinaryExpression,
+    is_inequality: bool,
+) -> Option<ExtractedGuard> {
     // typeof x === "string"
     if let Some(guard) = extract_typeof_guard(&binary.left, &binary.right, is_inequality) {
         return Some(guard);
@@ -194,7 +199,11 @@ fn extract_equality_guard(binary: &BinaryExpression, is_inequality: bool) -> Opt
 }
 
 /// Extract typeof guard: typeof x === "string"
-fn extract_typeof_guard(left: &Expression, right: &Expression, negated: bool) -> Option<ExtractedGuard> {
+fn extract_typeof_guard(
+    left: &Expression,
+    right: &Expression,
+    negated: bool,
+) -> Option<ExtractedGuard> {
     if let Expression::UnaryExpression(unary) = left {
         if matches!(unary.operator, UnaryOperator::Typeof) {
             if let Expression::Identifier(ident) = &unary.argument {
@@ -212,7 +221,11 @@ fn extract_typeof_guard(left: &Expression, right: &Expression, negated: bool) ->
 }
 
 /// Extract null guard: x === null or x !== null
-fn extract_null_guard(left: &Expression, right: &Expression, is_inequality: bool) -> Option<ExtractedGuard> {
+fn extract_null_guard(
+    left: &Expression,
+    right: &Expression,
+    is_inequality: bool,
+) -> Option<ExtractedGuard> {
     if let Expression::Identifier(ident) = left {
         if let Expression::NullLiteral(_) = right {
             return Some(ExtractedGuard {
@@ -228,7 +241,11 @@ fn extract_null_guard(left: &Expression, right: &Expression, is_inequality: bool
 }
 
 /// Extract undefined guard: x === undefined or x !== undefined
-fn extract_undefined_guard(left: &Expression, right: &Expression, is_inequality: bool) -> Option<ExtractedGuard> {
+fn extract_undefined_guard(
+    left: &Expression,
+    right: &Expression,
+    is_inequality: bool,
+) -> Option<ExtractedGuard> {
     if let Expression::Identifier(ident) = left {
         if let Expression::Identifier(right_ident) = right {
             if right_ident.name == "undefined" {
@@ -249,7 +266,11 @@ fn extract_undefined_guard(left: &Expression, right: &Expression, is_inequality:
 ///
 /// Used for discriminated union narrowing where a property with a literal type
 /// identifies which union member we have.
-fn extract_discriminant_guard(left: &Expression, right: &Expression, is_inequality: bool) -> Option<ExtractedGuard> {
+fn extract_discriminant_guard(
+    left: &Expression,
+    right: &Expression,
+    is_inequality: bool,
+) -> Option<ExtractedGuard> {
     // Left must be a member expression: x.kind
     if let Expression::StaticMemberExpression(member) = left {
         // Get the object variable name
@@ -279,7 +300,12 @@ pub fn apply_guard(original: &Type, guard: &TypeGuard, negated: bool) -> Type {
 /// Apply a type guard to narrow a type, with ability to resolve TypeRefs.
 ///
 /// The resolver function takes a type name and returns the resolved type if available.
-pub fn apply_guard_with_resolver<F>(original: &Type, guard: &TypeGuard, negated: bool, resolver: F) -> Type
+pub fn apply_guard_with_resolver<F>(
+    original: &Type,
+    guard: &TypeGuard,
+    negated: bool,
+    resolver: F,
+) -> Type
 where
     F: Fn(&str) -> Option<Type> + Copy,
 {
@@ -313,35 +339,18 @@ where
                     original.clone()
                 }
                 "function" => {
-                    // Keep function types
-                    if let Type::Union(types) = original {
-                        let filtered: Vec<Type> = types
-                            .iter()
-                            .filter(|t| matches!(t, Type::Function { .. }))
-                            .cloned()
-                            .collect();
-                        if filtered.len() == 1 {
-                            filtered.into_iter().next().expect("checked len == 1")
-                        } else if !filtered.is_empty() {
-                            Type::Union(filtered)
-                        } else {
-                            original.clone()
-                        }
-                    } else {
-                        original.clone()
-                    }
+                    // Keep function types, fallback to original if no match
+                    filter_union(original, |t| matches!(t, Type::Function { .. }), original)
                 }
                 _ => original.clone(),
             }
         }
         TypeGuard::NotNull => remove_from_union(original, &Type::Null),
         TypeGuard::NotUndefined => remove_from_union(original, &Type::Undefined),
-        TypeGuard::Instanceof(class_name) => {
-            Type::TypeRef {
-                name: class_name.clone(),
-                type_args: vec![],
-            }
-        }
+        TypeGuard::Instanceof(class_name) => Type::TypeRef {
+            name: class_name.clone(),
+            type_args: vec![],
+        },
         TypeGuard::Truthy => {
             // Remove null, undefined from union
             let without_null = remove_from_union(original, &Type::Null);
@@ -452,11 +461,7 @@ pub fn remove_from_union(ty: &Type, to_remove: &Type) -> Type {
                 .cloned()
                 .collect();
 
-            match filtered.len() {
-                0 => Type::Never,
-                1 => filtered.into_iter().next().expect("checked len == 1"),
-                _ => Type::Union(filtered),
-            }
+            simplify_filtered_union(filtered)
         }
         _ => {
             if types_match(ty, to_remove) {
@@ -465,6 +470,33 @@ pub fn remove_from_union(ty: &Type, to_remove: &Type) -> Type {
                 ty.clone()
             }
         }
+    }
+}
+
+/// Filter union to members matching predicate, returning fallback if no matches.
+fn filter_union<F>(ty: &Type, pred: F, fallback: &Type) -> Type
+where
+    F: Fn(&Type) -> bool,
+{
+    match ty {
+        Type::Union(types) => {
+            let filtered: Vec<Type> = types.iter().filter(|t| pred(t)).cloned().collect();
+            if filtered.is_empty() {
+                fallback.clone()
+            } else {
+                simplify_filtered_union(filtered)
+            }
+        }
+        _ => fallback.clone(),
+    }
+}
+
+/// Simplify filtered union: empty -> never, single -> unwrap, else union.
+fn simplify_filtered_union(types: Vec<Type>) -> Type {
+    match types.len() {
+        0 => Type::Never,
+        1 => types.into_iter().next().expect("checked len == 1"),
+        _ => Type::Union(types),
     }
 }
 
@@ -506,21 +538,21 @@ where
         Type::Union(types) => {
             let matching: Vec<Type> = types
                 .iter()
-                .filter(|t| has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver))
+                .filter(|t| {
+                    has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver)
+                })
                 .cloned()
                 .collect();
 
-            match matching.len() {
-                0 => Type::Never,
-                1 => matching.into_iter().next().expect("checked len == 1"),
-                _ => Type::Union(matching),
-            }
+            simplify_filtered_union(matching)
         }
         Type::TypeRef { name, .. } => {
             // If original is a TypeRef to a union, resolve and narrow
             if let Some(resolved) = resolver(name) {
                 if matches!(resolved, Type::Union(_)) {
-                    return narrow_by_discriminant_with_resolver(&resolved, prop_name, prop_value, resolver);
+                    return narrow_by_discriminant_with_resolver(
+                        &resolved, prop_name, prop_value, resolver,
+                    );
                 }
             }
             // For non-union types, check if it matches
@@ -564,21 +596,21 @@ where
         Type::Union(types) => {
             let remaining: Vec<Type> = types
                 .iter()
-                .filter(|t| !has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver))
+                .filter(|t| {
+                    !has_discriminant_property_with_resolver(t, prop_name, prop_value, resolver)
+                })
                 .cloned()
                 .collect();
 
-            match remaining.len() {
-                0 => Type::Never,
-                1 => remaining.into_iter().next().expect("checked len == 1"),
-                _ => Type::Union(remaining),
-            }
+            simplify_filtered_union(remaining)
         }
         Type::TypeRef { name, .. } => {
             // If original is a TypeRef to a union, resolve and exclude
             if let Some(resolved) = resolver(name) {
                 if matches!(resolved, Type::Union(_)) {
-                    return exclude_by_discriminant_with_resolver(&resolved, prop_name, prop_value, resolver);
+                    return exclude_by_discriminant_with_resolver(
+                        &resolved, prop_name, prop_value, resolver,
+                    );
                 }
             }
             // For non-union types, check if it matches
@@ -619,15 +651,18 @@ where
     F: Fn(&str) -> Option<Type>,
 {
     match ty {
-        Type::Object { properties, .. } => {
-            properties.iter().any(|p| {
-                p.name == prop_name && matches!(&p.ty, Type::StringLiteral(v) if v == expected_value)
-            })
-        }
+        Type::Object { properties, .. } => properties.iter().any(|p| {
+            p.name == prop_name && matches!(&p.ty, Type::StringLiteral(v) if v == expected_value)
+        }),
         Type::TypeRef { name, .. } => {
             // Try to resolve the type reference
             if let Some(resolved) = resolver(name) {
-                has_discriminant_property_with_resolver(&resolved, prop_name, expected_value, resolver)
+                has_discriminant_property_with_resolver(
+                    &resolved,
+                    prop_name,
+                    expected_value,
+                    resolver,
+                )
             } else {
                 // If we can't resolve, be conservative and return false
                 false

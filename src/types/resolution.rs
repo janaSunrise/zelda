@@ -97,12 +97,10 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
         }
 
         // Indexed access types: T[K]
-        TSType::TSIndexedAccessType(access) => {
-            Type::IndexedAccess {
-                object_type: Box::new(resolve_ts_type(&access.object_type)),
-                index_type: Box::new(resolve_ts_type(&access.index_type)),
-            }
-        }
+        TSType::TSIndexedAccessType(access) => Type::IndexedAccess {
+            object_type: Box::new(resolve_ts_type(&access.object_type)),
+            index_type: Box::new(resolve_ts_type(&access.index_type)),
+        },
 
         // Mapped types: { [K in keyof T]: T[K] }
         TSType::TSMappedType(mapped) => {
@@ -122,12 +120,18 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
             // Handle modifiers
             // readonly_modifier: +readonly, -readonly, or none
             let readonly_modifier = mapped.readonly.map(|op| {
-                matches!(op, TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus)
+                matches!(
+                    op,
+                    TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus
+                )
             });
 
             // optional_modifier: +?, -?, or none
             let optional_modifier = mapped.optional.map(|op| {
-                matches!(op, TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus)
+                matches!(
+                    op,
+                    TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus
+                )
             });
 
             Type::MappedType {
@@ -144,14 +148,12 @@ pub fn resolve_ts_type(ts_type: &TSType) -> Type {
         TSType::TSTypePredicate(_) => Type::Boolean,
 
         // Conditional types: T extends U ? X : Y
-        TSType::TSConditionalType(cond) => {
-            Type::ConditionalType {
-                check_type: Box::new(resolve_ts_type(&cond.check_type)),
-                extends_type: Box::new(resolve_ts_type(&cond.extends_type)),
-                true_type: Box::new(resolve_ts_type(&cond.true_type)),
-                false_type: Box::new(resolve_ts_type(&cond.false_type)),
-            }
-        }
+        TSType::TSConditionalType(cond) => Type::ConditionalType {
+            check_type: Box::new(resolve_ts_type(&cond.check_type)),
+            extends_type: Box::new(resolve_ts_type(&cond.extends_type)),
+            true_type: Box::new(resolve_ts_type(&cond.true_type)),
+            false_type: Box::new(resolve_ts_type(&cond.false_type)),
+        },
 
         // Infer types: infer R (used in conditional type extends clauses)
         TSType::TSInferType(infer) => {
@@ -402,7 +404,11 @@ pub fn build_function_type(func: &Function) -> Type {
                 type_annotation,
             };
 
-            let ret = if pred.asserts { Type::Void } else { Type::Boolean };
+            let ret = if pred.asserts {
+                Type::Void
+            } else {
+                Type::Boolean
+            };
             (ret, Some(predicate))
         } else {
             (resolve_ts_type(&ann.type_annotation), None)
@@ -671,7 +677,7 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                     constructor_type = Some(Type::Function {
                         params,
                         return_type: Box::new(Type::Void), // Constructor's "return" is the instance
-                        type_params: type_params.clone(), // Use class's type parameters
+                        type_params: type_params.clone(),  // Use class's type parameters
                         type_predicate: None,
                     });
                     continue;
@@ -755,7 +761,10 @@ mod tests {
 
     #[test]
     fn test_widen_string_literal() {
-        assert_eq!(widen_type(Type::StringLiteral("hello".into())), Type::String);
+        assert_eq!(
+            widen_type(Type::StringLiteral("hello".into())),
+            Type::String
+        );
     }
 
     #[test]
@@ -780,7 +789,10 @@ mod tests {
             Type::StringLiteral("a".into()),
             Type::NumberLiteral(1.0),
         ]);
-        assert_eq!(widen_type(tuple), Type::Tuple(vec![Type::String, Type::Number]));
+        assert_eq!(
+            widen_type(tuple),
+            Type::Tuple(vec![Type::String, Type::Number])
+        );
     }
 
     #[test]
@@ -789,7 +801,10 @@ mod tests {
             Type::StringLiteral("a".into()),
             Type::NumberLiteral(1.0),
         ]);
-        assert_eq!(widen_type(union), Type::Union(vec![Type::String, Type::Number]));
+        assert_eq!(
+            widen_type(union),
+            Type::Union(vec![Type::String, Type::Number])
+        );
     }
 
     #[test]

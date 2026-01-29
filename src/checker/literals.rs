@@ -133,7 +133,8 @@ impl<'a> Checker<'a> {
                         let value_type = self.infer_expression(&p.value);
                         if !self.is_assignable(&value_type, &expected_prop.ty) {
                             // Check if the error is due to missing properties
-                            let missing = self.find_missing_properties(&value_type, &expected_prop.ty);
+                            let missing =
+                                self.find_missing_properties(&value_type, &expected_prop.ty);
                             if missing.len() > 1 {
                                 // TS2739 for multiple missing properties
                                 self.errors.push(TypeError::missing_properties(
@@ -220,11 +221,8 @@ impl<'a> Checker<'a> {
                             }
                         } else {
                             // No index signature - excess property error
-                            self.errors.push(TypeError::excess_property(
-                                &name,
-                                expected,
-                                p.span,
-                            ));
+                            self.errors
+                                .push(TypeError::excess_property(&name, expected, p.span));
                         }
                     }
                 }

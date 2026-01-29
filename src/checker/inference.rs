@@ -38,9 +38,7 @@ impl<'a> Checker<'a> {
             Expression::ObjectExpression(obj) => self.infer_object_literal(obj),
             Expression::ArrowFunctionExpression(arrow) => self.infer_arrow_function(arrow),
             Expression::FunctionExpression(func) => self.infer_function_expression(func),
-            Expression::CallExpression(call) => {
-                self.infer_call_expression(call)
-            }
+            Expression::CallExpression(call) => self.infer_call_expression(call),
 
             // Member access
             Expression::StaticMemberExpression(member) => {
@@ -87,7 +85,12 @@ impl<'a> Checker<'a> {
                     let type_args = new_expr
                         .type_arguments
                         .as_ref()
-                        .map(|args| args.params.iter().map(|t| self.resolve_ts_type(t)).collect())
+                        .map(|args| {
+                            args.params
+                                .iter()
+                                .map(|t| self.resolve_ts_type(t))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     Type::TypeRef {
                         name: ident.name.to_string(),
@@ -411,7 +414,10 @@ impl<'a> Checker<'a> {
         }
 
         // Object with index signature
-        if let Type::Object { index_signature, .. } = &resolved_type {
+        if let Type::Object {
+            index_signature, ..
+        } = &resolved_type
+        {
             if let Some(idx_sig) = index_signature {
                 // Check if index type is compatible with index signature key type
                 let key_matches = match (&index_type, &*idx_sig.key_type) {
@@ -457,7 +463,11 @@ impl<'a> Checker<'a> {
         };
 
         // For TypeParameter with a constraint, use the constraint for property lookup
-        let resolved_type = if let Type::TypeParameter { constraint: Some(constraint), .. } = &resolved_type {
+        let resolved_type = if let Type::TypeParameter {
+            constraint: Some(constraint),
+            ..
+        } = &resolved_type
+        {
             (**constraint).clone()
         } else {
             resolved_type
@@ -605,7 +615,13 @@ impl<'a> Checker<'a> {
     fn infer_call_expression(&self, call: &CallExpression) -> Type {
         let callee_type = self.infer_expression(&call.callee);
 
-        if let Type::Function { params, return_type, type_params, .. } = callee_type {
+        if let Type::Function {
+            params,
+            return_type,
+            type_params,
+            ..
+        } = callee_type
+        {
             // If no type parameters, just return the return type
             if type_params.is_empty() {
                 return *return_type;

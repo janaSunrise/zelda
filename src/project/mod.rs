@@ -6,7 +6,8 @@
 //! - Coordinating parsing, binding, and checking across files
 //! - Caching parsed modules
 
-use std::collections::HashMap;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,7 +28,8 @@ use crate::types::Type;
 pub struct ModuleInfo {
     pub path: PathBuf,
     pub source: Arc<String>,
-    pub exports: HashMap<String, Type>,
+    /// Exported symbols. Uses FxHashMap for faster lookups.
+    pub exports: FxHashMap<String, Type>,
     pub default_export: Option<Type>,
     pub is_declaration: bool,
 }
@@ -64,7 +66,8 @@ where
 /// Coordinates multi-file type checking with module resolution and caching.
 pub struct Project {
     resolver: ModuleResolver,
-    modules: HashMap<PathBuf, ModuleInfo>,
+    /// Cached module information. Uses FxHashMap for faster lookups.
+    modules: FxHashMap<PathBuf, ModuleInfo>,
     processing: Vec<PathBuf>, // For cycle detection
     /// Pre-loaded lib.d.ts symbols (cloned for each file).
     lib_symbols: SymbolTable,
@@ -84,7 +87,7 @@ impl Project {
 
         Self {
             resolver: ModuleResolver::new(ResolverConfig::new()),
-            modules: HashMap::new(),
+            modules: FxHashMap::default(),
             processing: Vec::new(),
             lib_symbols,
         }
@@ -114,7 +117,7 @@ impl Project {
 
         Self {
             resolver: ModuleResolver::new(config),
-            modules: HashMap::new(),
+            modules: FxHashMap::default(),
             processing: Vec::new(),
             lib_symbols,
         }
@@ -122,10 +125,12 @@ impl Project {
 
     /// Check a single file and all its dependencies.
     pub fn check_file(&mut self, path: &Path) -> Result<Vec<ProjectError>, ProjectError> {
-        let path = path.canonicalize().map_err(|e| ProjectError::FileReadError {
-            path: path.to_path_buf(),
-            error: e.to_string(),
-        })?;
+        let path = path
+            .canonicalize()
+            .map_err(|e| ProjectError::FileReadError {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            })?;
 
         let mut errors = Vec::new();
 
@@ -135,8 +140,31 @@ impl Project {
         Ok(errors)
     }
 
+    /// Pre-read multiple files in parallel for faster I/O.
+    ///
+    /// This reads file contents in parallel using Rayon, returning a map of
+    /// path -> source content. Use this before `check_file` when processing
+    /// many files to reduce I/O latency.
+    ///
+    /// Files that fail to read are silently skipped (errors will be reported
+    /// when `check_file` is called on them).
+    pub fn preload_files(&self, paths: &[PathBuf]) -> FxHashMap<PathBuf, Arc<String>> {
+        paths
+            .par_iter()
+            .filter_map(|path| {
+                let canonical = path.canonicalize().ok()?;
+                let source = std::fs::read_to_string(&canonical).ok()?;
+                Some((canonical, Arc::new(source)))
+            })
+            .collect()
+    }
+
     /// Process a file, resolving imports and checking types.
-    fn process_file(&mut self, path: &Path, errors: &mut Vec<ProjectError>) -> Result<(), ProjectError> {
+    fn process_file(
+        &mut self,
+        path: &Path,
+        errors: &mut Vec<ProjectError>,
+    ) -> Result<(), ProjectError> {
         // Check if already processed
         if self.modules.contains_key(path) {
             return Ok(());
@@ -166,8 +194,12 @@ impl Project {
             SourceType::ts()
         };
 
-        let ParserReturn { program, errors: parse_errors, panicked, .. } =
-            Parser::new(&allocator, &source, source_type).parse();
+        let ParserReturn {
+            program,
+            errors: parse_errors,
+            panicked,
+            ..
+        } = Parser::new(&allocator, &source, source_type).parse();
 
         if panicked || !parse_errors.is_empty() {
             // TODO: Better parse error handling
@@ -202,7 +234,7 @@ impl Project {
         }
 
         // Collect exports
-        let mut exports = HashMap::new();
+        let mut exports = FxHashMap::default();
         let mut default_export = None;
 
         for stmt in &program.body {
@@ -225,7 +257,8 @@ impl Project {
                 }
                 oxc_ast::ast::Statement::ExportDefaultDeclaration(export) => {
                     // Handle `export default ...`
-                    default_export = Some(self.infer_default_export_type(&export.declaration, &binder.symbols));
+                    default_export =
+                        Some(self.infer_default_export_type(&export.declaration, &binder.symbols));
                 }
                 // Handle top-level declarations that might be implicitly exported in .d.ts files
                 _ => {}
@@ -353,7 +386,7 @@ impl Project {
         &self,
         decl: &oxc_ast::ast::Declaration,
         symbols: &SymbolTable,
-        exports: &mut HashMap<String, Type>,
+        exports: &mut FxHashMap<String, Type>,
     ) {
         match decl {
             oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
@@ -483,11 +516,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        create_test_file(dir, "utils.ts", "export const add = (a: number, b: number) => a + b;");
-        let main = create_test_file(dir, "main.ts", r#"
+        create_test_file(
+            dir,
+            "utils.ts",
+            "export const add = (a: number, b: number) => a + b;",
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import { add } from "./utils";
             const result = add(1, 2);
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -500,9 +541,13 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        let main = create_test_file(dir, "main.ts", r#"
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import { foo } from "./nonexistent";
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -516,16 +561,24 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        create_test_file(dir, "types.ts", r#"
+        create_test_file(
+            dir,
+            "types.ts",
+            r#"
             export interface User {
                 name: string;
                 age: number;
             }
-        "#);
-        let main = create_test_file(dir, "main.ts", r#"
+        "#,
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import { User } from "./types";
             const user: User = { name: "Alice", age: 30 };
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -538,14 +591,22 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        create_test_file(dir, "config.ts", r#"
+        create_test_file(
+            dir,
+            "config.ts",
+            r#"
             const config = { debug: true };
             export default config;
-        "#);
-        let main = create_test_file(dir, "main.ts", r#"
+        "#,
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import config from "./config";
             const debug = config.debug;
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -560,14 +621,22 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = temp.path();
 
-        create_test_file(dir, "math.ts", r#"
+        create_test_file(
+            dir,
+            "math.ts",
+            r#"
             export const PI = 3.14159;
             export const add = (a: number, b: number) => a + b;
-        "#);
-        let main = create_test_file(dir, "main.ts", r#"
+        "#,
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import * as math from "./math";
             const circle = math.PI * 2;
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -581,14 +650,22 @@ mod tests {
         let dir = temp.path();
 
         create_test_file(dir, "a.ts", "export const A = 1;");
-        create_test_file(dir, "b.ts", r#"
+        create_test_file(
+            dir,
+            "b.ts",
+            r#"
             import { A } from "./a";
             export const B = A + 1;
-        "#);
-        let main = create_test_file(dir, "main.ts", r#"
+        "#,
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import { B } from "./b";
             const c = B + 1;
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
@@ -602,10 +679,14 @@ mod tests {
         let dir = temp.path();
 
         create_test_file(dir, "utils/index.ts", "export const helper = () => {};");
-        let main = create_test_file(dir, "main.ts", r#"
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            r#"
             import { helper } from "./utils";
             helper();
-        "#);
+        "#,
+        );
 
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();

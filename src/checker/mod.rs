@@ -15,7 +15,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use flow::{apply_guard_with_resolver, extract_type_guard, NarrowingContext};
+use flow::{NarrowingContext, apply_guard_with_resolver, extract_type_guard};
 
 use oxc_ast::ast::*;
 use oxc_span::Span;
@@ -25,15 +25,16 @@ use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
 use crate::types::Type;
 
-// ============================================
-// String Distance Utilities for Suggestions
-// ============================================
+/// Maximum Levenshtein distance for "Did you mean?" suggestions.
+const MAX_SUGGESTION_DISTANCE: usize = 3;
 
-/// Compute the Levenshtein (edit) distance between two strings.
-///
-/// The Levenshtein distance is the minimum number of single-character edits
-/// (insertions, deletions, or substitutions) required to change one string
-/// into the other.
+/// Threshold for "and X more" format (TSC uses 5+).
+const MANY_MISSING_PROPS_THRESHOLD: usize = 5;
+
+/// Properties to show before "and X more".
+const SHOWN_MISSING_PROPS_COUNT: usize = 4;
+
+/// Compute Levenshtein (edit) distance between two strings.
 fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_len = a.chars().count();
     let b_len = b.chars().count();
@@ -66,29 +67,15 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
-/// Find the most similar name from a list of candidates.
-///
-/// Returns `Some(best_match)` if a candidate is found with a Levenshtein
-/// distance of 3 or less. The threshold of 3 was chosen to balance between
-/// finding useful suggestions and avoiding false positives.
-///
-/// TypeScript uses a more complex heuristic that considers:
-/// - Maximum distance relative to string length
-/// - Case-insensitive matching as a fallback
-/// We use a simpler threshold-based approach for now.
-fn find_similar_name<'a>(
-    name: &str,
-    candidates: impl Iterator<Item = &'a str>,
-) -> Option<&'a str> {
-    // Max allowed distance (TSC uses around 3 for short names)
-    let max_distance = 3;
-
+/// Find most similar name from candidates for "Did you mean?" suggestions.
+fn find_similar_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     candidates
-        .filter(|c| {
+        .filter_map(|c| {
             let dist = levenshtein_distance(name, c);
-            dist > 0 && dist <= max_distance
+            (dist > 0 && dist <= MAX_SUGGESTION_DISTANCE).then_some((c, dist))
         })
-        .min_by_key(|c| levenshtein_distance(name, c))
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(c, _)| c)
 }
 
 /// Severity level of a diagnostic.
@@ -274,13 +261,18 @@ impl TypeError {
         )
     }
 
-    pub fn missing_properties(missing_props: &[String], source: &Type, target: &Type, span: Span) -> Self {
+    pub fn missing_properties(
+        missing_props: &[String],
+        source: &Type,
+        target: &Type,
+        span: Span,
+    ) -> Self {
         // TSC uses TS2740 when there are 5+ missing properties (shows first 4 + "and X more")
         // TSC uses TS2739 when there are 2-4 missing properties (shows all)
-        if missing_props.len() >= 5 {
-            // TS2740: Show first 4 properties + "and X more"
-            let shown_props = missing_props[..4].join(", ");
-            let remaining = missing_props.len() - 4;
+        if missing_props.len() >= MANY_MISSING_PROPS_THRESHOLD {
+            // TS2740: Show first N properties + "and X more"
+            let shown_props = missing_props[..SHOWN_MISSING_PROPS_COUNT].join(", ");
+            let remaining = missing_props.len() - SHOWN_MISSING_PROPS_COUNT;
             Self::new(
                 errors::MANY_PROPERTIES_MISSING.format(&[
                     &source.to_string(),
@@ -295,7 +287,11 @@ impl TypeError {
             // TS2739: Type 'X' is missing the following properties from type 'Y': a, b, c
             let props_list = missing_props.join(", ");
             Self::new(
-                errors::MULTIPLE_PROPERTIES_MISSING.format(&[&source.to_string(), &target.to_string(), &props_list]),
+                errors::MULTIPLE_PROPERTIES_MISSING.format(&[
+                    &source.to_string(),
+                    &target.to_string(),
+                    &props_list,
+                ]),
                 span,
                 errors::MULTIPLE_PROPERTIES_MISSING.code,
             )
@@ -320,7 +316,8 @@ impl TypeError {
 
     pub fn constraint_violation(type_arg: &Type, constraint: &Type, span: Span) -> Self {
         Self::new(
-            errors::CONSTRAINT_NOT_SATISFIED.format(&[&type_arg.to_string(), &constraint.to_string()]),
+            errors::CONSTRAINT_NOT_SATISFIED
+                .format(&[&type_arg.to_string(), &constraint.to_string()]),
             span,
             errors::CONSTRAINT_NOT_SATISFIED.code,
         )
@@ -348,10 +345,10 @@ pub struct Checker<'a> {
     narrowing: NarrowingContext,
     /// Current class name for super call checking (Some when inside a class)
     current_class: Option<String>,
-    /// Variables that have been definitely assigned (initialized)
-    assigned_vars: std::collections::HashSet<String>,
-    /// Variables declared without initializer that need assignment checking
-    uninitialized_vars: std::collections::HashSet<String>,
+    /// Variables that have been definitely assigned (initialized). Uses FxHashSet for faster lookups.
+    assigned_vars: rustc_hash::FxHashSet<String>,
+    /// Variables declared without initializer that need assignment checking. Uses FxHashSet for faster lookups.
+    uninitialized_vars: rustc_hash::FxHashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -361,8 +358,8 @@ impl<'a> Checker<'a> {
             errors: Vec::new(),
             narrowing: NarrowingContext::new(),
             current_class: None,
-            assigned_vars: std::collections::HashSet::new(),
-            uninitialized_vars: std::collections::HashSet::new(),
+            assigned_vars: rustc_hash::FxHashSet::default(),
+            uninitialized_vars: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -402,10 +399,14 @@ impl<'a> Checker<'a> {
                 if let Some(extracted) = &guard {
                     if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
                         // Create resolver closure that can look up TypeRefs
-                        let resolver = |name: &str| {
-                            self.symbols.lookup_type(name).map(|s| s.ty.clone())
-                        };
-                        let narrowed = apply_guard_with_resolver(&original_type, &extracted.guard, extracted.negated, resolver);
+                        let resolver =
+                            |name: &str| self.symbols.lookup_type(name).map(|s| s.ty.clone());
+                        let narrowed = apply_guard_with_resolver(
+                            &original_type,
+                            &extracted.guard,
+                            extracted.negated,
+                            resolver,
+                        );
                         self.narrowing.narrow(extracted.variable.clone(), narrowed);
                     }
                 }
@@ -416,11 +417,16 @@ impl<'a> Checker<'a> {
                 if let Some(alt) = &if_stmt.alternate {
                     // Apply negated guard for else branch
                     if let Some(extracted) = &guard {
-                        if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
-                            let resolver = |name: &str| {
-                                self.symbols.lookup_type(name).map(|s| s.ty.clone())
-                            };
-                            let narrowed = apply_guard_with_resolver(&original_type, &extracted.guard, !extracted.negated, resolver);
+                        if let Some(original_type) = self.lookup_variable_type(&extracted.variable)
+                        {
+                            let resolver =
+                                |name: &str| self.symbols.lookup_type(name).map(|s| s.ty.clone());
+                            let narrowed = apply_guard_with_resolver(
+                                &original_type,
+                                &extracted.guard,
+                                !extracted.negated,
+                                resolver,
+                            );
                             self.narrowing.narrow(extracted.variable.clone(), narrowed);
                         }
                     }
@@ -510,7 +516,12 @@ impl<'a> Checker<'a> {
     fn apply_assertion_narrowing(&mut self, call: &CallExpression) {
         let callee_type = self.infer_expression(&call.callee);
 
-        if let Type::Function { type_predicate: Some(predicate), params, .. } = &callee_type {
+        if let Type::Function {
+            type_predicate: Some(predicate),
+            params,
+            ..
+        } = &callee_type
+        {
             if !predicate.asserts {
                 return;
             }
@@ -518,13 +529,16 @@ impl<'a> Checker<'a> {
             // Match the predicate's parameter name to find which argument gets narrowed.
             // For example, if the predicate says "asserts val is string" and val is the
             // first parameter, we narrow the first argument passed to the call.
-            let param_index = params.iter().position(|p| p.name == predicate.parameter_name);
+            let param_index = params
+                .iter()
+                .position(|p| p.name == predicate.parameter_name);
 
             if let Some(idx) = param_index {
                 if let Some(arg) = call.arguments.get(idx) {
                     if let Some(Expression::Identifier(ident)) = arg.as_expression() {
                         if let Some(narrowed_type) = &predicate.type_annotation {
-                            self.narrowing.narrow(ident.name.to_string(), (**narrowed_type).clone());
+                            self.narrowing
+                                .narrow(ident.name.to_string(), (**narrowed_type).clone());
                         }
                     }
                 }
@@ -645,12 +659,13 @@ impl<'a> Checker<'a> {
                 if !matches!(object_type, Type::Any | Type::Unknown) {
                     if !self.has_property(&object_type, prop_name) {
                         let available_props = self.get_available_properties(&object_type);
-                        self.errors.push(TypeError::property_not_found_with_suggestion(
-                            prop_name,
-                            &object_type,
-                            &available_props,
-                            member.span,
-                        ));
+                        self.errors
+                            .push(TypeError::property_not_found_with_suggestion(
+                                prop_name,
+                                &object_type,
+                                &available_props,
+                                member.span,
+                            ));
                     }
                 }
             }
@@ -704,7 +719,10 @@ impl<'a> Checker<'a> {
         if !self.has_property(&object_type, prop_name) {
             // Check if this might be a static member accessed on an instance (TS2576)
             // If the object is a TypeRef (class instance), check if the class has this as a static member
-            if let Type::TypeRef { name: class_name, .. } = &object_type {
+            if let Type::TypeRef {
+                name: class_name, ..
+            } = &object_type
+            {
                 // Look up the class constructor in the value namespace
                 if let Some(symbol) = self.symbols.lookup(class_name) {
                     if let Type::ClassConstructor { static_members, .. } = &symbol.ty {
@@ -724,12 +742,13 @@ impl<'a> Checker<'a> {
 
             // Collect available properties for "Did you mean?" suggestions
             let available_props = self.get_available_properties(&object_type);
-            self.errors.push(TypeError::property_not_found_with_suggestion(
-                prop_name,
-                &object_type,
-                &available_props,
-                member.span,
-            ));
+            self.errors
+                .push(TypeError::property_not_found_with_suggestion(
+                    prop_name,
+                    &object_type,
+                    &available_props,
+                    member.span,
+                ));
         }
     }
 
@@ -747,12 +766,13 @@ impl<'a> Checker<'a> {
         if let Type::StringLiteral(prop_name) = &index_type {
             if !self.has_property(&object_type, prop_name) {
                 let available_props = self.get_available_properties(&object_type);
-                self.errors.push(TypeError::property_not_found_with_suggestion(
-                    prop_name,
-                    &object_type,
-                    &available_props,
-                    member.span,
-                ));
+                self.errors
+                    .push(TypeError::property_not_found_with_suggestion(
+                        prop_name,
+                        &object_type,
+                        &available_props,
+                        member.span,
+                    ));
             }
         }
 
@@ -776,9 +796,15 @@ impl<'a> Checker<'a> {
         let ty = resolved.as_ref().unwrap_or(&apparent_type);
 
         // For TypeParameter with a constraint, use the constraint
-        let resolved_constraint = if let Type::TypeParameter { constraint: Some(constraint), .. } = ty {
-            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref() {
-                self.resolve_type_ref_with_args(name, type_args).unwrap_or_else(|| (**constraint).clone())
+        let resolved_constraint = if let Type::TypeParameter {
+            constraint: Some(constraint),
+            ..
+        } = ty
+        {
+            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref()
+            {
+                self.resolve_type_ref_with_args(name, type_args)
+                    .unwrap_or_else(|| (**constraint).clone())
             } else {
                 (**constraint).clone()
             };
@@ -789,7 +815,11 @@ impl<'a> Checker<'a> {
         let ty = resolved_constraint.as_ref().unwrap_or(ty);
 
         match ty {
-            Type::Object { properties, extends, .. } => {
+            Type::Object {
+                properties,
+                extends,
+                ..
+            } => {
                 let all_props = self.resolve_object_properties(properties, extends);
                 all_props.iter().map(|p| p.name.clone()).collect()
             }
@@ -798,12 +828,14 @@ impl<'a> Checker<'a> {
                 if types.is_empty() {
                     return vec![];
                 }
-                let first_props: std::collections::HashSet<String> =
-                    self.get_available_properties(&types[0]).into_iter().collect();
+                let first_props: rustc_hash::FxHashSet<String> = self
+                    .get_available_properties(&types[0])
+                    .into_iter()
+                    .collect();
                 types[1..]
                     .iter()
                     .fold(first_props, |acc, t| {
-                        let props: std::collections::HashSet<String> =
+                        let props: rustc_hash::FxHashSet<String> =
                             self.get_available_properties(t).into_iter().collect();
                         acc.intersection(&props).cloned().collect()
                     })
@@ -815,7 +847,7 @@ impl<'a> Checker<'a> {
                 types
                     .iter()
                     .flat_map(|t| self.get_available_properties(t))
-                    .collect::<std::collections::HashSet<_>>()
+                    .collect::<rustc_hash::FxHashSet<_>>()
                     .into_iter()
                     .collect()
             }
@@ -842,10 +874,16 @@ impl<'a> Checker<'a> {
         let ty = resolved.as_ref().unwrap_or(&apparent_type);
 
         // For TypeParameter with a constraint, use the constraint
-        let resolved_constraint = if let Type::TypeParameter { constraint: Some(constraint), .. } = ty {
+        let resolved_constraint = if let Type::TypeParameter {
+            constraint: Some(constraint),
+            ..
+        } = ty
+        {
             // If the constraint is a TypeRef, resolve it
-            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref() {
-                self.resolve_type_ref_with_args(name, type_args).unwrap_or_else(|| (**constraint).clone())
+            let resolved_constraint = if let Type::TypeRef { name, type_args } = constraint.as_ref()
+            {
+                self.resolve_type_ref_with_args(name, type_args)
+                    .unwrap_or_else(|| (**constraint).clone())
             } else {
                 (**constraint).clone()
             };
@@ -856,7 +894,12 @@ impl<'a> Checker<'a> {
         let ty = resolved_constraint.as_ref().unwrap_or(ty);
 
         match ty {
-            Type::Object { properties, index_signature, extends, .. } => {
+            Type::Object {
+                properties,
+                index_signature,
+                extends,
+                ..
+            } => {
                 let all_props = self.resolve_object_properties(properties, extends);
                 if all_props.iter().any(|p| p.name == prop_name) {
                     return true;

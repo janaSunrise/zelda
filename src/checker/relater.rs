@@ -1,5 +1,7 @@
 //! Type relation checking (assignability and compatibility).
 
+use rustc_hash::FxHashMap;
+
 use crate::types::{Property, Type};
 
 use super::Checker;
@@ -11,12 +13,24 @@ impl<'a> Checker<'a> {
 
     /// Resolve a TypeRef with type arguments, instantiating generic types.
     /// `Box<number>` where `Box = { value: T }` becomes `{ value: number }`.
-    pub(super) fn resolve_type_ref_with_args(&self, name: &str, type_args: &[Type]) -> Option<Type> {
+    pub(super) fn resolve_type_ref_with_args(
+        &self,
+        name: &str,
+        type_args: &[Type],
+    ) -> Option<Type> {
         // Intrinsic string types are built into the compiler, not defined in lib.d.ts
-        if matches!(name, "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize") {
+        if matches!(
+            name,
+            "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize"
+        ) {
             if let Some(arg) = type_args.first() {
-                let resolved_arg = if let Type::TypeRef { name: ref_name, type_args: ref_args } = arg {
-                    self.resolve_type_ref_with_args(ref_name, ref_args).unwrap_or_else(|| arg.clone())
+                let resolved_arg = if let Type::TypeRef {
+                    name: ref_name,
+                    type_args: ref_args,
+                } = arg
+                {
+                    self.resolve_type_ref_with_args(ref_name, ref_args)
+                        .unwrap_or_else(|| arg.clone())
                 } else {
                     arg.clone()
                 };
@@ -30,16 +44,30 @@ impl<'a> Checker<'a> {
 
         match &base_type {
             // Generic type alias: we abuse Function with empty params to store alias body in return_type
-            Type::Function { params, return_type, type_params, .. }
-                if params.is_empty() && !type_params.is_empty() =>
-            {
+            Type::Function {
+                params,
+                return_type,
+                type_params,
+                ..
+            } if params.is_empty() && !type_params.is_empty() => {
                 let subs = self.build_substitution_map(type_params, type_args);
                 if subs.is_empty() {
                     Some((**return_type).clone())
                 } else {
                     let substituted = self.substitute_type_params(return_type, &subs);
-                    if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = &substituted {
-                        Some(self.evaluate_conditional_type(check_type, extends_type, true_type, false_type))
+                    if let Type::ConditionalType {
+                        check_type,
+                        extends_type,
+                        true_type,
+                        false_type,
+                    } = &substituted
+                    {
+                        Some(self.evaluate_conditional_type(
+                            check_type,
+                            extends_type,
+                            true_type,
+                            false_type,
+                        ))
                     } else if let Type::TemplateLiteralType { texts, types } = &substituted {
                         Some(self.evaluate_template_literal_type(texts, types))
                     } else {
@@ -67,16 +95,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolve all properties of an object type, including inherited properties from extends.
-    /// Properties in derived interfaces override those in base interfaces.
+    /// Resolve all properties of an object type, including inherited properties.
+    /// Uses HashMap-based deduplication for O(n+m) complexity.
     pub(super) fn resolve_object_properties(
         &self,
         own_props: &[Property],
         extends: &[Type],
     ) -> Vec<Property> {
-        let mut all_props: Vec<Property> = Vec::new();
+        let mut props_map: FxHashMap<String, Property> = FxHashMap::default();
 
-        // Collect properties from base types first
         for base_type in extends {
             if let Type::TypeRef { name, .. } = base_type {
                 if let Some(resolved) = self.resolve_type_ref(name) {
@@ -88,25 +115,43 @@ impl<'a> Checker<'a> {
                     {
                         let base_props = self.resolve_object_properties(&properties, &base_extends);
                         for prop in base_props {
-                            if !all_props.iter().any(|p| p.name == prop.name) {
-                                all_props.push(prop);
-                            }
+                            props_map.entry(prop.name.clone()).or_insert(prop);
                         }
                     }
                 }
             }
         }
 
-        // Own properties override inherited ones
         for prop in own_props {
-            all_props.retain(|p| p.name != prop.name);
-            all_props.push(prop.clone());
+            props_map.insert(prop.name.clone(), prop.clone());
         }
 
-        all_props
+        props_map.into_values().collect()
     }
 
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
+        // FAST PATHS FIRST - check before ANY resolution to short-circuit common cases
+        // Pointer equality means identical types (interned or same allocation)
+        if std::ptr::eq(source, target) {
+            return true;
+        }
+        // Any is both a top type (accepts anything) and bottom-like (assignable to anything)
+        if matches!(source, Type::Any) || matches!(target, Type::Any) {
+            return true;
+        }
+        // Unknown is a top type - anything is assignable to it
+        if matches!(target, Type::Unknown) {
+            return true;
+        }
+        // Never is the bottom type - assignable to everything
+        if matches!(source, Type::Never) {
+            return true;
+        }
+        // Nothing is assignable TO never (except never itself, caught by ptr_eq above)
+        if matches!(target, Type::Never) {
+            return false;
+        }
+
         // Resolve KeyOf types to their union of string literals
         if let Type::KeyOf(inner) = source {
             let resolved = self.resolve_keyof(inner);
@@ -118,32 +163,80 @@ impl<'a> Checker<'a> {
         }
 
         // Resolve IndexedAccess types to their property types
-        if let Type::IndexedAccess { object_type, index_type } = source {
+        if let Type::IndexedAccess {
+            object_type,
+            index_type,
+        } = source
+        {
             let resolved = self.resolve_indexed_access(object_type, index_type);
             return self.is_assignable(&resolved, target);
         }
-        if let Type::IndexedAccess { object_type, index_type } = target {
+        if let Type::IndexedAccess {
+            object_type,
+            index_type,
+        } = target
+        {
             let resolved = self.resolve_indexed_access(object_type, index_type);
             return self.is_assignable(source, &resolved);
         }
 
         // Resolve MappedType to concrete object type
-        if let Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } = source {
-            let resolved = self.resolve_mapped_type(type_param, constraint, template, *readonly_modifier, *optional_modifier);
+        if let Type::MappedType {
+            type_param,
+            constraint,
+            template,
+            readonly_modifier,
+            optional_modifier,
+        } = source
+        {
+            let resolved = self.resolve_mapped_type(
+                type_param,
+                constraint,
+                template,
+                *readonly_modifier,
+                *optional_modifier,
+            );
             return self.is_assignable(&resolved, target);
         }
-        if let Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } = target {
-            let resolved = self.resolve_mapped_type(type_param, constraint, template, *readonly_modifier, *optional_modifier);
+        if let Type::MappedType {
+            type_param,
+            constraint,
+            template,
+            readonly_modifier,
+            optional_modifier,
+        } = target
+        {
+            let resolved = self.resolve_mapped_type(
+                type_param,
+                constraint,
+                template,
+                *readonly_modifier,
+                *optional_modifier,
+            );
             return self.is_assignable(source, &resolved);
         }
 
         // Resolve ConditionalType by evaluating it
-        if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = source {
-            let resolved = self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
+        if let Type::ConditionalType {
+            check_type,
+            extends_type,
+            true_type,
+            false_type,
+        } = source
+        {
+            let resolved =
+                self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
             return self.is_assignable(&resolved, target);
         }
-        if let Type::ConditionalType { check_type, extends_type, true_type, false_type } = target {
-            let resolved = self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
+        if let Type::ConditionalType {
+            check_type,
+            extends_type,
+            true_type,
+            false_type,
+        } = target
+        {
+            let resolved =
+                self.evaluate_conditional_type(check_type, extends_type, true_type, false_type);
             return self.is_assignable(source, &resolved);
         }
 
@@ -183,29 +276,9 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Same type
+        // Same type (structural equality - ptr equality handled in fast path above)
         if source == target {
             return true;
-        }
-
-        // Any accepts and provides anything
-        if matches!(source, Type::Any) || matches!(target, Type::Any) {
-            return true;
-        }
-
-        // Unknown accepts anything
-        if matches!(target, Type::Unknown) {
-            return true;
-        }
-
-        // Never is assignable to everything
-        if matches!(source, Type::Never) {
-            return true;
-        }
-
-        // Nothing is assignable to never (except never itself, handled above)
-        if matches!(target, Type::Never) {
-            return false;
         }
 
         // In strict mode, null/undefined are only assignable to void, any, unknown, null, undefined
@@ -236,30 +309,22 @@ impl<'a> Checker<'a> {
         // Union source: all branches must be assignable to target
         // Check this BEFORE union target to handle Union to Union correctly
         if let Type::Union(source_types) = source {
-            return source_types
-                .iter()
-                .all(|s| self.is_assignable(s, target));
+            return source_types.iter().all(|s| self.is_assignable(s, target));
         }
 
         // Union target: source must be assignable to at least one branch
         if let Type::Union(target_types) = target {
-            return target_types
-                .iter()
-                .any(|t| self.is_assignable(source, t));
+            return target_types.iter().any(|t| self.is_assignable(source, t));
         }
 
         // Intersection source: if any member is assignable, the whole is
         if let Type::Intersection(source_types) = source {
-            return source_types
-                .iter()
-                .any(|s| self.is_assignable(s, target));
+            return source_types.iter().any(|s| self.is_assignable(s, target));
         }
 
         // Intersection target: must be assignable to all members
         if let Type::Intersection(target_types) = target {
-            return target_types
-                .iter()
-                .all(|t| self.is_assignable(source, t));
+            return target_types.iter().all(|t| self.is_assignable(source, t));
         }
 
         // Array types - covariant
@@ -301,8 +366,10 @@ impl<'a> Checker<'a> {
             },
         ) = (source, target)
         {
-            let resolved_source_props = self.resolve_object_properties(source_props, source_extends);
-            let resolved_target_props = self.resolve_object_properties(target_props, target_extends);
+            let resolved_source_props =
+                self.resolve_object_properties(source_props, source_extends);
+            let resolved_target_props =
+                self.resolve_object_properties(target_props, target_extends);
             return self.is_object_assignable(
                 &resolved_source_props,
                 source_idx.as_ref(),
@@ -313,13 +380,17 @@ impl<'a> Checker<'a> {
 
         // Primitive types with built-in properties (for constraint checking)
         // Use apparent type to look up properties from lib.d.ts interfaces
-        if let Type::Object { properties: target_props, .. } = target {
+        if let Type::Object {
+            properties: target_props,
+            ..
+        } = target
+        {
             let apparent_source = self.get_apparent_type(source);
             if matches!(apparent_source, Type::TypeRef { .. }) {
                 // Check if all required target properties exist on the apparent type
-                let source_has_props = target_props.iter().all(|p| {
-                    self.has_property(source, &p.name)
-                });
+                let source_has_props = target_props
+                    .iter()
+                    .all(|p| self.has_property(source, &p.name));
                 if source_has_props {
                     return true;
                 }
@@ -352,14 +423,6 @@ impl<'a> Checker<'a> {
     }
 
     /// Check structural compatibility of object types.
-    ///
-    /// Rules:
-    /// 1. Target's required properties must exist in source with compatible types
-    ///    (or be satisfied by source's index signature)
-    /// 2. If target has an index signature, all source properties must be compatible
-    ///    with the index signature's value type
-    /// 3. Index signature compatibility: source index signature value type must be
-    ///    assignable to target index signature value type
     fn is_object_assignable(
         &self,
         source_props: &[crate::types::Property],
@@ -367,15 +430,15 @@ impl<'a> Checker<'a> {
         target_props: &[crate::types::Property],
         target_idx: Option<&crate::types::IndexSignature>,
     ) -> bool {
-        // Check that all required target properties are satisfied
+        let source_props_map: FxHashMap<&str, &crate::types::Property> =
+            source_props.iter().map(|p| (p.name.as_str(), p)).collect();
+
         for target_prop in target_props {
             if target_prop.optional {
                 continue;
             }
 
-            // First, look for an explicit source property
-            let source_prop = source_props.iter().find(|p| p.name == target_prop.name);
-            match source_prop {
+            match source_props_map.get(target_prop.name.as_str()) {
                 Some(sp) => {
                     if !self.is_assignable(&sp.ty, &target_prop.ty) {
                         return false;
@@ -449,21 +512,25 @@ impl<'a> Checker<'a> {
 
         // Get properties from both types
         let source_props = match &resolved_source {
-            Type::Object { properties, extends, .. } => {
-                self.resolve_object_properties(properties, extends)
-            }
+            Type::Object {
+                properties,
+                extends,
+                ..
+            } => self.resolve_object_properties(properties, extends),
             _ => vec![],
         };
 
         let target_props = match &resolved_target {
-            Type::Object { properties, extends, .. } => {
-                self.resolve_object_properties(properties, extends)
-            }
+            Type::Object {
+                properties,
+                extends,
+                ..
+            } => self.resolve_object_properties(properties, extends),
             _ => vec![],
         };
 
         // Find required target properties missing from source
-        let source_prop_names: std::collections::HashSet<&str> =
+        let source_prop_names: rustc_hash::FxHashSet<&str> =
             source_props.iter().map(|p| p.name.as_str()).collect();
 
         target_props

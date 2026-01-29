@@ -13,7 +13,7 @@
 //! since interned types are immutable. Only the interning operation needs
 //! synchronization (or can be done in a single-threaded binding phase).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::{IndexSignature, Param, Property, Type, TypeParam, TypePredicate};
 
@@ -89,7 +89,9 @@ pub struct TypeArena {
     /// Storage for all interned types.
     types: Vec<Type>,
     /// Maps types to their IDs for deduplication.
-    intern_cache: HashMap<Type, TypeId>,
+    /// Uses FxHashMap for faster hashing - Type's hash is compiler-internal,
+    /// so we don't need SipHash's DoS resistance.
+    intern_cache: FxHashMap<Type, TypeId>,
     /// Pre-cached primitive type IDs.
     primitives: PrimitiveTypes,
 }
@@ -98,7 +100,7 @@ impl TypeArena {
     /// Create a new arena with pre-cached primitive types.
     pub fn new() -> Self {
         let mut types = Vec::with_capacity(256); // Pre-allocate for common programs
-        let mut intern_cache = HashMap::with_capacity(256);
+        let mut intern_cache = FxHashMap::with_capacity_and_hasher(256, Default::default());
 
         // Intern primitives in a fixed order so their IDs are predictable
         let primitives = [
@@ -403,7 +405,10 @@ impl TypeArena {
                 self.intern(Type::KeyOf(Box::new(self.get(inner_id).clone())))
             }
 
-            Type::IndexedAccess { object_type, index_type } => {
+            Type::IndexedAccess {
+                object_type,
+                index_type,
+            } => {
                 let obj_id = self.intern_deep(*object_type);
                 let idx_id = self.intern_deep(*index_type);
                 self.intern(Type::IndexedAccess {
@@ -412,7 +417,13 @@ impl TypeArena {
                 })
             }
 
-            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+            Type::MappedType {
+                type_param,
+                constraint,
+                template,
+                readonly_modifier,
+                optional_modifier,
+            } => {
                 let constraint_id = self.intern_deep(*constraint);
                 let template_id = self.intern_deep(*template);
                 self.intern(Type::MappedType {
@@ -424,7 +435,12 @@ impl TypeArena {
                 })
             }
 
-            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+            Type::ConditionalType {
+                check_type,
+                extends_type,
+                true_type,
+                false_type,
+            } => {
                 let check_id = self.intern_deep(*check_type);
                 let extends_id = self.intern_deep(*extends_type);
                 let true_id = self.intern_deep(*true_type);
@@ -582,12 +598,15 @@ mod tests {
     fn test_primitive_id_fast_path() {
         let arena = TypeArena::new();
 
-        assert_eq!(arena.primitive_id(&Type::String), Some(arena.primitives().string));
-        assert_eq!(arena.primitive_id(&Type::Number), Some(arena.primitives().number));
         assert_eq!(
-            arena.primitive_id(&Type::object(vec![])),
-            None
+            arena.primitive_id(&Type::String),
+            Some(arena.primitives().string)
         );
+        assert_eq!(
+            arena.primitive_id(&Type::Number),
+            Some(arena.primitives().number)
+        );
+        assert_eq!(arena.primitive_id(&Type::object(vec![])), None);
     }
 
     #[test]

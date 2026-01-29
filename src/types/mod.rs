@@ -241,18 +241,32 @@ impl Hash for Type {
                 default.hash(state);
             }
             Type::KeyOf(inner) => inner.hash(state),
-            Type::IndexedAccess { object_type, index_type } => {
+            Type::IndexedAccess {
+                object_type,
+                index_type,
+            } => {
                 object_type.hash(state);
                 index_type.hash(state);
             }
-            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+            Type::MappedType {
+                type_param,
+                constraint,
+                template,
+                readonly_modifier,
+                optional_modifier,
+            } => {
                 type_param.hash(state);
                 constraint.hash(state);
                 template.hash(state);
                 readonly_modifier.hash(state);
                 optional_modifier.hash(state);
             }
-            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
+            Type::ConditionalType {
+                check_type,
+                extends_type,
+                true_type,
+                false_type,
+            } => {
                 check_type.hash(state);
                 extends_type.hash(state);
                 true_type.hash(state);
@@ -401,10 +415,7 @@ impl Ord for Type {
                     constraint: cb,
                     default: db,
                 },
-            ) => na
-                .cmp(nb)
-                .then_with(|| ca.cmp(cb))
-                .then_with(|| da.cmp(db)),
+            ) => na.cmp(nb).then_with(|| ca.cmp(cb)).then_with(|| da.cmp(db)),
             (
                 Type::ClassConstructor {
                     params: pa,
@@ -416,37 +427,76 @@ impl Ord for Type {
                     type_params: tb,
                     static_members: sb,
                 },
-            ) => pa
-                .cmp(pb)
-                .then_with(|| ta.cmp(tb))
-                .then_with(|| sa.cmp(sb)),
+            ) => pa.cmp(pb).then_with(|| ta.cmp(tb)).then_with(|| sa.cmp(sb)),
             (Type::KeyOf(a), Type::KeyOf(b)) => a.cmp(b),
             (
-                Type::IndexedAccess { object_type: oa, index_type: ia },
-                Type::IndexedAccess { object_type: ob, index_type: ib },
+                Type::IndexedAccess {
+                    object_type: oa,
+                    index_type: ia,
+                },
+                Type::IndexedAccess {
+                    object_type: ob,
+                    index_type: ib,
+                },
             ) => oa.cmp(ob).then_with(|| ia.cmp(ib)),
             (
-                Type::MappedType { type_param: pa, constraint: ca, template: ta, readonly_modifier: ra, optional_modifier: oa },
-                Type::MappedType { type_param: pb, constraint: cb, template: tb, readonly_modifier: rb, optional_modifier: ob },
-            ) => pa.cmp(pb)
+                Type::MappedType {
+                    type_param: pa,
+                    constraint: ca,
+                    template: ta,
+                    readonly_modifier: ra,
+                    optional_modifier: oa,
+                },
+                Type::MappedType {
+                    type_param: pb,
+                    constraint: cb,
+                    template: tb,
+                    readonly_modifier: rb,
+                    optional_modifier: ob,
+                },
+            ) => pa
+                .cmp(pb)
                 .then_with(|| ca.cmp(cb))
                 .then_with(|| ta.cmp(tb))
                 .then_with(|| ra.cmp(rb))
                 .then_with(|| oa.cmp(ob)),
             (
-                Type::ConditionalType { check_type: ca, extends_type: ea, true_type: ta, false_type: fa },
-                Type::ConditionalType { check_type: cb, extends_type: eb, true_type: tb, false_type: fb },
-            ) => ca.cmp(cb)
+                Type::ConditionalType {
+                    check_type: ca,
+                    extends_type: ea,
+                    true_type: ta,
+                    false_type: fa,
+                },
+                Type::ConditionalType {
+                    check_type: cb,
+                    extends_type: eb,
+                    true_type: tb,
+                    false_type: fb,
+                },
+            ) => ca
+                .cmp(cb)
                 .then_with(|| ea.cmp(eb))
                 .then_with(|| ta.cmp(tb))
                 .then_with(|| fa.cmp(fb)),
             (
-                Type::InferType { name: na, constraint: ca },
-                Type::InferType { name: nb, constraint: cb },
+                Type::InferType {
+                    name: na,
+                    constraint: ca,
+                },
+                Type::InferType {
+                    name: nb,
+                    constraint: cb,
+                },
             ) => na.cmp(nb).then_with(|| ca.cmp(cb)),
             (
-                Type::TemplateLiteralType { texts: ta, types: tya },
-                Type::TemplateLiteralType { texts: tb, types: tyb },
+                Type::TemplateLiteralType {
+                    texts: ta,
+                    types: tya,
+                },
+                Type::TemplateLiteralType {
+                    texts: tb,
+                    types: tyb,
+                },
             ) => ta.cmp(tb).then_with(|| tya.cmp(tyb)),
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
@@ -530,12 +580,7 @@ impl Type {
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
-            Type::String
-                | Type::Number
-                | Type::Boolean
-                | Type::Null
-                | Type::Undefined
-                | Type::Void
+            Type::String | Type::Number | Type::Boolean | Type::Null | Type::Undefined | Type::Void
         )
     }
 
@@ -821,11 +866,20 @@ impl fmt::Display for Type {
 
             Type::KeyOf(inner) => write!(f, "keyof {}", inner),
 
-            Type::IndexedAccess { object_type, index_type } => {
+            Type::IndexedAccess {
+                object_type,
+                index_type,
+            } => {
                 write!(f, "{}[{}]", object_type, index_type)
             }
 
-            Type::MappedType { type_param, constraint, template, readonly_modifier, optional_modifier } => {
+            Type::MappedType {
+                type_param,
+                constraint,
+                template,
+                readonly_modifier,
+                optional_modifier,
+            } => {
                 write!(f, "{{ ")?;
                 // Readonly modifier
                 match readonly_modifier {
@@ -844,8 +898,17 @@ impl fmt::Display for Type {
                 write!(f, ": {}; }}", template)
             }
 
-            Type::ConditionalType { check_type, extends_type, true_type, false_type } => {
-                write!(f, "{} extends {} ? {} : {}", check_type, extends_type, true_type, false_type)
+            Type::ConditionalType {
+                check_type,
+                extends_type,
+                true_type,
+                false_type,
+            } => {
+                write!(
+                    f,
+                    "{} extends {} ? {} : {}",
+                    check_type, extends_type, true_type, false_type
+                )
             }
 
             Type::InferType { name, constraint } => {
@@ -933,9 +996,9 @@ impl Param {
 /// Type parameter in a generic: <T extends Constraint = Default>
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParam {
-    pub name: String,                   // T
-    pub constraint: Option<Box<Type>>,  // extends SomeType
-    pub default: Option<Box<Type>>,     // = DefaultType
+    pub name: String,                  // T
+    pub constraint: Option<Box<Type>>, // extends SomeType
+    pub default: Option<Box<Type>>,    // = DefaultType
 }
 
 impl TypeParam {
@@ -982,7 +1045,11 @@ pub struct TypePredicate {
 }
 
 impl TypePredicate {
-    pub fn new(parameter_name: impl Into<String>, asserts: bool, type_annotation: Option<Type>) -> Self {
+    pub fn new(
+        parameter_name: impl Into<String>,
+        asserts: bool,
+        type_annotation: Option<Type>,
+    ) -> Self {
         Self {
             parameter_name: parameter_name.into(),
             asserts,
@@ -1210,17 +1277,18 @@ mod tests {
         // Verify discriminant ordering matches the enum order
         assert!(Type::String.discriminant_order() < Type::Number.discriminant_order());
         assert!(Type::Number.discriminant_order() < Type::Boolean.discriminant_order());
-        assert!(Type::Never.discriminant_order() < Type::StringLiteral("".into()).discriminant_order());
-        assert!(Type::BooleanLiteral(true).discriminant_order() < Type::Array(Box::new(Type::String)).discriminant_order());
+        assert!(
+            Type::Never.discriminant_order() < Type::StringLiteral("".into()).discriminant_order()
+        );
+        assert!(
+            Type::BooleanLiteral(true).discriminant_order()
+                < Type::Array(Box::new(Type::String)).discriminant_order()
+        );
     }
 
     #[test]
     fn test_type_ordering_works() {
-        let mut types = vec![
-            Type::Number,
-            Type::String,
-            Type::Boolean,
-        ];
+        let mut types = vec![Type::Number, Type::String, Type::Boolean];
         types.sort();
         assert_eq!(types, vec![Type::String, Type::Number, Type::Boolean]);
     }

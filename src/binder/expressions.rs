@@ -7,7 +7,7 @@ use oxc_ast::ast::*;
 
 use crate::symbols::UndefinedSymbolError;
 
-use super::{is_builtin_global, BindingError, Binder};
+use super::{Binder, BindingError, is_builtin_global};
 
 impl Binder {
     /// Walk an expression to find undefined variable references.
@@ -17,11 +17,12 @@ impl Binder {
             Expression::Identifier(ident) => {
                 let name = ident.name.as_str();
                 if !is_builtin_global(name) && self.symbols.lookup(name).is_none() {
-                    self.errors.push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                        name: name.to_string(),
-                        span: ident.span,
-                        is_type: false,
-                    }));
+                    self.errors
+                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
+                            name: name.to_string(),
+                            span: ident.span,
+                            is_type: false,
+                        }));
                 }
             }
 
@@ -173,11 +174,12 @@ impl Binder {
             AssignmentTarget::AssignmentTargetIdentifier(ident) => {
                 let name = ident.name.as_str();
                 if !is_builtin_global(name) && self.symbols.lookup(name).is_none() {
-                    self.errors.push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                        name: name.to_string(),
-                        span: ident.span,
-                        is_type: false,
-                    }));
+                    self.errors
+                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
+                            name: name.to_string(),
+                            span: ident.span,
+                            is_type: false,
+                        }));
                 }
             }
             AssignmentTarget::StaticMemberExpression(member) => {

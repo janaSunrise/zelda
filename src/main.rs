@@ -101,7 +101,10 @@ fn check_files(files: &[PathBuf], format: &OutputFormat) -> Result<usize> {
     let total_start = Instant::now();
 
     // Use the first file's directory to find tsconfig.json
-    let project_root = files.first().and_then(|f| f.parent()).unwrap_or(std::path::Path::new("."));
+    let project_root = files
+        .first()
+        .and_then(|f| f.parent())
+        .unwrap_or(std::path::Path::new("."));
     let mut project = Project::with_tsconfig(project_root);
     let mut sources: HashMap<PathBuf, Arc<String>> = HashMap::new();
     let mut total_errors = 0;
@@ -122,7 +125,10 @@ fn check_files(files: &[PathBuf], format: &OutputFormat) -> Result<usize> {
                     OutputFormat::Json => {
                         json_results.push(JsonFileResult {
                             file: path.display().to_string(),
-                            errors: vec![ProjectError::FileReadError { path: path.clone(), error }],
+                            errors: vec![ProjectError::FileReadError {
+                                path: path.clone(),
+                                error,
+                            }],
                             error_count: 1,
                             warning_count: 0,
                             duration_ms: file_start.elapsed().as_millis() as u64,
@@ -157,8 +163,8 @@ fn check_files(files: &[PathBuf], format: &OutputFormat) -> Result<usize> {
                 // Load source texts for error reporting (lazily)
                 for err in &errors {
                     let path = match err {
-                        ProjectError::Binding(BindingError::DuplicateSymbol(_)) |
-                        ProjectError::Binding(BindingError::UndefinedSymbol(_)) => file.clone(),
+                        ProjectError::Binding(BindingError::DuplicateSymbol(_))
+                        | ProjectError::Binding(BindingError::UndefinedSymbol(_)) => file.clone(),
                         ProjectError::Type(_) => file.clone(),
                         ProjectError::ModuleNotFound { from_file, .. } => from_file.clone(),
                         ProjectError::FileReadError { path, .. } => path.clone(),
@@ -237,7 +243,10 @@ fn report_errors(
     let mut warning_count = 0;
 
     let filename = file.display().to_string();
-    let source = sources.get(file).cloned().unwrap_or_else(|| Arc::new(String::new()));
+    let source = sources
+        .get(file)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(String::new()));
 
     for err in errors {
         match err {
@@ -267,17 +276,8 @@ fn report_errors(
                 if type_err.is_warning() {
                     warning_count += 1;
                     let prefix = "warning".yellow();
-                    eprintln!(
-                        "{}: TS{}: {}",
-                        prefix,
-                        type_err.code,
-                        type_err.message
-                    );
-                    eprintln!(
-                        "  --> {}:{}",
-                        filename,
-                        type_err.span.start
-                    );
+                    eprintln!("{}: TS{}: {}", prefix, type_err.code, type_err.message);
+                    eprintln!("  --> {}:{}", filename, type_err.span.start);
                 } else {
                     error_count += 1;
                     let diag = ZeldaError {
@@ -290,10 +290,17 @@ fn report_errors(
                     eprintln!("{:?}", miette::Report::new(diag));
                 }
             }
-            ProjectError::ModuleNotFound { specifier, from_file, span } => {
+            ProjectError::ModuleNotFound {
+                specifier,
+                from_file,
+                span,
+            } => {
                 error_count += 1;
                 let from_filename = from_file.display().to_string();
-                let from_source = sources.get(from_file).cloned().unwrap_or_else(|| Arc::new(String::new()));
+                let from_source = sources
+                    .get(from_file)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(String::new()));
                 let diag = ZeldaError {
                     message: errors::CANNOT_FIND_MODULE.format_full(&[specifier]),
                     src: NamedSource::new(&from_filename, from_source),
@@ -340,4 +347,3 @@ fn report_errors(
 
     (error_count, warning_count)
 }
-

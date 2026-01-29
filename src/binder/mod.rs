@@ -7,7 +7,9 @@ mod types;
 use oxc_ast::ast::*;
 use serde::Serialize;
 
-use crate::symbols::{DuplicateSymbolError, ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError};
+use crate::symbols::{
+    DuplicateSymbolError, ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -204,13 +206,12 @@ impl Binder {
                 if self.symbols.lookup(ident.name.as_str()).is_none()
                     && !is_builtin_global(ident.name.as_str())
                 {
-                    self.errors.push(BindingError::UndefinedSymbol(
-                        UndefinedSymbolError {
+                    self.errors
+                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
                             name: ident.name.to_string(),
                             span: ident.span,
                             is_type: false,
-                        },
-                    ));
+                        }));
                 }
             }
             _ => {}
@@ -230,13 +231,12 @@ impl Binder {
                 if self.symbols.lookup(ident.name.as_str()).is_none()
                     && !is_builtin_global(ident.name.as_str())
                 {
-                    self.errors.push(BindingError::UndefinedSymbol(
-                        UndefinedSymbolError {
+                    self.errors
+                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
                             name: ident.name.to_string(),
                             span: ident.span,
                             is_type: false,
-                        },
-                    ));
+                        }));
                 }
             }
             _ => {}

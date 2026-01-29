@@ -14,9 +14,9 @@
 //! - Constraint checking: ensuring type arguments satisfy extends clauses
 
 use oxc_ast::ast::*;
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 
-use crate::types::Type;
+use crate::types::{Param, Type};
 
 use super::{Checker, TypeError};
 
@@ -43,7 +43,12 @@ impl<'a> Checker<'a> {
         let callee_type = self.infer_expression(&call.callee);
 
         // Only check if it's a function type
-        if let Type::Function { params, type_params, .. } = callee_type {
+        if let Type::Function {
+            params,
+            type_params,
+            ..
+        } = callee_type
+        {
             // Collect argument types for type inference
             let arg_types: Vec<Type> = call
                 .arguments
@@ -74,7 +79,7 @@ impl<'a> Checker<'a> {
                     self.infer_type_args_from_call(&type_params, &params, &arg_types)
                 }
             } else {
-                std::collections::HashMap::new()
+                rustc_hash::FxHashMap::default()
             };
 
             // Check constraints for each type argument
@@ -87,16 +92,12 @@ impl<'a> Checker<'a> {
                             if has_explicit_type_args {
                                 // Explicit type args: "Type 'X' does not satisfy constraint 'Y'"
                                 self.errors.push(TypeError::constraint_violation(
-                                    type_arg,
-                                    constraint,
-                                    call.span,
+                                    type_arg, constraint, call.span,
                                 ));
                             } else {
                                 // Inferred type args: "Argument of type 'X' is not assignable to parameter of type 'Y'"
                                 self.errors.push(TypeError::argument_not_assignable(
-                                    type_arg,
-                                    constraint,
-                                    call.span,
+                                    type_arg, constraint, call.span,
                                 ));
                             }
                         }
@@ -105,9 +106,9 @@ impl<'a> Checker<'a> {
             }
 
             // Substitute type parameters in parameter types for checking
-            let instantiated_params: Vec<crate::types::Param> = params
+            let instantiated_params: Vec<Param> = params
                 .iter()
-                .map(|p| crate::types::Param {
+                .map(|p| Param {
                     name: p.name.clone(),
                     ty: if substitutions.is_empty() {
                         p.ty.clone()
@@ -119,69 +120,8 @@ impl<'a> Checker<'a> {
                 })
                 .collect();
 
-            let arg_count = call.arguments.len();
-            // Rest params don't count as required - they accept 0 or more args
-            let required_params = instantiated_params
-                .iter()
-                .filter(|p| !p.optional && !p.rest)
-                .count();
-            let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
-
-            // Check argument count
-            if arg_count < required_params {
-                self.errors.push(TypeError::wrong_argument_count(
-                    required_params,
-                    arg_count,
-                    call.span,
-                ));
-            } else if !has_rest && arg_count > instantiated_params.len() {
-                // Too many arguments (and no rest param)
-                self.errors.push(TypeError::wrong_argument_count(
-                    instantiated_params.len(),
-                    arg_count,
-                    call.span,
-                ));
-            }
-
-            // Check argument types against instantiated parameter types
-            // Special handling for rest parameters: arguments beyond normal params
-            // are checked against the element type of the rest param array
-            let non_rest_param_count = if has_rest {
-                instantiated_params.len() - 1
-            } else {
-                instantiated_params.len()
-            };
-
-            for (i, arg) in call.arguments.iter().enumerate() {
-                if let Some(expr) = arg.as_expression() {
-                    let arg_type = self.infer_expression(expr);
-
-                    let param_type = if i < non_rest_param_count {
-                        // Regular parameter
-                        &instantiated_params[i].ty
-                    } else if has_rest {
-                        // Rest parameter - check against element type of the array
-                        let rest_param = instantiated_params.last().unwrap();
-                        if let Type::Array(elem_type) = &rest_param.ty {
-                            elem_type.as_ref()
-                        } else {
-                            // Rest param should always be array type
-                            &rest_param.ty
-                        }
-                    } else {
-                        // No more params and no rest - already handled by arg count check
-                        break;
-                    };
-
-                    if !self.is_assignable(&arg_type, param_type) {
-                        self.errors.push(TypeError::argument_not_assignable(
-                            &arg_type,
-                            param_type,
-                            expr.span(),
-                        ));
-                    }
-                }
-            }
+            // Check arguments against instantiated parameters
+            self.check_arguments(&instantiated_params, &call.arguments, call.span);
         }
     }
 
@@ -207,7 +147,10 @@ impl<'a> Checker<'a> {
         };
 
         // Get parent's constructor type
-        let parent_constructor = self.symbols.lookup(&parent_class_name).map(|s| s.ty.clone());
+        let parent_constructor = self
+            .symbols
+            .lookup(&parent_class_name)
+            .map(|s| s.ty.clone());
 
         let params = match parent_constructor {
             Some(Type::ClassConstructor { params, .. }) => params,
@@ -215,55 +158,8 @@ impl<'a> Checker<'a> {
             _ => return,
         };
 
-        // Check argument types
-        let arg_count = call.arguments.len();
-        let required_params = params.iter().filter(|p| !p.optional && !p.rest).count();
-        let has_rest = params.last().map(|p| p.rest).unwrap_or(false);
-
-        // Check argument count
-        if arg_count < required_params {
-            self.errors.push(TypeError::wrong_argument_count(
-                required_params,
-                arg_count,
-                call.span,
-            ));
-        } else if !has_rest && arg_count > params.len() {
-            self.errors.push(TypeError::wrong_argument_count(
-                params.len(),
-                arg_count,
-                call.span,
-            ));
-        }
-
-        // Check argument types
-        let non_rest_param_count = if has_rest { params.len() - 1 } else { params.len() };
-
-        for (i, arg) in call.arguments.iter().enumerate() {
-            if let Some(expr) = arg.as_expression() {
-                let arg_type = self.infer_expression(expr);
-
-                let param_type = if i < non_rest_param_count {
-                    &params[i].ty
-                } else if has_rest {
-                    let rest_param = params.last().unwrap();
-                    if let Type::Array(elem_type) = &rest_param.ty {
-                        elem_type.as_ref()
-                    } else {
-                        &rest_param.ty
-                    }
-                } else {
-                    break;
-                };
-
-                if !self.is_assignable(&arg_type, param_type) {
-                    self.errors.push(TypeError::argument_not_assignable(
-                        &arg_type,
-                        param_type,
-                        expr.span(),
-                    ));
-                }
-            }
-        }
+        // Check arguments against parent constructor parameters
+        self.check_arguments(&params, &call.arguments, call.span);
     }
 
     /// Check a new expression for constructor argument count and type errors.
@@ -278,15 +174,25 @@ impl<'a> Checker<'a> {
 
         // Get the constructor type from the value namespace
         let constructor_type = if let Expression::Identifier(ident) = &new_expr.callee {
-            self.symbols.lookup(ident.name.as_str()).map(|s| s.ty.clone())
+            self.symbols
+                .lookup(ident.name.as_str())
+                .map(|s| s.ty.clone())
         } else {
             None
         };
 
         // Extract params and type_params from either Function or ClassConstructor
         let (params, type_params) = match constructor_type {
-            Some(Type::Function { params, type_params, .. }) => (params, type_params),
-            Some(Type::ClassConstructor { params, type_params, .. }) => (params, type_params),
+            Some(Type::Function {
+                params,
+                type_params,
+                ..
+            }) => (params, type_params),
+            Some(Type::ClassConstructor {
+                params,
+                type_params,
+                ..
+            }) => (params, type_params),
             _ => return,
         };
 
@@ -318,7 +224,7 @@ impl<'a> Checker<'a> {
                 self.infer_type_args_from_call(&type_params, &params, &arg_types)
             }
         } else {
-            std::collections::HashMap::new()
+            rustc_hash::FxHashMap::default()
         };
 
         // Check type parameter constraints
@@ -347,9 +253,9 @@ impl<'a> Checker<'a> {
         }
 
         // Instantiate parameter types
-        let instantiated_params: Vec<crate::types::Param> = params
+        let instantiated_params: Vec<Param> = params
             .iter()
-            .map(|p| crate::types::Param {
+            .map(|p| Param {
                 name: p.name.clone(),
                 ty: if substitutions.is_empty() {
                     p.ty.clone()
@@ -361,49 +267,72 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
-        let arg_count = new_expr.arguments.len();
-        let required_params = instantiated_params
-            .iter()
-            .filter(|p| !p.optional && !p.rest)
-            .count();
-        let has_rest = instantiated_params.last().map(|p| p.rest).unwrap_or(false);
+        // Check arguments against instantiated parameters
+        self.check_arguments(&instantiated_params, &new_expr.arguments, new_expr.span);
+    }
+
+    /// Check that arguments match parameter types.
+    ///
+    /// This is the unified argument checking logic used by:
+    /// - `check_call_expression` for regular function calls
+    /// - `check_super_call` for super() constructor calls
+    /// - `check_new_expression` for new ClassName() calls
+    ///
+    /// Handles:
+    /// - Argument count validation (too few / too many)
+    /// - Rest parameter handling (variadic functions)
+    /// - Type compatibility checking for each argument
+    fn check_arguments(
+        &mut self,
+        params: &[Param],
+        args: &oxc_allocator::Vec<'_, Argument<'_>>,
+        call_span: Span,
+    ) {
+        let arg_count = args.len();
+        let required_params = params.iter().filter(|p| !p.optional && !p.rest).count();
+        let has_rest = params.last().map(|p| p.rest).unwrap_or(false);
 
         // Check argument count
         if arg_count < required_params {
             self.errors.push(TypeError::wrong_argument_count(
                 required_params,
                 arg_count,
-                new_expr.span,
+                call_span,
             ));
-        } else if !has_rest && arg_count > instantiated_params.len() {
+        } else if !has_rest && arg_count > params.len() {
+            // Too many arguments (and no rest param)
             self.errors.push(TypeError::wrong_argument_count(
-                instantiated_params.len(),
+                params.len(),
                 arg_count,
-                new_expr.span,
+                call_span,
             ));
         }
 
         // Check argument types
         let non_rest_param_count = if has_rest {
-            instantiated_params.len() - 1
+            params.len() - 1
         } else {
-            instantiated_params.len()
+            params.len()
         };
 
-        for (i, arg) in new_expr.arguments.iter().enumerate() {
+        for (i, arg) in args.iter().enumerate() {
             if let Some(expr) = arg.as_expression() {
                 let arg_type = self.infer_expression(expr);
 
                 let param_type = if i < non_rest_param_count {
-                    &instantiated_params[i].ty
+                    // Regular parameter
+                    &params[i].ty
                 } else if has_rest {
-                    let rest_param = instantiated_params.last().unwrap();
+                    // Rest parameter - check against element type of the array
+                    let rest_param = params.last().unwrap();
                     if let Type::Array(elem_type) = &rest_param.ty {
                         elem_type.as_ref()
                     } else {
+                        // Rest param should always be array type
                         &rest_param.ty
                     }
                 } else {
+                    // No more params and no rest - already handled by arg count check
                     break;
                 };
 

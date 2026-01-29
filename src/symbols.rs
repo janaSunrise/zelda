@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use oxc_span::Span;
 use serde::Serialize;
@@ -32,8 +32,10 @@ pub struct Scope {
     pub id: ScopeId,
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>, // Parent scope. None for Global, because no parent.
-    pub symbols: HashMap<String, SymbolId>, // Value namespace: variables, functions
-    pub type_symbols: HashMap<String, SymbolId>, // Type namespace: type aliases, interfaces
+    /// Value namespace: variables, functions. Uses FxHashMap for faster lookups.
+    pub symbols: FxHashMap<String, SymbolId>,
+    /// Type namespace: type aliases, interfaces. Uses FxHashMap for faster lookups.
+    pub type_symbols: FxHashMap<String, SymbolId>,
 }
 
 impl Scope {
@@ -42,8 +44,8 @@ impl Scope {
             id,
             kind,
             parent,
-            symbols: HashMap::new(),
-            type_symbols: HashMap::new(),
+            symbols: FxHashMap::default(),
+            type_symbols: FxHashMap::default(),
         }
     }
 }
@@ -66,7 +68,7 @@ pub struct Symbol {
     pub name: String,
     pub ty: Type,
     pub kind: SymbolKind,
-    pub span: Span, // Location in source code
+    pub span: Span,     // Location in source code
     pub scope: ScopeId, // Which scope it's declared in
 }
 
@@ -354,18 +356,31 @@ mod tests {
         let mut table = SymbolTable::new();
 
         table
-            .define_type("User", Type::object(vec![]), SymbolKind::Interface, span(0, 20))
+            .define_type(
+                "User",
+                Type::object(vec![]),
+                SymbolKind::Interface,
+                span(0, 20),
+            )
             .unwrap();
 
         table
-            .define("User", Type::object(vec![]), SymbolKind::Variable, span(30, 50))
+            .define(
+                "User",
+                Type::object(vec![]),
+                SymbolKind::Variable,
+                span(30, 50),
+            )
             .unwrap();
 
         // Both namespaces have User
         assert!(table.lookup_type("User").is_some());
         assert!(table.lookup("User").is_some());
 
-        assert_eq!(table.lookup_type("User").unwrap().kind, SymbolKind::Interface);
+        assert_eq!(
+            table.lookup_type("User").unwrap().kind,
+            SymbolKind::Interface
+        );
         assert_eq!(table.lookup("User").unwrap().kind, SymbolKind::Variable);
     }
 
