@@ -20,18 +20,12 @@ use crate::types::Type;
 /// When we enter a conditional branch (if/else), we can narrow types
 /// based on the condition expression.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct NarrowingContext {
     /// Variable name -> narrowed type. Uses FxHashMap for faster lookups.
     narrowed: FxHashMap<String, Type>,
 }
 
-impl Default for NarrowingContext {
-    fn default() -> Self {
-        Self {
-            narrowed: FxHashMap::default(),
-        }
-    }
-}
 
 impl NarrowingContext {
     pub fn new() -> Self {
@@ -51,11 +45,6 @@ impl NarrowingContext {
     /// Clear all narrowing information (e.g., when exiting a branch).
     pub fn clear(&mut self) {
         self.narrowed.clear();
-    }
-
-    /// Fork the context for a branch.
-    pub fn fork(&self) -> Self {
-        self.clone()
     }
 }
 
@@ -138,15 +127,14 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
 
         // instanceof: x instanceof Foo
         BinaryOperator::Instanceof => {
-            if let Expression::Identifier(left) = &binary.left {
-                if let Expression::Identifier(right) = &binary.right {
+            if let Expression::Identifier(left) = &binary.left
+                && let Expression::Identifier(right) = &binary.right {
                     return Some(ExtractedGuard {
                         variable: left.name.to_string(),
                         guard: TypeGuard::Instanceof(right.name.to_string()),
                         negated: false,
                     });
                 }
-            }
             None
         }
 
@@ -204,19 +192,16 @@ fn extract_typeof_guard(
     right: &Expression,
     negated: bool,
 ) -> Option<ExtractedGuard> {
-    if let Expression::UnaryExpression(unary) = left {
-        if matches!(unary.operator, UnaryOperator::Typeof) {
-            if let Expression::Identifier(ident) = &unary.argument {
-                if let Expression::StringLiteral(lit) = right {
+    if let Expression::UnaryExpression(unary) = left
+        && matches!(unary.operator, UnaryOperator::Typeof)
+            && let Expression::Identifier(ident) = &unary.argument
+                && let Expression::StringLiteral(lit) = right {
                     return Some(ExtractedGuard {
                         variable: ident.name.to_string(),
                         guard: TypeGuard::Typeof(lit.value.to_string()),
                         negated,
                     });
                 }
-            }
-        }
-    }
     None
 }
 
@@ -226,8 +211,8 @@ fn extract_null_guard(
     right: &Expression,
     is_inequality: bool,
 ) -> Option<ExtractedGuard> {
-    if let Expression::Identifier(ident) = left {
-        if let Expression::NullLiteral(_) = right {
+    if let Expression::Identifier(ident) = left
+        && let Expression::NullLiteral(_) = right {
             return Some(ExtractedGuard {
                 variable: ident.name.to_string(),
                 guard: TypeGuard::NotNull,
@@ -236,7 +221,6 @@ fn extract_null_guard(
                 negated: !is_inequality,
             });
         }
-    }
     None
 }
 
@@ -246,9 +230,9 @@ fn extract_undefined_guard(
     right: &Expression,
     is_inequality: bool,
 ) -> Option<ExtractedGuard> {
-    if let Expression::Identifier(ident) = left {
-        if let Expression::Identifier(right_ident) = right {
-            if right_ident.name == "undefined" {
+    if let Expression::Identifier(ident) = left
+        && let Expression::Identifier(right_ident) = right
+            && right_ident.name == "undefined" {
                 return Some(ExtractedGuard {
                     variable: ident.name.to_string(),
                     guard: TypeGuard::NotUndefined,
@@ -257,8 +241,6 @@ fn extract_undefined_guard(
                     negated: !is_inequality,
                 });
             }
-        }
-    }
     None
 }
 
@@ -316,11 +298,6 @@ where
     }
 }
 
-/// Apply a positive type guard (the condition is true).
-fn apply_positive_guard(original: &Type, guard: &TypeGuard) -> Type {
-    apply_positive_guard_with_resolver(original, guard, |_| None)
-}
-
 /// Apply a positive type guard with resolver support.
 fn apply_positive_guard_with_resolver<F>(original: &Type, guard: &TypeGuard, resolver: F) -> Type
 where
@@ -361,11 +338,6 @@ where
             narrow_by_discriminant_with_resolver(original, prop_name, prop_value, resolver)
         }
     }
-}
-
-/// Apply a negated type guard (the condition is false).
-fn apply_negated_guard(original: &Type, guard: &TypeGuard) -> Type {
-    apply_negated_guard_with_resolver(original, guard, |_| None)
 }
 
 /// Apply a negated type guard with resolver support.
@@ -426,13 +398,7 @@ fn narrow_to_type(original: &Type, target: &Type) -> Type {
                 _ => Type::Union(matching),
             }
         }
-        _ => {
-            if types_compatible(original, target) {
-                target.clone()
-            } else {
-                target.clone()
-            }
-        }
+        _ => target.clone(),
     }
 }
 
@@ -516,15 +482,6 @@ fn types_match(a: &Type, b: &Type) -> bool {
 }
 
 /// Narrow a union type to members that have a matching discriminant property.
-///
-/// For `shape.kind === "circle"`, this filters the union to only members
-/// that have `kind: "circle"` (literal type match).
-fn narrow_by_discriminant(original: &Type, prop_name: &str, prop_value: &str) -> Type {
-    narrow_by_discriminant_with_resolver(original, prop_name, prop_value, |_| None)
-}
-
-/// Narrow a union type to members that have a matching discriminant property,
-/// with ability to resolve TypeRefs.
 pub fn narrow_by_discriminant_with_resolver<F>(
     original: &Type,
     prop_name: &str,
@@ -548,13 +505,12 @@ where
         }
         Type::TypeRef { name, .. } => {
             // If original is a TypeRef to a union, resolve and narrow
-            if let Some(resolved) = resolver(name) {
-                if matches!(resolved, Type::Union(_)) {
+            if let Some(resolved) = resolver(name)
+                && matches!(resolved, Type::Union(_)) {
                     return narrow_by_discriminant_with_resolver(
                         &resolved, prop_name, prop_value, resolver,
                     );
                 }
-            }
             // For non-union types, check if it matches
             if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
                 original.clone()
@@ -574,15 +530,6 @@ where
 }
 
 /// Exclude union members that have a matching discriminant property.
-///
-/// For `shape.kind !== "circle"`, this removes members that have
-/// `kind: "circle"` from the union.
-fn exclude_by_discriminant(original: &Type, prop_name: &str, prop_value: &str) -> Type {
-    exclude_by_discriminant_with_resolver(original, prop_name, prop_value, |_| None)
-}
-
-/// Exclude union members that have a matching discriminant property,
-/// with ability to resolve TypeRefs.
 pub fn exclude_by_discriminant_with_resolver<F>(
     original: &Type,
     prop_name: &str,
@@ -606,13 +553,12 @@ where
         }
         Type::TypeRef { name, .. } => {
             // If original is a TypeRef to a union, resolve and exclude
-            if let Some(resolved) = resolver(name) {
-                if matches!(resolved, Type::Union(_)) {
+            if let Some(resolved) = resolver(name)
+                && matches!(resolved, Type::Union(_)) {
                     return exclude_by_discriminant_with_resolver(
                         &resolved, prop_name, prop_value, resolver,
                     );
                 }
-            }
             // For non-union types, check if it matches
             if has_discriminant_property_with_resolver(original, prop_name, prop_value, resolver) {
                 Type::Never
@@ -630,17 +576,7 @@ where
     }
 }
 
-/// Check if a type has a property with a specific string literal value.
-///
-/// Used for discriminant property matching in discriminated unions.
-fn has_discriminant_property(ty: &Type, prop_name: &str, expected_value: &str) -> bool {
-    has_discriminant_property_with_resolver(ty, prop_name, expected_value, |_| None)
-}
-
-/// Check if a type has a property with a specific string literal value,
-/// with ability to resolve TypeRefs.
-///
-/// The resolver function takes a type name and returns the resolved type if available.
+/// Check if a type has a discriminant property with a specific string literal value.
 pub fn has_discriminant_property_with_resolver<F>(
     ty: &Type,
     prop_name: &str,

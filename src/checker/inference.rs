@@ -417,8 +417,7 @@ impl<'a> Checker<'a> {
         if let Type::Object {
             index_signature, ..
         } = &resolved_type
-        {
-            if let Some(idx_sig) = index_signature {
+            && let Some(idx_sig) = index_signature {
                 // Check if index type is compatible with index signature key type
                 let key_matches = match (&index_type, &*idx_sig.key_type) {
                     // String index - accepts string and string literal
@@ -436,7 +435,6 @@ impl<'a> Checker<'a> {
                     return (*idx_sig.value_type).clone();
                 }
             }
-        }
 
         Type::Any
     }
@@ -485,11 +483,10 @@ impl<'a> Checker<'a> {
                 if let Some(prop) = all_props.iter().find(|p| p.name == prop_name) {
                     return prop.ty.clone();
                 }
-                if let Some(idx_sig) = index_signature {
-                    if matches!(*idx_sig.key_type, Type::String) {
+                if let Some(idx_sig) = index_signature
+                    && matches!(*idx_sig.key_type, Type::String) {
                         return (*idx_sig.value_type).clone();
                     }
-                }
                 Type::Any
             }
             Type::ClassConstructor { static_members, .. } => {

@@ -58,7 +58,7 @@ impl<'a> Checker<'a> {
 
     /// `typeof x` -> look up x's type in symbol table
     fn resolve_type_query(&self, query: &oxc_ast::ast::TSTypeQuery) -> Type {
-        use oxc_ast::ast::{TSTypeName, TSTypeQueryExprName};
+        use oxc_ast::ast::TSTypeQueryExprName;
 
         match &query.expr_name {
             TSTypeQueryExprName::IdentifierReference(ident) => {
@@ -142,11 +142,10 @@ impl<'a> Checker<'a> {
 
             Type::TypeRef { name, type_args } => {
                 // Bare TypeRef with no args might be a type parameter reference
-                if type_args.is_empty() {
-                    if let Some(substituted) = substitutions.get(name) {
+                if type_args.is_empty()
+                    && let Some(substituted) = substitutions.get(name) {
                         return substituted.clone();
                     }
-                }
 
                 let new_args: Vec<Type> = type_args
                     .iter()
@@ -616,11 +615,9 @@ impl<'a> Checker<'a> {
                     index_signature: Some(idx),
                     ..
                 } = &resolved_object
-                {
-                    if matches!(*idx.key_type, Type::String) {
+                    && matches!(*idx.key_type, Type::String) {
                         return (*idx.value_type).clone();
                     }
-                }
                 Type::Any
             }
             // Number index: for arrays or number index signatures
@@ -632,11 +629,9 @@ impl<'a> Checker<'a> {
                     index_signature: Some(idx),
                     ..
                 } = &resolved_object
-                {
-                    if matches!(*idx.key_type, Type::Number) {
+                    && matches!(*idx.key_type, Type::Number) {
                         return (*idx.value_type).clone();
                     }
-                }
                 Type::Any
             }
             _ => Type::Any,
@@ -690,11 +685,10 @@ impl<'a> Checker<'a> {
 
         // Fill in defaults for type parameters that weren't inferred
         for tp in type_params {
-            if !inferred.contains_key(&tp.name) {
-                if let Some(default) = &tp.default {
+            if !inferred.contains_key(&tp.name)
+                && let Some(default) = &tp.default {
                     inferred.insert(tp.name.clone(), (**default).clone());
                 }
-            }
         }
 
         inferred
@@ -852,8 +846,8 @@ impl<'a> Checker<'a> {
             Type::Union(types) => {
                 // Check if true_type or false_type is the same as check_type (common pattern)
                 // In this case, we need to substitute each member during distribution
-                let true_is_check = &resolved_true == &resolved_check;
-                let false_is_check = &resolved_false == &resolved_check;
+                let true_is_check = resolved_true == resolved_check;
+                let false_is_check = resolved_false == resolved_check;
 
                 let results: Vec<Type> = types
                     .iter()
@@ -986,11 +980,10 @@ impl<'a> Checker<'a> {
             // Infer type: capture the corresponding part of check_type
             Type::InferType { name, constraint } => {
                 // Check constraint if present
-                if let Some(c) = constraint {
-                    if !self.is_assignable(check_type, c) {
+                if let Some(c) = constraint
+                    && !self.is_assignable(check_type, c) {
                         return false;
                     }
-                }
                 inferred.insert(name.clone(), check_type.clone());
                 true
             }
@@ -1021,14 +1014,13 @@ impl<'a> Checker<'a> {
 
                     if ext_has_rest_infer {
                         // Capture all params as a tuple type for infer P
-                        if let Type::Array(elem) = &ext_params[0].ty {
-                            if let Type::InferType { name, .. } = elem.as_ref() {
+                        if let Type::Array(elem) = &ext_params[0].ty
+                            && let Type::InferType { name, .. } = elem.as_ref() {
                                 // Create tuple from check_params
                                 let tuple_types: Vec<Type> =
                                     check_params.iter().map(|p| p.ty.clone()).collect();
                                 inferred.insert(name.clone(), Type::Tuple(tuple_types));
                             }
-                        }
                     } else if !ext_has_any_rest {
                         // Strict parameter matching when not using catch-all rest param
                         for (ep, cp) in ext_params.iter().zip(check_params.iter()) {
@@ -1104,11 +1096,10 @@ impl<'a> Checker<'a> {
                 type_args: ext_args,
             } => {
                 // Special case: Array<infer R> matches Type::Array
-                if ext_name == "Array" && ext_args.len() == 1 {
-                    if let Type::Array(check_elem) = check_type {
+                if ext_name == "Array" && ext_args.len() == 1
+                    && let Type::Array(check_elem) = check_type {
                         return self.infer_from_conditional(check_elem, &ext_args[0], inferred);
                     }
-                }
 
                 if let Type::TypeRef {
                     name: check_name,

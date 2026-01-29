@@ -51,6 +51,7 @@ enum Commands {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("{message}")]
+#[allow(dead_code)] // Fields used by derive macros
 struct ZeldaError {
     message: String,
     #[source_code]
@@ -169,11 +170,10 @@ fn check_files(files: &[PathBuf], format: &OutputFormat) -> Result<usize> {
                         ProjectError::ModuleNotFound { from_file, .. } => from_file.clone(),
                         ProjectError::FileReadError { path, .. } => path.clone(),
                     };
-                    if !sources.contains_key(&path) {
-                        if let Ok(text) = std::fs::read_to_string(&path) {
+                    if !sources.contains_key(&path)
+                        && let Ok(text) = std::fs::read_to_string(&path) {
                             sources.insert(path.clone(), Arc::new(text));
                         }
-                    }
                 }
 
                 // Report errors

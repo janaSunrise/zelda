@@ -6,7 +6,7 @@
 //! - Detects missing returns in non-void functions
 
 use oxc_ast::ast::*;
-use oxc_span::{GetSpan, Span};
+use oxc_span::Span;
 
 use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind};
@@ -90,11 +90,10 @@ impl<'a> Checker<'a> {
             } else {
                 // Variable declared without initializer - track as uninitialized
                 // Only for `let` declarations (const requires initializer, var is hoisted)
-                if decl.kind == VariableDeclarationKind::Let {
-                    if let Some(name) = var_name {
+                if decl.kind == VariableDeclarationKind::Let
+                    && let Some(name) = var_name {
                         self.uninitialized_vars.insert(name);
                     }
-                }
             }
         }
     }
@@ -152,53 +151,49 @@ impl<'a> Checker<'a> {
             // Resolve the interface type with type arguments
             let interface_type = self.resolve_type_ref_with_args(&interface_name, &type_args);
 
-            if let Some(interface_type) = interface_type {
-                // Check that class implements all required members
-                if let Type::Object {
-                    properties: interface_props,
+            if let Some(Type::Object {
+                properties: interface_props,
+                ..
+            }) = interface_type.as_ref()
+            {
+                let class_props = if let Type::Object {
+                    properties,
+                    extends,
                     ..
-                } = &interface_type
+                } = &class_type
                 {
-                    let class_props = if let Type::Object {
-                        properties,
-                        extends,
-                        ..
-                    } = &class_type
+                    self.resolve_object_properties(properties, extends)
+                } else {
+                    vec![]
+                };
+
+                let class_prop_names: std::collections::HashSet<&str> =
+                    class_props.iter().map(|p| p.name.as_str()).collect();
+
+                for interface_prop in interface_props {
+                    // Check if property exists in class
+                    if !interface_prop.optional
+                        && !class_prop_names.contains(interface_prop.name.as_str())
                     {
-                        self.resolve_object_properties(properties, extends)
-                    } else {
-                        vec![]
-                    };
+                        self.errors.push(TypeError::incorrectly_implements(
+                            class_name,
+                            &interface_name,
+                            class.span,
+                        ));
+                        break;
+                    }
 
-                    let class_prop_names: std::collections::HashSet<&str> =
-                        class_props.iter().map(|p| p.name.as_str()).collect();
-
-                    for interface_prop in interface_props {
-                        // Check if property exists in class
-                        if !interface_prop.optional
-                            && !class_prop_names.contains(interface_prop.name.as_str())
-                        {
-                            self.errors.push(TypeError::incorrectly_implements(
-                                class_name,
-                                &interface_name,
-                                class.span,
-                            ));
-                            break; // One error per interface is enough
-                        }
-
-                        // Check type compatibility if property exists
-                        if let Some(class_prop) =
-                            class_props.iter().find(|p| p.name == interface_prop.name)
-                        {
-                            if !self.is_assignable(&class_prop.ty, &interface_prop.ty) {
-                                self.errors.push(TypeError::incorrectly_implements(
-                                    class_name,
-                                    &interface_name,
-                                    class.span,
-                                ));
-                                break;
-                            }
-                        }
+                    // Check type compatibility if property exists
+                    if let Some(class_prop) =
+                        class_props.iter().find(|p| p.name == interface_prop.name)
+                        && !self.is_assignable(&class_prop.ty, &interface_prop.ty)
+                    {
+                        self.errors.push(TypeError::incorrectly_implements(
+                            class_name,
+                            &interface_name,
+                            class.span,
+                        ));
+                        break;
                     }
                 }
             }
@@ -210,13 +205,12 @@ impl<'a> Checker<'a> {
 
         // Check class body (methods, etc.)
         for element in &class.body.body {
-            if let ClassElement::MethodDefinition(method) = element {
-                if let Some(body) = &method.value.body {
+            if let ClassElement::MethodDefinition(method) = element
+                && let Some(body) = &method.value.body {
                     for stmt in &body.statements {
                         self.check_statement(stmt);
                     }
                 }
-            }
         }
 
         // Restore previous context

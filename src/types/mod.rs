@@ -23,8 +23,6 @@
 mod arena;
 pub mod resolution;
 
-pub use arena::{PrimitiveTypes, TypeArena, TypeId};
-
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};

@@ -100,11 +100,10 @@ impl Project {
             config.paths = tsconfig.get_path_mappings();
 
             let tsconfig_dir = TsConfig::find_tsconfig_dir(project_root);
-            if let Some(dir) = tsconfig_dir {
-                if let Some(base_url) = tsconfig.get_base_url(&dir) {
+            if let Some(dir) = tsconfig_dir
+                && let Some(base_url) = tsconfig.get_base_url(&dir) {
                     config.base_url = Some(base_url);
                 }
-            }
 
             config
         } else {
@@ -293,7 +292,7 @@ impl Project {
         let specifier = import.source.value.as_str();
 
         // Type-only imports don't need runtime resolution
-        let import_kind = import.import_kind;
+        let _import_kind = import.import_kind;
 
         // Resolve the module
         match self.resolver.resolve(specifier, from_file) {
@@ -443,19 +442,17 @@ impl Project {
     ) -> Type {
         match decl {
             oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                if let Some(ident) = &func.id {
-                    if let Some(sym) = symbols.lookup(ident.name.as_str()) {
+                if let Some(ident) = &func.id
+                    && let Some(sym) = symbols.lookup(ident.name.as_str()) {
                         return sym.ty.clone();
                     }
-                }
                 Type::Any
             }
             oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if let Some(ident) = &class.id {
-                    if let Some(sym) = symbols.lookup(ident.name.as_str()) {
+                if let Some(ident) = &class.id
+                    && let Some(sym) = symbols.lookup(ident.name.as_str()) {
                         return sym.ty.clone();
                     }
-                }
                 Type::Any
             }
             oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {

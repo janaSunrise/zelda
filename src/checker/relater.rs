@@ -105,9 +105,9 @@ impl<'a> Checker<'a> {
         let mut props_map: FxHashMap<String, Property> = FxHashMap::default();
 
         for base_type in extends {
-            if let Type::TypeRef { name, .. } = base_type {
-                if let Some(resolved) = self.resolve_type_ref(name) {
-                    if let Type::Object {
+            if let Type::TypeRef { name, .. } = base_type
+                && let Some(resolved) = self.resolve_type_ref(name)
+                    && let Type::Object {
                         properties,
                         extends: base_extends,
                         ..
@@ -118,8 +118,6 @@ impl<'a> Checker<'a> {
                             props_map.entry(prop.name.clone()).or_insert(prop);
                         }
                     }
-                }
-            }
         }
 
         for prop in own_props {
@@ -265,16 +263,14 @@ impl<'a> Checker<'a> {
         }
 
         // Handle TypeRef resolution with type argument instantiation
-        if let Type::TypeRef { name, type_args } = source {
-            if let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
+        if let Type::TypeRef { name, type_args } = source
+            && let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
                 return self.is_assignable(&resolved, target);
             }
-        }
-        if let Type::TypeRef { name, type_args } = target {
-            if let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
+        if let Type::TypeRef { name, type_args } = target
+            && let Some(resolved) = self.resolve_type_ref_with_args(name, type_args) {
                 return self.is_assignable(source, &resolved);
             }
-        }
 
         // Same type (structural equality - ptr equality handled in fast path above)
         if source == target {
@@ -475,19 +471,17 @@ impl<'a> Checker<'a> {
                     _ => false,
                 };
 
-                if key_matches {
-                    if !self.is_assignable(&source_prop.ty, &target_idx_sig.value_type) {
+                if key_matches
+                    && !self.is_assignable(&source_prop.ty, &target_idx_sig.value_type) {
                         return false;
                     }
-                }
             }
 
             // If source has an index signature, its value type must be compatible
-            if let Some(source_idx_sig) = source_idx {
-                if !self.is_assignable(&source_idx_sig.value_type, &target_idx_sig.value_type) {
+            if let Some(source_idx_sig) = source_idx
+                && !self.is_assignable(&source_idx_sig.value_type, &target_idx_sig.value_type) {
                     return false;
                 }
-            }
         }
 
         true
@@ -587,11 +581,10 @@ impl<'a> Checker<'a> {
         }
 
         // Must end with last text segment (if there's more than one)
-        if texts.len() > 1 {
-            if !s.ends_with(texts.last().unwrap()) {
+        if texts.len() > 1
+            && !s.ends_with(texts.last().unwrap()) {
                 return false;
             }
-        }
 
         // For complex patterns with multiple placeholders, use regex-like matching
         // For now, simple check: if there's one placeholder with string type, allow any string in between
@@ -608,8 +601,8 @@ impl<'a> Checker<'a> {
         }
 
         // For union placeholders, check if the middle part is in the union
-        if types.len() == 1 {
-            if let Type::Union(union_types) = &types[0] {
+        if types.len() == 1
+            && let Type::Union(union_types) = &types[0] {
                 let prefix = &texts[0];
                 let suffix = texts.get(1).map(|s| s.as_str()).unwrap_or("");
                 if s.len() >= prefix.len() + suffix.len() {
@@ -624,7 +617,6 @@ impl<'a> Checker<'a> {
                     });
                 }
             }
-        }
 
         // For other patterns, do a simple structural match
         true

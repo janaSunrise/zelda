@@ -22,7 +22,7 @@ use oxc_span::Span;
 use serde::Serialize;
 
 use crate::errors;
-use crate::symbols::{ScopeKind, SymbolKind, SymbolTable};
+use crate::symbols::SymbolTable;
 use crate::types::Type;
 
 /// Maximum Levenshtein distance for "Did you mean?" suggestions.
@@ -150,12 +150,10 @@ impl TypeError {
         self
     }
 
-    /// Check if this is an error (not a warning).
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
 
-    /// Check if this is a warning.
     pub fn is_warning(&self) -> bool {
         self.severity == Severity::Warning
     }
@@ -212,28 +210,6 @@ impl TypeError {
             )
         } else {
             Self::property_not_found(prop, ty, span)
-        }
-    }
-
-    /// Create a cannot-find-name error with a "Did you mean?" suggestion.
-    ///
-    /// If a similar name is found among the available names,
-    /// uses TS2552 with a suggestion. Otherwise falls back to TS2304.
-    pub fn undefined_type_with_suggestion(
-        name: &str,
-        available_names: &[String],
-        span: Span,
-    ) -> Self {
-        if let Some(suggestion) =
-            find_similar_name(name, available_names.iter().map(|s| s.as_str()))
-        {
-            Self::new(
-                errors::CANNOT_FIND_NAME_SUGGESTION.format(&[name, suggestion]),
-                span,
-                errors::CANNOT_FIND_NAME_SUGGESTION.code,
-            )
-        } else {
-            Self::undefined_type(name, span)
         }
     }
 
@@ -396,8 +372,8 @@ impl<'a> Checker<'a> {
 
                 // Extract and apply type guard for true branch
                 let guard = extract_type_guard(&if_stmt.test);
-                if let Some(extracted) = &guard {
-                    if let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
+                if let Some(extracted) = &guard
+                    && let Some(original_type) = self.lookup_variable_type(&extracted.variable) {
                         // Create resolver closure that can look up TypeRefs
                         let resolver =
                             |name: &str| self.symbols.lookup_type(name).map(|s| s.ty.clone());
@@ -409,15 +385,14 @@ impl<'a> Checker<'a> {
                         );
                         self.narrowing.narrow(extracted.variable.clone(), narrowed);
                     }
-                }
 
                 self.check_statement(&if_stmt.consequent);
                 self.narrowing.clear(); // Reset after true branch
 
                 if let Some(alt) = &if_stmt.alternate {
                     // Apply negated guard for else branch
-                    if let Some(extracted) = &guard {
-                        if let Some(original_type) = self.lookup_variable_type(&extracted.variable)
+                    if let Some(extracted) = &guard
+                        && let Some(original_type) = self.lookup_variable_type(&extracted.variable)
                         {
                             let resolver =
                                 |name: &str| self.symbols.lookup_type(name).map(|s| s.ty.clone());
@@ -429,7 +404,6 @@ impl<'a> Checker<'a> {
                             );
                             self.narrowing.narrow(extracted.variable.clone(), narrowed);
                         }
-                    }
                     self.check_statement(alt);
                     self.narrowing.clear(); // Reset after else branch
                 }
@@ -439,11 +413,10 @@ impl<'a> Checker<'a> {
                 self.check_statement(&while_stmt.body);
             }
             Statement::ForStatement(for_stmt) => {
-                if let Some(init) = &for_stmt.init {
-                    if let ForStatementInit::VariableDeclaration(decl) = init {
+                if let Some(init) = &for_stmt.init
+                    && let ForStatementInit::VariableDeclaration(decl) = init {
                         self.check_variable_declaration(decl);
                     }
-                }
                 if let Some(test) = &for_stmt.test {
                     self.check_expression(test);
                 }
@@ -533,16 +506,13 @@ impl<'a> Checker<'a> {
                 .iter()
                 .position(|p| p.name == predicate.parameter_name);
 
-            if let Some(idx) = param_index {
-                if let Some(arg) = call.arguments.get(idx) {
-                    if let Some(Expression::Identifier(ident)) = arg.as_expression() {
-                        if let Some(narrowed_type) = &predicate.type_annotation {
+            if let Some(idx) = param_index
+                && let Some(arg) = call.arguments.get(idx)
+                    && let Some(Expression::Identifier(ident)) = arg.as_expression()
+                        && let Some(narrowed_type) = &predicate.type_annotation {
                             self.narrowing
                                 .narrow(ident.name.to_string(), (**narrowed_type).clone());
                         }
-                    }
-                }
-            }
         }
     }
 
@@ -650,26 +620,22 @@ impl<'a> Checker<'a> {
         }
 
         // Check property existence for member expression targets
-        match &assign.left {
-            AssignmentTarget::StaticMemberExpression(member) => {
-                let object_type = self.infer_expression(&member.object);
-                let prop_name = member.property.name.as_str();
+        if let AssignmentTarget::StaticMemberExpression(member) = &assign.left {
+            let object_type = self.infer_expression(&member.object);
+            let prop_name = member.property.name.as_str();
 
-                // Skip checking for `any` and `unknown` types
-                if !matches!(object_type, Type::Any | Type::Unknown) {
-                    if !self.has_property(&object_type, prop_name) {
-                        let available_props = self.get_available_properties(&object_type);
-                        self.errors
-                            .push(TypeError::property_not_found_with_suggestion(
-                                prop_name,
-                                &object_type,
-                                &available_props,
-                                member.span,
-                            ));
-                    }
+            // Skip checking for `any` and `unknown` types
+            if !matches!(object_type, Type::Any | Type::Unknown)
+                && !self.has_property(&object_type, prop_name) {
+                    let available_props = self.get_available_properties(&object_type);
+                    self.errors
+                        .push(TypeError::property_not_found_with_suggestion(
+                            prop_name,
+                            &object_type,
+                            &available_props,
+                            member.span,
+                        ));
                 }
-            }
-            _ => {}
         }
 
         // Get the target type
@@ -724,8 +690,8 @@ impl<'a> Checker<'a> {
             } = &object_type
             {
                 // Look up the class constructor in the value namespace
-                if let Some(symbol) = self.symbols.lookup(class_name) {
-                    if let Type::ClassConstructor { static_members, .. } = &symbol.ty {
+                if let Some(symbol) = self.symbols.lookup(class_name)
+                    && let Type::ClassConstructor { static_members, .. } = &symbol.ty {
                         // Check if the property exists as a static member
                         if static_members.iter().any(|p| p.name == prop_name) {
                             self.errors.push(TypeError::static_member_suggestion(
@@ -737,7 +703,6 @@ impl<'a> Checker<'a> {
                             return;
                         }
                     }
-                }
             }
 
             // Collect available properties for "Did you mean?" suggestions
@@ -763,8 +728,8 @@ impl<'a> Checker<'a> {
         }
 
         // If indexing with a string literal, check property existence
-        if let Type::StringLiteral(prop_name) = &index_type {
-            if !self.has_property(&object_type, prop_name) {
+        if let Type::StringLiteral(prop_name) = &index_type
+            && !self.has_property(&object_type, prop_name) {
                 let available_props = self.get_available_properties(&object_type);
                 self.errors
                     .push(TypeError::property_not_found_with_suggestion(
@@ -774,7 +739,6 @@ impl<'a> Checker<'a> {
                         member.span,
                     ));
             }
-        }
 
         // Array/tuple indexing with number is always valid
         // Index signatures are checked separately

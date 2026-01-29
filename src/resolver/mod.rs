@@ -132,8 +132,7 @@ impl ModuleResolver {
 
     /// Match pattern `@/*` against specifier `@/utils` -> returns `Some("utils")`
     fn match_path_pattern(&self, pattern: &str, specifier: &str) -> Option<String> {
-        if pattern.ends_with('*') {
-            let prefix = &pattern[..pattern.len() - 1];
+        if let Some(prefix) = pattern.strip_suffix('*') {
             if specifier.starts_with(prefix) {
                 return Some(specifier[prefix.len()..].to_string());
             }
@@ -260,9 +259,9 @@ impl ModuleResolver {
 
             // Try package.json types/typings field
             let package_json = node_modules.join("package.json");
-            if package_json.exists() {
-                if let Ok(content) = std::fs::read_to_string(&package_json) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if package_json.exists()
+                && let Ok(content) = std::fs::read_to_string(&package_json)
+                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                         // Try "types" field first, then "typings"
                         for field in &["types", "typings"] {
                             if let Some(types_path) = json.get(field).and_then(|v| v.as_str()) {
@@ -277,8 +276,6 @@ impl ModuleResolver {
                             }
                         }
                     }
-                }
-            }
 
             // Try index.d.ts
             let index_dts = node_modules.join("index.d.ts");

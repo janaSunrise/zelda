@@ -119,8 +119,8 @@ impl<'a> Checker<'a> {
         // Collect properties from the object literal
         let mut literal_props: Vec<(String, Span)> = Vec::new();
         for prop in &obj.properties {
-            if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                if let Some(name) = match &p.key {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop
+                && let Some(name) = match &p.key {
                     PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
                     PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
                     PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
@@ -161,7 +161,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-            }
         }
 
         let literal_prop_names: std::collections::HashSet<&str> =
@@ -200,8 +199,8 @@ impl<'a> Checker<'a> {
             expected_props.iter().map(|p| p.name.as_str()).collect();
 
         for prop in &obj.properties {
-            if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                if let Some(name) = match &p.key {
+            if let ObjectPropertyKind::ObjectProperty(p) = prop
+                && let Some(name) = match &p.key {
                     PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
                     PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
                     PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
@@ -226,7 +225,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-            }
         }
     }
 }

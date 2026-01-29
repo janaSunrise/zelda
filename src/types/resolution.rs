@@ -584,20 +584,17 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
         .unwrap_or_default();
 
     // Build extends list from super class
-    let extends: Vec<Type> = if let Some(super_expr) = &decl.super_class {
-        if let Expression::Identifier(ident) = super_expr {
-            let type_args: Vec<Type> = decl
-                .super_type_arguments
-                .as_ref()
-                .map(|args| args.params.iter().map(resolve_ts_type).collect())
-                .unwrap_or_default();
-            vec![Type::TypeRef {
-                name: ident.name.to_string(),
-                type_args,
-            }]
-        } else {
-            vec![]
-        }
+    let extends: Vec<Type> = if let Some(Expression::Identifier(ident)) = decl.super_class.as_ref()
+    {
+        let type_args: Vec<Type> = decl
+            .super_type_arguments
+            .as_ref()
+            .map(|args| args.params.iter().map(resolve_ts_type).collect())
+            .unwrap_or_default();
+        vec![Type::TypeRef {
+            name: ident.name.to_string(),
+            type_args,
+        }]
     } else {
         vec![]
     };
@@ -657,8 +654,8 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                     for p in &func.params.items {
                         // Parameter property if it has accessibility modifier or readonly
                         let is_param_property = p.accessibility.is_some() || p.readonly;
-                        if is_param_property {
-                            if let BindingPattern::BindingIdentifier(ident) = &p.pattern {
+                        if is_param_property
+                            && let BindingPattern::BindingIdentifier(ident) = &p.pattern {
                                 let name = ident.name.to_string();
                                 let ty = p
                                     .type_annotation
@@ -671,7 +668,6 @@ pub fn build_class_type(decl: &Class) -> (Type, Option<Type>, Type) {
                                 }
                                 properties.push(property);
                             }
-                        }
                     }
 
                     constructor_type = Some(Type::Function {

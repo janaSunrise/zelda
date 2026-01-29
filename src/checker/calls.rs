@@ -86,9 +86,9 @@ impl<'a> Checker<'a> {
             // Use TS2344 for explicit type args, TS2345 for inferred type args
             let has_explicit_type_args = !explicit_type_args.is_empty();
             for tp in &type_params {
-                if let Some(constraint) = &tp.constraint {
-                    if let Some(type_arg) = substitutions.get(&tp.name) {
-                        if !self.satisfies_constraint(type_arg, constraint) {
+                if let Some(constraint) = &tp.constraint
+                    && let Some(type_arg) = substitutions.get(&tp.name)
+                        && !self.satisfies_constraint(type_arg, constraint) {
                             if has_explicit_type_args {
                                 // Explicit type args: "Type 'X' does not satisfy constraint 'Y'"
                                 self.errors.push(TypeError::constraint_violation(
@@ -101,8 +101,6 @@ impl<'a> Checker<'a> {
                                 ));
                             }
                         }
-                    }
-                }
             }
 
             // Substitute type parameters in parameter types for checking
@@ -231,9 +229,9 @@ impl<'a> Checker<'a> {
         // Use TS2344 for explicit type args, TS2345 for inferred type args
         let has_explicit_type_args = !explicit_type_args.is_empty();
         for tp in &type_params {
-            if let Some(constraint) = &tp.constraint {
-                if let Some(type_arg) = substitutions.get(&tp.name) {
-                    if !self.satisfies_constraint(type_arg, constraint) {
+            if let Some(constraint) = &tp.constraint
+                && let Some(type_arg) = substitutions.get(&tp.name)
+                    && !self.satisfies_constraint(type_arg, constraint) {
                         if has_explicit_type_args {
                             self.errors.push(TypeError::constraint_violation(
                                 type_arg,
@@ -248,8 +246,6 @@ impl<'a> Checker<'a> {
                             ));
                         }
                     }
-                }
-            }
         }
 
         // Instantiate parameter types
