@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "ts-conformance"]
+resolver = "3"
+
 [package]
 name = "zelda"
 version = "0.1.0"

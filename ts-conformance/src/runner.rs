@@ -1,38 +1,19 @@
-use std::path::{Path, PathBuf};
+//! Test execution.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::compare::compare_errors;
+use crate::compare::compare_codes;
 use crate::tsc::run_tsc;
-use crate::types::TestResult;
+use crate::types::{TestCase, TestResult};
 use crate::zelda::run_zelda;
 
-pub fn discover_fixtures(fixtures_dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    discover_recursive(fixtures_dir, &mut files);
-    files.sort();
-    files
-}
-
-fn discover_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    if !dir.is_dir() {
-        return;
-    }
-
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                discover_recursive(&path, files);
-            } else if path.extension().is_some_and(|ext| ext == "ts") {
-                files.push(path);
-            }
-        }
-    }
-}
-
 pub fn run_single_test(file: &Path, zelda_binary: &Path, iterations: usize) -> TestResult {
-    // Run multiple iterations and take the minimum time for more stable benchmarks
+    let test = TestCase::from_path(file.to_path_buf());
+
     let mut best_zelda_ms = u64::MAX;
     let mut zelda_errors = Vec::new();
 
@@ -80,34 +61,58 @@ pub fn run_single_test(file: &Path, zelda_binary: &Path, iterations: usize) -> T
         best_tsc_ms = 0;
     }
 
-    compare_errors(
+    let comparison = compare_codes(
         file.to_path_buf(),
         zelda_errors,
         tsc_errors,
         best_zelda_ms,
         best_tsc_ms,
-    )
+    );
+
+    TestResult { test, comparison }
 }
 
 pub fn run_all_tests(
     fixtures: &[PathBuf],
     zelda_binary: &Path,
     iterations: usize,
+    show_progress: bool,
 ) -> Vec<TestResult> {
-    fixtures
-        .par_iter()
-        .map(|file| run_single_test(file, zelda_binary, iterations))
-        .collect()
-}
+    if !show_progress || fixtures.len() < 10 {
+        return fixtures
+            .par_iter()
+            .map(|file| run_single_test(file, zelda_binary, iterations))
+            .collect();
+    }
 
-#[allow(dead_code)]
-pub fn run_all_tests_sequential(
-    fixtures: &[PathBuf],
-    zelda_binary: &Path,
-    iterations: usize,
-) -> Vec<TestResult> {
-    fixtures
-        .iter()
-        .map(|file| run_single_test(file, zelda_binary, iterations))
-        .collect()
+    let pb = ProgressBar::new(fixtures.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+            .unwrap()
+            .progress_chars("█░░"),
+    );
+
+    let passed = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+
+    let results: Vec<TestResult> = fixtures
+        .par_iter()
+        .map(|file| {
+            let result = run_single_test(file, zelda_binary, iterations);
+            if result.passed() {
+                passed.fetch_add(1, Ordering::Relaxed);
+            } else {
+                failed.fetch_add(1, Ordering::Relaxed);
+            }
+            let p = passed.load(Ordering::Relaxed);
+            let f = failed.load(Ordering::Relaxed);
+            pb.set_message(format!("{} passed, {} failed", p, f));
+            pb.inc(1);
+            result
+        })
+        .collect();
+
+    pb.finish_and_clear();
+    results
 }
