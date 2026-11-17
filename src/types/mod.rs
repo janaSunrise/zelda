@@ -20,15 +20,16 @@
 //! ```
 
 mod arena;
+mod number;
 pub mod resolution;
 
 pub use arena::{TypeArena, TypeId};
+pub use number::NumberValue;
 
-use std::cmp::Ordering;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Clone, PartialEq)]
+/// A TypeScript type. Interned in a [`TypeArena`]; refer to types by [`TypeId`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[allow(
     clippy::enum_variant_names,
     reason = "variant names mirror TypeScript's terms (TypeRef, MappedType, ...)"
@@ -47,7 +48,7 @@ pub enum Type {
 
     // Literals
     StringLiteral(String),
-    NumberLiteral(f64),
+    NumberLiteral(NumberValue),
     BooleanLiteral(bool),
 
     // Compound types - use TypeId handles instead of Box<Type>
@@ -185,367 +186,6 @@ pub enum Type {
         /// Whether this is a `const enum`
         is_const: bool,
     },
-}
-
-/// We can't derive `Eq` because `f64` doesn't implement it (NaN != NaN violates reflexivity).
-/// This is safe for our use case since TypeScript number literals are always concrete values
-/// and we never construct NaN literals in the type system.
-impl Eq for Type {}
-
-/// We can't derive `Hash` because `f64` doesn't implement it. Different bit patterns
-/// (like +0.0 vs -0.0) would need special handling, and NaN has no meaningful hash.
-/// We solve this by converting f64 to its raw bits via `to_bits()`, giving us a
-/// consistent u64 that we can hash normally.
-///
-/// TypeId is Copy + Hash, so hashing compound types is fast.
-impl Hash for Type {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Type::String
-            | Type::Number
-            | Type::Boolean
-            | Type::Null
-            | Type::Undefined
-            | Type::Void
-            | Type::Any
-            | Type::Unknown
-            | Type::Never => {}
-            Type::StringLiteral(s) => s.hash(state),
-            Type::NumberLiteral(n) => n.to_bits().hash(state),
-            Type::BooleanLiteral(b) => b.hash(state),
-            Type::Array(elem) => elem.hash(state),
-            Type::Tuple(types) => types.hash(state),
-            Type::Union(types) => types.hash(state),
-            Type::Intersection(types) => types.hash(state),
-            Type::Object {
-                properties,
-                index_signature,
-                extends,
-                type_params,
-            } => {
-                properties.hash(state);
-                index_signature.hash(state);
-                extends.hash(state);
-                type_params.hash(state);
-            }
-            Type::Function {
-                params,
-                return_type,
-                type_params,
-                type_predicate,
-            } => {
-                params.hash(state);
-                return_type.hash(state);
-                type_params.hash(state);
-                type_predicate.hash(state);
-            }
-            Type::ClassConstructor {
-                params,
-                type_params,
-                static_members,
-            } => {
-                params.hash(state);
-                type_params.hash(state);
-                static_members.hash(state);
-            }
-            Type::TypeRef { name, type_args } => {
-                name.hash(state);
-                type_args.hash(state);
-            }
-            Type::TypeParameter {
-                name,
-                constraint,
-                default,
-            } => {
-                name.hash(state);
-                constraint.hash(state);
-                default.hash(state);
-            }
-            Type::KeyOf(inner) => inner.hash(state),
-            Type::IndexedAccess {
-                object_type,
-                index_type,
-            } => {
-                object_type.hash(state);
-                index_type.hash(state);
-            }
-            Type::MappedType {
-                type_param,
-                constraint,
-                template,
-                readonly_modifier,
-                optional_modifier,
-            } => {
-                type_param.hash(state);
-                constraint.hash(state);
-                template.hash(state);
-                readonly_modifier.hash(state);
-                optional_modifier.hash(state);
-            }
-            Type::ConditionalType {
-                check_type,
-                extends_type,
-                true_type,
-                false_type,
-            } => {
-                check_type.hash(state);
-                extends_type.hash(state);
-                true_type.hash(state);
-                false_type.hash(state);
-            }
-            Type::InferType { name, constraint } => {
-                name.hash(state);
-                constraint.hash(state);
-            }
-            Type::TemplateLiteralType { texts, types } => {
-                texts.hash(state);
-                types.hash(state);
-            }
-            Type::Enum {
-                name,
-                members,
-                is_const,
-            } => {
-                name.hash(state);
-                members.hash(state);
-                is_const.hash(state);
-            }
-        }
-    }
-}
-
-impl Type {
-    /// Returns a numeric discriminant for ordering purposes.
-    ///
-    /// This replaces the previous `format!("{:?}", discriminant)` hack with
-    /// an explicit ordering that's both faster and more predictable.
-    fn discriminant_order(&self) -> u8 {
-        match self {
-            Type::String => 0,
-            Type::Number => 1,
-            Type::Boolean => 2,
-            Type::Null => 3,
-            Type::Undefined => 4,
-            Type::Void => 5,
-            Type::Any => 6,
-            Type::Unknown => 7,
-            Type::Never => 8,
-            Type::StringLiteral(_) => 9,
-            Type::NumberLiteral(_) => 10,
-            Type::BooleanLiteral(_) => 11,
-            Type::Array(_) => 12,
-            Type::Tuple(_) => 13,
-            Type::Union(_) => 14,
-            Type::Intersection(_) => 15,
-            Type::Object { .. } => 16,
-            Type::Function { .. } => 17,
-            Type::ClassConstructor { .. } => 18,
-            Type::TypeRef { .. } => 19,
-            Type::TypeParameter { .. } => 20,
-            Type::KeyOf(_) => 21,
-            Type::IndexedAccess { .. } => 22,
-            Type::MappedType { .. } => 23,
-            Type::ConditionalType { .. } => 24,
-            Type::InferType { .. } => 25,
-            Type::TemplateLiteralType { .. } => 26,
-            Type::Enum { .. } => 27,
-        }
-    }
-}
-
-/// We can't derive `Ord` because `f64` only implements `PartialOrd`. NaN is unordered
-/// (NaN < x, NaN > x, and NaN == x are all false). We use `total_cmp()` which defines
-/// a total ordering: -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN.
-impl PartialOrd for Type {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// See `PartialOrd` above, this uses `total_cmp()` for the `NumberLiteral` variant.
-/// TypeId is Ord, so comparison of compound types is straightforward.
-impl Ord for Type {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // First compare by discriminant using explicit ordering
-        match self.discriminant_order().cmp(&other.discriminant_order()) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // Then compare by content - TypeId is Copy + Ord
-        match (self, other) {
-            (Type::String, Type::String) => Ordering::Equal,
-            (Type::Number, Type::Number) => Ordering::Equal,
-            (Type::Boolean, Type::Boolean) => Ordering::Equal,
-            (Type::Null, Type::Null) => Ordering::Equal,
-            (Type::Undefined, Type::Undefined) => Ordering::Equal,
-            (Type::Void, Type::Void) => Ordering::Equal,
-            (Type::Any, Type::Any) => Ordering::Equal,
-            (Type::Unknown, Type::Unknown) => Ordering::Equal,
-            (Type::Never, Type::Never) => Ordering::Equal,
-            (Type::StringLiteral(a), Type::StringLiteral(b)) => a.cmp(b),
-            (Type::NumberLiteral(a), Type::NumberLiteral(b)) => a.total_cmp(b),
-            (Type::BooleanLiteral(a), Type::BooleanLiteral(b)) => a.cmp(b),
-            (Type::Array(a), Type::Array(b)) => a.cmp(b),
-            (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
-            (Type::Union(a), Type::Union(b)) => a.cmp(b),
-            (Type::Intersection(a), Type::Intersection(b)) => a.cmp(b),
-            (
-                Type::Object {
-                    properties: pa,
-                    index_signature: ia,
-                    extends: ea,
-                    type_params: ta,
-                },
-                Type::Object {
-                    properties: pb,
-                    index_signature: ib,
-                    extends: eb,
-                    type_params: tb,
-                },
-            ) => pa
-                .cmp(pb)
-                .then_with(|| ia.cmp(ib))
-                .then_with(|| ea.cmp(eb))
-                .then_with(|| ta.cmp(tb)),
-            (
-                Type::Function {
-                    params: pa,
-                    return_type: ra,
-                    type_params: ta,
-                    type_predicate: tpa,
-                },
-                Type::Function {
-                    params: pb,
-                    return_type: rb,
-                    type_params: tb,
-                    type_predicate: tpb,
-                },
-            ) => pa
-                .cmp(pb)
-                .then_with(|| ra.cmp(rb))
-                .then_with(|| ta.cmp(tb))
-                .then_with(|| tpa.cmp(tpb)),
-            (
-                Type::TypeRef {
-                    name: na,
-                    type_args: aa,
-                },
-                Type::TypeRef {
-                    name: nb,
-                    type_args: ab,
-                },
-            ) => na.cmp(nb).then_with(|| aa.cmp(ab)),
-            (
-                Type::TypeParameter {
-                    name: na,
-                    constraint: ca,
-                    default: da,
-                },
-                Type::TypeParameter {
-                    name: nb,
-                    constraint: cb,
-                    default: db,
-                },
-            ) => na.cmp(nb).then_with(|| ca.cmp(cb)).then_with(|| da.cmp(db)),
-            (
-                Type::ClassConstructor {
-                    params: pa,
-                    type_params: ta,
-                    static_members: sa,
-                },
-                Type::ClassConstructor {
-                    params: pb,
-                    type_params: tb,
-                    static_members: sb,
-                },
-            ) => pa.cmp(pb).then_with(|| ta.cmp(tb)).then_with(|| sa.cmp(sb)),
-            (Type::KeyOf(a), Type::KeyOf(b)) => a.cmp(b),
-            (
-                Type::IndexedAccess {
-                    object_type: oa,
-                    index_type: ia,
-                },
-                Type::IndexedAccess {
-                    object_type: ob,
-                    index_type: ib,
-                },
-            ) => oa.cmp(ob).then_with(|| ia.cmp(ib)),
-            (
-                Type::MappedType {
-                    type_param: pa,
-                    constraint: ca,
-                    template: ta,
-                    readonly_modifier: ra,
-                    optional_modifier: oa,
-                },
-                Type::MappedType {
-                    type_param: pb,
-                    constraint: cb,
-                    template: tb,
-                    readonly_modifier: rb,
-                    optional_modifier: ob,
-                },
-            ) => pa
-                .cmp(pb)
-                .then_with(|| ca.cmp(cb))
-                .then_with(|| ta.cmp(tb))
-                .then_with(|| ra.cmp(rb))
-                .then_with(|| oa.cmp(ob)),
-            (
-                Type::ConditionalType {
-                    check_type: ca,
-                    extends_type: ea,
-                    true_type: ta,
-                    false_type: fa,
-                },
-                Type::ConditionalType {
-                    check_type: cb,
-                    extends_type: eb,
-                    true_type: tb,
-                    false_type: fb,
-                },
-            ) => ca
-                .cmp(cb)
-                .then_with(|| ea.cmp(eb))
-                .then_with(|| ta.cmp(tb))
-                .then_with(|| fa.cmp(fb)),
-            (
-                Type::InferType {
-                    name: na,
-                    constraint: ca,
-                },
-                Type::InferType {
-                    name: nb,
-                    constraint: cb,
-                },
-            ) => na.cmp(nb).then_with(|| ca.cmp(cb)),
-            (
-                Type::TemplateLiteralType {
-                    texts: ta,
-                    types: tya,
-                },
-                Type::TemplateLiteralType {
-                    texts: tb,
-                    types: tyb,
-                },
-            ) => ta.cmp(tb).then_with(|| tya.cmp(tyb)),
-            (
-                Type::Enum {
-                    name: na,
-                    members: ma,
-                    is_const: ca,
-                },
-                Type::Enum {
-                    name: nb,
-                    members: mb,
-                    is_const: cb,
-                },
-            ) => na.cmp(nb).then_with(|| ma.cmp(mb)).then_with(|| ca.cmp(cb)),
-            _ => Ordering::Equal, // Same discriminant, shouldn't happen
-        }
-    }
 }
 
 /// Shorthand constructors, used by tests.
@@ -1125,56 +765,10 @@ impl EnumMember {
 }
 
 /// Enum member value - can be numeric or string
-///
-/// Equality, ordering, and hashing all compare numbers by `total_cmp` / bit
-/// pattern, so they agree with each other (as `Hash`/`Eq` require) even for
-/// NaN and signed zeros.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EnumValue {
-    Number(f64),
+    Number(NumberValue),
     String(String),
-}
-
-impl PartialEq for EnumValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for EnumValue {}
-
-impl PartialOrd for EnumValue {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Manual Hash implementation for EnumValue since f64 doesn't implement Hash
-impl Hash for EnumValue {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            EnumValue::Number(n) => {
-                0u8.hash(state);
-                n.to_bits().hash(state);
-            }
-            EnumValue::String(s) => {
-                1u8.hash(state);
-                s.hash(state);
-            }
-        }
-    }
-}
-
-/// Manual Ord implementation for EnumValue since f64 doesn't implement Ord
-impl Ord for EnumValue {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (EnumValue::Number(a), EnumValue::Number(b)) => a.total_cmp(b),
-            (EnumValue::String(a), EnumValue::String(b)) => a.cmp(b),
-            (EnumValue::Number(_), EnumValue::String(_)) => Ordering::Less,
-            (EnumValue::String(_), EnumValue::Number(_)) => Ordering::Greater,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1198,7 +792,7 @@ mod tests {
     #[test]
     fn test_literal_display() {
         assert_eq!(Type::StringLiteral("hello".into()).to_string(), "\"hello\"");
-        assert_eq!(Type::NumberLiteral(42.0).to_string(), "42");
+        assert_eq!(Type::NumberLiteral(42.0.into()).to_string(), "42");
         assert_eq!(Type::BooleanLiteral(true).to_string(), "true");
     }
 
@@ -1373,20 +967,6 @@ mod tests {
         assert_eq!(
             arena.get(obj_id).display(&arena).to_string(),
             "{ [key: string]: number }"
-        );
-    }
-
-    #[test]
-    fn test_discriminant_order_is_consistent() {
-        // Verify discriminant ordering matches the enum order
-        assert!(Type::String.discriminant_order() < Type::Number.discriminant_order());
-        assert!(Type::Number.discriminant_order() < Type::Boolean.discriminant_order());
-        assert!(
-            Type::Never.discriminant_order() < Type::StringLiteral("".into()).discriminant_order()
-        );
-        assert!(
-            Type::BooleanLiteral(true).discriminant_order()
-                < Type::Array(TypeId::STRING).discriminant_order()
         );
     }
 

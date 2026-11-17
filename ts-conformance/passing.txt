@@ -418,6 +418,7 @@ compiler/declarationEmitComputedNamesInaccessible.ts
 compiler/declarationEmitComputedPropertyName1.ts
 compiler/declarationEmitComputedPropertyNameEnum1.ts
 compiler/declarationEmitConstantNoWidening.ts
+compiler/declarationEmitCrossFileCopiedGeneratedImportType.ts
 compiler/declarationEmitDefaultExport1.ts
 compiler/declarationEmitDefaultExport2.ts
 compiler/declarationEmitDefaultExport3.ts
@@ -480,6 +481,7 @@ compiler/declarationEmitPartialReuseComputedProperty.ts
 compiler/declarationEmitPrivateReadonlyLiterals.ts
 compiler/declarationEmitPromise.ts
 compiler/declarationEmitPropertyNumericStringKey.ts
+compiler/declarationEmitQualifiedAliasTypeArgument.ts
 compiler/declarationEmitRecursiveConditionalAliasPreserved.ts
 compiler/declarationEmitResolveTypesIfNotReusable.ts
 compiler/declarationEmitRetainsJsdocyComments.ts
@@ -490,6 +492,7 @@ compiler/declarationEmitShadowingInferNotRenamed.ts
 compiler/declarationEmitSimpleComputedNames1.ts
 compiler/declarationEmitSpreadStringlyKeyedEnum.ts
 compiler/declarationEmitStringEnumUsedInNonlocalSpread.ts
+compiler/declarationEmitTopLevelNodeFromCrossFile.ts
 compiler/declarationEmitTopLevelNodeFromCrossFile2.ts
 compiler/declarationEmitTupleRestSignatureLeadingVariadic.ts
 compiler/declarationEmitTypeAliasWithTypeParameters1.ts
@@ -675,8 +678,13 @@ compiler/es6ExportDefaultFunctionDeclaration2.ts
 compiler/es6ExportDefaultIdentifier.ts
 compiler/es6ImportDefaultBinding.ts
 compiler/es6ImportDefaultBindingDts.ts
+compiler/es6ImportDefaultBindingFollowedWithNamedImportDts.ts
+compiler/es6ImportDefaultBindingFollowedWithNamespaceBinding.ts
 compiler/es6ImportDefaultBindingFollowedWithNamespaceBinding1.ts
 compiler/es6ImportDefaultBindingFollowedWithNamespaceBinding1InEs5.ts
+compiler/es6ImportDefaultBindingFollowedWithNamespaceBindingDts.ts
+compiler/es6ImportDefaultBindingFollowedWithNamespaceBindingInEs5.ts
+compiler/es6ImportDefaultBindingNoDefaultProperty.ts
 compiler/es6ImportEqualsExportModuleCommonJsError.ts
 compiler/es6ImportNameSpaceImport.ts
 compiler/es6ImportNameSpaceImportDts.ts
@@ -684,6 +692,7 @@ compiler/es6ImportNameSpaceImportInEs5.ts
 compiler/es6ImportNameSpaceImportNoNamedExports.ts
 compiler/es6ImportNamedImportDts.ts
 compiler/es6ImportNamedImportInExportAssignment.ts
+compiler/es6ImportNamedImportNoExportMember.ts
 compiler/es6ImportNamedImportWithTypesAndValues.ts
 compiler/es6Module.ts
 compiler/es6ModuleModuleDeclaration.ts
@@ -861,6 +870,7 @@ compiler/indexer3.ts
 compiler/indexingTypesWithNever.ts
 compiler/indirectGlobalSymbolPartOfObjectType.ts
 compiler/inferConditionalConstraintMappedMember.ts
+compiler/inferFromNestedSameShapeTuple.ts
 compiler/inferParameterWithMethodCallInitializer.ts
 compiler/inferPropertyWithContextSensitiveReturnStatement.ts
 compiler/inferTInParentheses.ts
@@ -878,6 +888,7 @@ compiler/inferredFunctionReturnTypeIsEmptyType.ts
 compiler/inferredIndexerOnNamespaceImport.ts
 compiler/inferredNonidentifierTypesGetQuotes.ts
 compiler/inferredRestTypeFixedOnce.ts
+compiler/inferrenceInfiniteLoopWithSubtyping.ts
 compiler/inferringAnyFunctionType3.ts
 compiler/inferringAnyFunctionType4.ts
 compiler/inferringAnyFunctionType5.ts
@@ -1003,6 +1014,7 @@ compiler/moduleAndInterfaceSharingName4.ts
 compiler/moduleCodeGenTest5.ts
 compiler/moduleDeclarationExportStarShadowingGlobalIsNameable.ts
 compiler/moduleExportsUnaryExpression.ts
+compiler/moduleMemberMissingErrorIsRelative.ts
 compiler/moduleMerge.ts
 compiler/moduleNoEmit.ts
 compiler/moduleOuterQualification.ts
@@ -1208,6 +1220,9 @@ compiler/reachabilityCheckWithEmptyDefault.ts
 compiler/reachabilityChecksIgnored.ts
 compiler/reactHOCSpreadprops.tsx
 compiler/reboundBaseClassSymbol.ts
+compiler/recursiveBaseCheck4.ts
+compiler/recursiveBaseCheck5.ts
+compiler/recursiveBaseCheck6.ts
 compiler/recursiveBaseConstructorCreation1.ts
 compiler/recursiveBaseConstructorCreation2.ts
 compiler/recursiveClassBaseType.ts
@@ -1222,10 +1237,14 @@ compiler/recursiveGenericSignatureInstantiation.ts
 compiler/recursiveGenericSignatureInstantiation2.ts
 compiler/recursiveGenericTypeHierarchy.ts
 compiler/recursiveInferenceBug.ts
+compiler/recursiveInheritance.ts
 compiler/recursiveInheritance2.ts
 compiler/recursiveInheritance3.ts
+compiler/recursiveInheritanceGeneric.ts
 compiler/recursiveReturns.ts
 compiler/recursiveReverseMappedType.ts
+compiler/recursiveTupleTypes1.ts
+compiler/recursiveTupleTypes2.ts
 compiler/recursiveTypeIdentity.ts
 compiler/recursiveTypeParameterReferenceError2.ts
 compiler/recursiveTypes1.ts
@@ -1440,6 +1459,7 @@ compiler/typeArgumentsInFunctionExpressions.ts
 compiler/typeCheckExportsVariable.ts
 compiler/typeCheckObjectLiteralMethodBody.ts
 compiler/typeCheckReturnExpression.ts
+compiler/typeComparisonCaching.ts
 compiler/typeConstraintsWithConstructSignatures.ts
 compiler/typeGuardNarrowsIndexedAccessOfKnownProperty11.ts
 compiler/typeGuardNarrowsIndexedAccessOfKnownProperty2.ts
@@ -1561,6 +1581,7 @@ conformance/classes/classDeclarations/classAbstractKeyword/classAbstractAsIdenti
 conformance/classes/classDeclarations/classDeclarationLoop.ts
 conformance/classes/classDeclarations/classExtendingBuiltinType.ts
 conformance/classes/classDeclarations/classExtendingNull.ts
+conformance/classes/classDeclarations/classHeritageSpecification/classExtendsItself.ts
 conformance/classes/classDeclarations/classHeritageSpecification/constructorFunctionTypeIsAssignableToBaseType.ts
 conformance/classes/classDeclarations/classHeritageSpecification/constructorFunctionTypeIsAssignableToBaseType2.ts
 conformance/classes/classDeclarations/classInsideBlock.ts
@@ -2672,6 +2693,7 @@ conformance/types/typeRelationships/comparable/equalityWithtNullishCoalescingAss
 conformance/types/typeRelationships/comparable/independentPropertyVariance.ts
 conformance/types/typeRelationships/comparable/optionalProperties01.ts
 conformance/types/typeRelationships/comparable/optionalProperties02.ts
+conformance/types/typeRelationships/recursiveTypes/infiniteExpansionThroughInstantiation.ts
 conformance/types/typeRelationships/recursiveTypes/infiniteExpansionThroughInstantiation2.ts
 conformance/types/typeRelationships/recursiveTypes/infiniteExpansionThroughTypeInference.ts
 conformance/types/typeRelationships/recursiveTypes/nominalSubtypeCheckOfTypeParameter.ts

@@ -309,9 +309,10 @@ impl Binder {
                 .symbols
                 .arena
                 .intern(Type::StringLiteral(s.value.display().to_string())),
-            Expression::NumericLiteral(n) => {
-                self.symbols.arena.intern(Type::NumberLiteral(n.value))
-            }
+            Expression::NumericLiteral(n) => self
+                .symbols
+                .arena
+                .intern(Type::NumberLiteral(n.value.into())),
             Expression::BooleanLiteral(b) => {
                 if b.value {
                     TypeId::TRUE

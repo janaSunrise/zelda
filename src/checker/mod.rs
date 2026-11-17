@@ -320,6 +320,10 @@ pub struct Checker<'a> {
     assigned_vars: rustc_hash::FxHashSet<String>,
     /// Variables declared without initializer that need assignment checking. Uses FxHashSet for faster lookups.
     uninitialized_vars: rustc_hash::FxHashSet<String>,
+    /// Type pairs currently being compared by `is_assignable`, to break cycles.
+    relation_stack: rustc_hash::FxHashSet<(TypeId, TypeId)>,
+    /// Nesting depth of generic instantiation, to stop infinite expansion.
+    instantiation_depth: u32,
 }
 
 impl<'a> Checker<'a> {
@@ -331,6 +335,8 @@ impl<'a> Checker<'a> {
             current_class: None,
             assigned_vars: rustc_hash::FxHashSet::default(),
             uninitialized_vars: rustc_hash::FxHashSet::default(),
+            relation_stack: rustc_hash::FxHashSet::default(),
+            instantiation_depth: 0,
         }
     }
 

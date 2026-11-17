@@ -11,23 +11,23 @@ use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
 use oxc_parser::{Parser, ParserReturn};
-use oxc_span::{SourceType, Span};
+use oxc_span::{GetSpan, SourceType, Span};
 use serde::Serialize;
 
 use crate::binder::{Binder, BindingError};
 use crate::checker::{Checker, TypeError};
 use crate::errors;
 use crate::lib_dts;
-use crate::resolver::{ModuleResolver, ResolveError, ResolverConfig};
+use crate::resolver::{ModuleResolver, ResolverConfig};
 use crate::symbols::{SymbolKind, SymbolTable};
 use crate::tsconfig::TsConfig;
-use crate::types::Type;
+use crate::types::{Type, TypeArena, TypeId};
 
 #[derive(Debug)]
 pub struct ModuleInfo {
-    /// Exported symbols. Uses FxHashMap for faster lookups.
-    pub exports: FxHashMap<String, Type>,
-    pub default_export: Option<Type>,
+    /// Exported symbols, as types in the project's shared arena.
+    pub exports: FxHashMap<String, TypeId>,
+    pub default_export: Option<TypeId>,
 }
 
 /// An error produced while checking a project.
@@ -141,8 +141,13 @@ pub struct Project {
     /// Cached module information. Uses FxHashMap for faster lookups.
     modules: FxHashMap<PathBuf, ModuleInfo>,
     processing: Vec<PathBuf>, // For cycle detection
-    /// Pre-loaded lib.d.ts symbols (cloned for each file).
+    /// Pre-loaded lib.d.ts symbols (cloned for each file). Its types live in
+    /// `arena`; its own `arena` field is unused.
     lib_symbols: SymbolTable,
+    /// The type arena shared by every file in the project, so `TypeId`s can
+    /// flow between files through imports. While a file is being checked, its
+    /// `SymbolTable` holds the arena; it is moved back afterwards.
+    arena: TypeArena,
 }
 
 impl Default for Project {
@@ -153,15 +158,22 @@ impl Default for Project {
 
 impl Project {
     pub fn new() -> Self {
-        // Pre-load lib.d.ts into a base symbol table
+        Self::with_resolver(ResolverConfig::new())
+    }
+
+    fn with_resolver(config: ResolverConfig) -> Self {
+        // Pre-load lib.d.ts into a base symbol table, then take ownership of
+        // its arena: it becomes the project-wide arena.
         let mut lib_symbols = SymbolTable::new();
         lib_dts::load_lib_dts(&mut lib_symbols);
+        let arena = std::mem::take(&mut lib_symbols.arena);
 
         Self {
-            resolver: ModuleResolver::new(ResolverConfig::new()),
+            resolver: ModuleResolver::new(config),
             modules: FxHashMap::default(),
             processing: Vec::new(),
             lib_symbols,
+            arena,
         }
     }
 
@@ -183,16 +195,7 @@ impl Project {
             ResolverConfig::new()
         };
 
-        // Pre-load lib.d.ts
-        let mut lib_symbols = SymbolTable::new();
-        lib_dts::load_lib_dts(&mut lib_symbols);
-
-        Self {
-            resolver: ModuleResolver::new(config),
-            modules: FxHashMap::default(),
-            processing: Vec::new(),
-            lib_symbols,
-        }
+        Self::with_resolver(config)
     }
 
     /// Check a single file and all its dependencies.
@@ -269,14 +272,40 @@ impl Project {
             return Ok(());
         }
 
-        // Create binder with lib.d.ts symbols already loaded
-        let mut binder = Binder::with_symbols(self.lib_symbols.clone());
+        // Check dependencies first. This recurses into `process_file`, so it
+        // must happen before this file takes the shared arena below.
+        let imports: Vec<_> = program
+            .body
+            .iter()
+            .filter_map(|stmt| match stmt {
+                oxc_ast::ast::Statement::ImportDeclaration(import) => Some(import),
+                _ => None,
+            })
+            .map(|import| {
+                let specifier = import.source.value.display().to_string();
+                let resolved = self.resolver.resolve(&specifier, path);
+                if let Ok(resolved) = &resolved {
+                    self.process_file(&resolved.path, errors)?;
+                }
+                Ok((import, specifier, resolved.map(|r| r.path)))
+            })
+            .collect::<Result<_, ProjectError>>()?;
 
-        // Process imports BEFORE binding to add imported symbols to symbol table
-        for stmt in &program.body {
-            if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
-                self.process_import(import, path, &mut binder.symbols, errors)?;
-            }
+        // Bind this file against lib.d.ts, with the project's shared arena.
+        // Nothing below may return early: the arena is moved back at the end.
+        let mut symbols = self.lib_symbols.clone();
+        symbols.arena = std::mem::take(&mut self.arena);
+        let mut binder = Binder::with_symbols(symbols);
+
+        for (import, specifier, resolved) in &imports {
+            self.bind_import(
+                import,
+                specifier,
+                resolved.as_deref().ok(),
+                path,
+                &mut binder.symbols,
+                errors,
+            );
         }
 
         // Now bind the program - imported symbols are already available
@@ -309,7 +338,7 @@ impl Project {
             match stmt {
                 // `export const name = ...`
                 oxc_ast::ast::Statement::ExportDeclaration(export) => {
-                    self.extract_exports_from_declaration(
+                    Self::extract_exports_from_declaration(
                         &export.declaration,
                         &binder.symbols,
                         &mut exports,
@@ -320,28 +349,27 @@ impl Project {
                     for spec in &export.specifiers {
                         let local_name = spec.local.name().as_str();
                         let exported_name = spec.exported.name().as_str();
-                        if let Some(sym) = binder.symbols.lookup(local_name) {
-                            exports.insert(
-                                exported_name.to_string(),
-                                binder.symbols.arena.get(sym.ty).clone(),
-                            );
-                        } else if let Some(sym) = binder.symbols.lookup_type(local_name) {
-                            exports.insert(
-                                exported_name.to_string(),
-                                binder.symbols.arena.get(sym.ty).clone(),
-                            );
+                        let symbol = binder
+                            .symbols
+                            .lookup(local_name)
+                            .or_else(|| binder.symbols.lookup_type(local_name));
+                        if let Some(sym) = symbol {
+                            exports.insert(exported_name.to_string(), sym.ty);
                         }
                     }
                 }
                 oxc_ast::ast::Statement::ExportDefaultDeclaration(export) => {
                     // Handle `export default ...`
-                    default_export =
-                        Some(self.infer_default_export_type(&export.declaration, &binder.symbols));
+                    default_export = Some(Self::default_export_type(
+                        &export.declaration,
+                        &binder.symbols,
+                    ));
                 }
-                // Handle top-level declarations that might be implicitly exported in .d.ts files
                 _ => {}
             }
         }
+
+        self.arena = std::mem::take(&mut binder.symbols.arena);
 
         self.modules.insert(
             path.to_path_buf(),
@@ -355,197 +383,173 @@ impl Project {
         Ok(())
     }
 
-    /// Process an import declaration, resolving the module and adding imported symbols.
-    fn process_import(
-        &mut self,
+    /// Define the names an import declaration brings into scope, from the
+    /// already-checked module it resolved to (`None` if it didn't resolve).
+    fn bind_import(
+        &self,
         import: &oxc_ast::ast::ImportDeclaration,
+        specifier: &str,
+        resolved: Option<&Path>,
         from_file: &Path,
         symbols: &mut SymbolTable,
         errors: &mut Vec<ProjectError>,
-    ) -> Result<(), ProjectError> {
-        let specifier = import.source.value.display().to_string();
-        let specifier = specifier.as_str();
+    ) {
+        use oxc_ast::ast::ImportDeclarationSpecifier;
 
-        // Type-only imports don't need runtime resolution
-        let _import_kind = import.import_kind;
+        let Some(resolved) = resolved else {
+            errors.push(ProjectError::ModuleNotFound {
+                specifier: specifier.to_string(),
+                from_file: from_file.to_path_buf(),
+                span: import.source.span,
+            });
+            return;
+        };
+        // Missing when the module is part of an import cycle or failed to parse.
+        let Some(module_info) = self.modules.get(resolved) else {
+            return;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            return;
+        };
+        let module_name = format!("\"{specifier}\"");
+        let mut type_error = |message: String, code: u32, span: Span| {
+            errors.push(ProjectError::Type {
+                file: from_file.to_path_buf(),
+                error: TypeError::new(message, span, code),
+            });
+        };
 
-        // Resolve the module
-        match self.resolver.resolve(specifier, from_file) {
-            Ok(resolved) => {
-                // Process the resolved module first
-                self.process_file(&resolved.path, errors)?;
-
-                // Get the module info
-                if let Some(module_info) = self.modules.get(&resolved.path) {
-                    // Bind imported symbols
-                    if let Some(specifiers) = &import.specifiers {
-                        for spec in specifiers {
-                            match spec {
-                                oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                                    let imported_name = s.imported.name().as_str();
-                                    let local_name = s.local.name.as_str();
-
-                                    if let Some(ty) = module_info.exports.get(imported_name) {
-                                        let span = s.local.span;
-                                        // Intern the type into the importing file's arena
-                                        let ty_id = symbols.arena.intern(ty.clone());
-                                        let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
-                                        // Also add to type namespace if it's a type
-                                        if matches!(ty, Type::Object { .. } | Type::TypeRef { .. }) {
-                                            let _ = symbols.define_type(local_name, ty_id, SymbolKind::TypeAlias, span);
-                                        }
-                                    } else {
-                                        errors.push(ProjectError::ModuleNotFound {
-                                            specifier: format!("{specifier}#{imported_name}"),
-                                            from_file: from_file.to_path_buf(),
-                                            span: s.span,
-                                        });
-                                    }
-                                }
-                                oxc_ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                                    let local_name = s.local.name.as_str();
-
-                                    if let Some(ty) = &module_info.default_export {
-                                        let span = s.local.span;
-                                        // Intern the type into the importing file's arena
-                                        let ty_id = symbols.arena.intern(ty.clone());
-                                        let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
-                                    } else {
-                                        errors.push(ProjectError::ModuleNotFound {
-                                            specifier: format!("{specifier} (default)"),
-                                            from_file: from_file.to_path_buf(),
-                                            span: s.span,
-                                        });
-                                    }
-                                }
-                                oxc_ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                                    // `import * as ns from "module"`
-                                    let local_name = s.local.name.as_str();
-                                    let span = s.local.span;
-
-                                    // Create an object type with all exports as properties
-                                    // First intern each property type into the importing file's arena
-                                    let properties: Vec<_> = module_info
-                                        .exports
-                                        .iter()
-                                        .map(|(name, ty)| {
-                                            let ty_id = symbols.arena.intern(ty.clone());
-                                            crate::types::Property::new(name.clone(), ty_id)
-                                        })
-                                        .collect();
-
-                                    let namespace_type = Type::Object {
-                                        properties,
-                                        index_signature: None,
-                                        extends: vec![],
-                                        type_params: vec![],
-                                    };
-
-                                    let ty_id = symbols.arena.intern(namespace_type);
-                                    let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
-                                }
-                            }
-                        }
+        for spec in specifiers {
+            match spec {
+                ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                    let imported_name = s.imported.name().as_str();
+                    let local_name = s.local.name.as_str();
+                    let Some(&ty_id) = module_info.exports.get(imported_name) else {
+                        type_error(
+                            errors::NO_EXPORTED_MEMBER.format(&[&module_name, imported_name]),
+                            errors::NO_EXPORTED_MEMBER.code,
+                            s.imported.span(),
+                        );
+                        continue;
+                    };
+                    let span = s.local.span;
+                    let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
+                    // Also add to type namespace if it's a type
+                    if matches!(
+                        symbols.arena.get(ty_id),
+                        Type::Object { .. } | Type::TypeRef { .. }
+                    ) {
+                        let _ = symbols.define_type(local_name, ty_id, SymbolKind::TypeAlias, span);
                     }
                 }
-            }
-            Err(ResolveError::ModuleNotFound { .. }) => {
-                errors.push(ProjectError::ModuleNotFound {
-                    specifier: specifier.to_string(),
-                    from_file: from_file.to_path_buf(),
-                    span: import.source.span,
-                });
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                    let Some(ty_id) = module_info.default_export else {
+                        type_error(
+                            errors::NO_DEFAULT_EXPORT.format(&[&module_name]),
+                            errors::NO_DEFAULT_EXPORT.code,
+                            s.span,
+                        );
+                        continue;
+                    };
+                    let _ = symbols.define(
+                        s.local.name.as_str(),
+                        ty_id,
+                        SymbolKind::Variable,
+                        s.local.span,
+                    );
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                    // `import * as ns from "module"`: an object with every export as a property
+                    let properties = module_info
+                        .exports
+                        .iter()
+                        .map(|(name, &ty_id)| crate::types::Property::new(name.clone(), ty_id))
+                        .collect();
+                    let ty_id = symbols.arena.object(properties);
+                    let _ = symbols.define(
+                        s.local.name.as_str(),
+                        ty_id,
+                        SymbolKind::Variable,
+                        s.local.span,
+                    );
+                }
             }
         }
-
-        Ok(())
     }
 
     /// Extract exports from a declaration.
     fn extract_exports_from_declaration(
-        &self,
         decl: &oxc_ast::ast::Declaration,
         symbols: &SymbolTable,
-        exports: &mut FxHashMap<String, Type>,
+        exports: &mut FxHashMap<String, TypeId>,
     ) {
+        use oxc_ast::ast::Declaration;
+
+        let mut export_value = |name: &str| {
+            if let Some(sym) = symbols.lookup(name) {
+                exports.insert(name.to_string(), sym.ty);
+            }
+        };
         match decl {
-            oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+            Declaration::VariableDeclaration(var_decl) => {
                 for declarator in &var_decl.declarations {
                     if let oxc_ast::ast::BindingPattern::BindingIdentifier(ident) = &declarator.id {
-                        let name = ident.name.as_str();
-                        if let Some(sym) = symbols.lookup(name) {
-                            exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
-                        }
+                        export_value(ident.name.as_str());
                     }
                 }
             }
-            oxc_ast::ast::Declaration::FunctionDeclaration(func) => {
+            Declaration::FunctionDeclaration(func) => {
                 if let Some(ident) = &func.id {
-                    let name = ident.name.as_str();
-                    if let Some(sym) = symbols.lookup(name) {
-                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
-                    }
+                    export_value(ident.name.as_str());
                 }
             }
-            oxc_ast::ast::Declaration::ClassDeclaration(class) => {
+            Declaration::ClassDeclaration(class) => {
                 if let Some(ident) = &class.id {
                     let name = ident.name.as_str();
-                    if let Some(sym) = symbols.lookup(name) {
-                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
-                    }
-                    // Also export the type
+                    // TODO: a class is both a value and a type; exports keep
+                    // only one meaning per name, so the instance type wins.
+                    export_value(name);
                     if let Some(sym) = symbols.lookup_type(name) {
-                        exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
+                        exports.insert(name.to_string(), sym.ty);
                     }
                 }
             }
-            oxc_ast::ast::Declaration::TSInterfaceDeclaration(iface) => {
-                let name = iface.id.name.as_str();
-                if let Some(sym) = symbols.lookup_type(name) {
-                    exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
+            Declaration::TSInterfaceDeclaration(iface) => {
+                if let Some(sym) = symbols.lookup_type(iface.id.name.as_str()) {
+                    exports.insert(iface.id.name.to_string(), sym.ty);
                 }
             }
-            oxc_ast::ast::Declaration::TSTypeAliasDeclaration(alias) => {
-                let name = alias.id.name.as_str();
-                if let Some(sym) = symbols.lookup_type(name) {
-                    exports.insert(name.to_string(), symbols.arena.get(sym.ty).clone());
+            Declaration::TSTypeAliasDeclaration(alias) => {
+                if let Some(sym) = symbols.lookup_type(alias.id.name.as_str()) {
+                    exports.insert(alias.id.name.to_string(), sym.ty);
                 }
             }
             _ => {}
         }
     }
 
-    /// Infer the type of a default export.
-    fn infer_default_export_type(
-        &self,
+    /// The type of a default export.
+    fn default_export_type(
         decl: &oxc_ast::ast::ExportDefaultDeclarationKind,
         symbols: &SymbolTable,
-    ) -> Type {
-        match decl {
-            oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                if let Some(ident) = &func.id
-                    && let Some(sym) = symbols.lookup(ident.name.as_str())
-                {
-                    return symbols.arena.get(sym.ty).clone();
-                }
-                Type::Any
+    ) -> TypeId {
+        use oxc_ast::ast::ExportDefaultDeclarationKind;
+
+        let symbol = match decl {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => func
+                .id
+                .as_ref()
+                .and_then(|id| symbols.lookup(id.name.as_str())),
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => class
+                .id
+                .as_ref()
+                .and_then(|id| symbols.lookup(id.name.as_str())),
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
+                symbols.lookup_type(iface.id.name.as_str())
             }
-            oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if let Some(ident) = &class.id
-                    && let Some(sym) = symbols.lookup(ident.name.as_str())
-                {
-                    return symbols.arena.get(sym.ty).clone();
-                }
-                Type::Any
-            }
-            oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
-                if let Some(sym) = symbols.lookup_type(iface.id.name.as_str()) {
-                    return symbols.arena.get(sym.ty).clone();
-                }
-                Type::Any
-            }
-            _ => Type::Any,
-        }
+            _ => None,
+        };
+        symbol.map_or(TypeId::ANY, |sym| sym.ty)
     }
 }
 
@@ -637,6 +641,42 @@ mod tests {
             .collect();
         files.sort();
         assert_eq!(files, ["dep.ts", "main.ts"]);
+    }
+
+    #[test]
+    fn test_imported_types_keep_their_nested_types() {
+        // Nested types of an export are created while checking dep.ts. With a
+        // per-file arena their ids dangled in main.ts (index out of bounds).
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        create_test_file(
+            dir,
+            "dep.ts",
+            "export interface Box { inner: { value: number; label: string } }",
+        );
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            "import { Box } from './dep';\nconst b: Box = { inner: { value: 'x', label: 'y' } };",
+        );
+
+        let errors = Project::new().check_file(&main).unwrap();
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code(), Some(2322));
+    }
+
+    #[test]
+    fn test_missing_named_export_is_ts2305() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        create_test_file(dir, "dep.ts", "export const x = 1;");
+        let main = create_test_file(dir, "main.ts", "import { y } from './dep';");
+
+        let errors = Project::new().check_file(&main).unwrap();
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code(), Some(2305));
     }
 
     #[test]

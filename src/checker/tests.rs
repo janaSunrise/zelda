@@ -3152,3 +3152,83 @@ fn test_type_guard_function() {
     );
     assert!(errors.len() <= 1);
 }
+
+// Recursion guards: each of these overflowed the stack before the guards in
+// `is_assignable`, `resolve_type_ref_with_args`, and `resolve_object_properties`.
+
+#[test]
+fn test_mutually_recursive_interfaces_terminate() {
+    let errors = check(
+        r#"
+        interface A { x: B[]; }
+        interface B { x: A[]; }
+        function f(p: A) { return p; }
+        declare var b: B;
+        f(b);
+    "#,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn test_recursive_conditional_type_terminates() {
+    check(
+        r#"
+        type Unwrap<T> = T extends Array<infer U> ? Unwrap<U> : T;
+        type Deep = Unwrap<Deep[]>;
+        const d: Deep = 1;
+    "#,
+    );
+}
+
+#[test]
+fn test_circular_class_hierarchy_terminates() {
+    check(
+        r#"
+        class A<T> extends C<T> { }
+        class C<T> extends A<T> { }
+        (new C).blah;
+    "#,
+    );
+}
+
+#[test]
+fn test_circular_class_base_is_ts2506() {
+    let errors = check(
+        r#"
+        class A extends B { }
+        class B extends A { }
+        class Ok extends A { }
+    "#,
+    );
+    let codes: Vec<u32> = errors.iter().map(|e| e.code).collect();
+    assert_eq!(
+        codes,
+        [2506, 2506],
+        "only A and B are in the cycle: {errors:?}"
+    );
+}
+
+#[test]
+fn test_self_referencing_generic_class_is_ts2506() {
+    let errors = check("class M<T> extends M<string> { }");
+    assert!(errors.iter().any(|e| e.code == 2506), "{errors:?}");
+}
+
+#[test]
+fn test_circular_interface_base_is_ts2310() {
+    let errors = check(
+        r#"
+        interface I1<T> extends I2<string> { }
+        interface I2<T> extends I1<T> { }
+    "#,
+    );
+    let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "Type 'I1<T>' recursively references itself as a base type.",
+            "Type 'I2<T>' recursively references itself as a base type.",
+        ]
+    );
+}

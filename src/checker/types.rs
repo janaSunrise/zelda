@@ -621,7 +621,7 @@ impl<'a> Checker<'a> {
             // Number literal: mainly for tuples
             Type::NumberLiteral(idx) => match resolved_object {
                 Type::Tuple(type_ids) => {
-                    let i = idx as usize;
+                    let i = idx.get() as usize;
                     type_ids.get(i).copied().unwrap_or(TypeId::ANY)
                 }
                 Type::Array(elem_id) => elem_id,

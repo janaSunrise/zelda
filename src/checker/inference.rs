@@ -19,7 +19,7 @@ impl<'a> Checker<'a> {
             Expression::StringLiteral(s) => {
                 self.intern(Type::StringLiteral(s.value.display().to_string()))
             }
-            Expression::NumericLiteral(n) => self.intern(Type::NumberLiteral(n.value)),
+            Expression::NumericLiteral(n) => self.intern(Type::NumberLiteral(n.value.into())),
             Expression::BooleanLiteral(b) => self.intern(Type::BooleanLiteral(b.value)),
             Expression::NullLiteral(_) => TypeId::NULL,
             Expression::BigIntLiteral(_) => TypeId::NUMBER,
@@ -380,7 +380,7 @@ impl<'a> Checker<'a> {
         // Tuple indexing with number literal
         if let Type::Tuple(type_ids) = resolved_type {
             if let Type::NumberLiteral(n) = index_type {
-                let idx = n as usize;
+                let idx = n.get() as usize;
                 if idx < type_ids.len() {
                     return type_ids[idx];
                 }

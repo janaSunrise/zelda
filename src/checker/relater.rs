@@ -1,6 +1,6 @@
 //! Type relation checking (assignability and compatibility).
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::types::{Property, Type, TypeId};
 
@@ -13,7 +13,28 @@ impl<'a> Checker<'a> {
 
     /// Resolve a TypeRef with type arguments, instantiating generic types.
     /// `Box<number>` where `Box = { value: T }` becomes `{ value: number }`.
+    ///
+    /// Recursive generic types (`type A<T> = T extends P<infer U> ? A<U> : T`)
+    /// can instantiate forever, so like tsc this gives up past a fixed depth
+    /// and yields `any` (tsc additionally reports TS2589).
     pub(super) fn resolve_type_ref_with_args(
+        &mut self,
+        name: &str,
+        type_args: &[TypeId],
+    ) -> Option<TypeId> {
+        /// tsc's instantiation depth limit.
+        const MAX_INSTANTIATION_DEPTH: u32 = 100;
+
+        if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+            return Some(TypeId::ANY);
+        }
+        self.instantiation_depth += 1;
+        let resolved = self.resolve_type_ref_with_args_uncached(name, type_args);
+        self.instantiation_depth -= 1;
+        resolved
+    }
+
+    fn resolve_type_ref_with_args_uncached(
         &mut self,
         name: &str,
         type_args: &[TypeId],
@@ -109,12 +130,24 @@ impl<'a> Checker<'a> {
         own_props: &[Property],
         extends: &[TypeId],
     ) -> Vec<Property> {
+        self.collect_object_properties(own_props, extends, &mut FxHashSet::default())
+    }
+
+    /// `visited` holds the base types already expanded, so circular
+    /// hierarchies (`class A extends B {}; class B extends A {}`) terminate.
+    fn collect_object_properties(
+        &self,
+        own_props: &[Property],
+        extends: &[TypeId],
+        visited: &mut FxHashSet<TypeId>,
+    ) -> Vec<Property> {
         let mut props_map: FxHashMap<String, Property> = FxHashMap::default();
 
         for &base_type_id in extends {
             let base_type = self.get_type(base_type_id);
             if let Type::TypeRef { name, .. } = base_type
                 && let Some(resolved_id) = self.resolve_type_ref(name)
+                && visited.insert(resolved_id)
             {
                 let resolved = self.get_type(resolved_id);
                 if let Type::Object {
@@ -123,7 +156,8 @@ impl<'a> Checker<'a> {
                     ..
                 } = resolved
                 {
-                    let base_props = self.resolve_object_properties(properties, base_extends);
+                    let base_props =
+                        self.collect_object_properties(properties, base_extends, visited);
                     for prop in base_props {
                         props_map.entry(prop.name.clone()).or_insert(prop);
                     }
@@ -138,7 +172,29 @@ impl<'a> Checker<'a> {
         props_map.into_values().collect()
     }
 
+    /// Whether a value of type `source_id` can be assigned to `target_id`.
+    ///
+    /// Recursive types make structural comparison cyclic (`interface A { x: B[] }`
+    /// / `interface B { x: A[] }`), so like tsc we assume a pair is related while
+    /// it is already being compared, and give up (assuming related) past a fixed
+    /// nesting depth, which catches infinitely expanding generic types.
     pub fn is_assignable(&mut self, source_id: TypeId, target_id: TypeId) -> bool {
+        /// tsc reports "excessive stack depth" past 100 nested comparisons.
+        const MAX_RELATION_DEPTH: usize = 100;
+
+        if source_id == target_id {
+            return true;
+        }
+        let pair = (source_id, target_id);
+        if self.relation_stack.len() >= MAX_RELATION_DEPTH || !self.relation_stack.insert(pair) {
+            return true;
+        }
+        let related = self.is_assignable_uncached(source_id, target_id);
+        self.relation_stack.remove(&pair);
+        related
+    }
+
+    fn is_assignable_uncached(&mut self, source_id: TypeId, target_id: TypeId) -> bool {
         // FAST PATHS FIRST - check before ANY resolution to short-circuit common cases
         // TypeId equality means identical types (interned)
         if source_id == target_id {
@@ -748,7 +804,7 @@ impl<'a> Checker<'a> {
         };
 
         // Find required target properties missing from source
-        let source_prop_names: rustc_hash::FxHashSet<&str> =
+        let source_prop_names: FxHashSet<&str> =
             source_props.iter().map(|p| p.name.as_str()).collect();
 
         target_props

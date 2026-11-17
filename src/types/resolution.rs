@@ -25,7 +25,7 @@ pub fn resolve_ts_type(ts_type: &TSType, arena: &mut TypeArena) -> TypeId {
             TSLiteral::StringLiteral(s) => {
                 arena.intern(Type::StringLiteral(s.value.display().to_string()))
             }
-            TSLiteral::NumericLiteral(n) => arena.intern(Type::NumberLiteral(n.value)),
+            TSLiteral::NumericLiteral(n) => arena.intern(Type::NumberLiteral(n.value.into())),
             TSLiteral::BooleanLiteral(b) => {
                 if b.value {
                     TypeId::TRUE
@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn test_widen_number_literal() {
         let mut arena = TypeArena::new();
-        let num_lit_id = arena.intern(Type::NumberLiteral(42.0));
+        let num_lit_id = arena.intern(Type::NumberLiteral(42.0.into()));
         assert_eq!(widen_type(num_lit_id, &mut arena), TypeId::NUMBER);
     }
 
@@ -846,7 +846,7 @@ mod tests {
     fn test_widen_tuple() {
         let mut arena = TypeArena::new();
         let str_lit_id = arena.intern(Type::StringLiteral("a".into()));
-        let num_lit_id = arena.intern(Type::NumberLiteral(1.0));
+        let num_lit_id = arena.intern(Type::NumberLiteral(1.0.into()));
         let tuple_id = arena.tuple(vec![str_lit_id, num_lit_id]);
         let widened_id = widen_type(tuple_id, &mut arena);
         let expected_id = arena.tuple(vec![TypeId::STRING, TypeId::NUMBER]);
@@ -857,7 +857,7 @@ mod tests {
     fn test_widen_union() {
         let mut arena = TypeArena::new();
         let str_lit_id = arena.intern(Type::StringLiteral("a".into()));
-        let num_lit_id = arena.intern(Type::NumberLiteral(1.0));
+        let num_lit_id = arena.intern(Type::NumberLiteral(1.0.into()));
         let union_id = arena.union(vec![str_lit_id, num_lit_id]);
         let widened_id = widen_type(union_id, &mut arena);
         let expected_id = arena.union(vec![TypeId::STRING, TypeId::NUMBER]);

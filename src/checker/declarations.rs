@@ -107,6 +107,20 @@ impl<'a> Checker<'a> {
 
     /// Check an interface declaration.
     pub(super) fn check_interface_declaration(&mut self, decl: &TSInterfaceDeclaration) {
+        let name = decl.id.name.as_str();
+        if self.is_own_base_type(name) {
+            let params = decl.type_parameters.as_ref().map_or(String::new(), |tp| {
+                let names: Vec<&str> = tp.params.iter().map(|p| p.name.name.as_str()).collect();
+                format!("<{}>", names.join(", "))
+            });
+            let display = format!("{name}{params}");
+            self.errors.push(TypeError::new(
+                errors::CIRCULAR_BASE_TYPE.format(&[&display]),
+                decl.id.span,
+                errors::CIRCULAR_BASE_TYPE.code,
+            ));
+        }
+
         for heritage in &decl.extends {
             let name = match &heritage.type_name {
                 TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
@@ -122,6 +136,16 @@ impl<'a> Checker<'a> {
     /// Check a class declaration for type errors.
     pub(super) fn check_class_declaration(&mut self, class: &Class) {
         let class_name = class.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+
+        if let Some(id) = &class.id
+            && self.is_own_base_type(class_name)
+        {
+            self.errors.push(TypeError::new(
+                errors::CIRCULAR_BASE_EXPRESSION.format(&[class_name]),
+                id.span,
+                errors::CIRCULAR_BASE_EXPRESSION.code,
+            ));
+        }
 
         // Get the class's instance type
         let class_type_id = self.symbols.lookup_type(class_name).map(|s| s.ty);
@@ -419,5 +443,37 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Whether the named class or interface appears in its own chain of base
+    /// types (`class A extends B {}; class B extends A {}`).
+    fn is_own_base_type(&self, name: &str) -> bool {
+        let base_names = |type_name: &str| -> Vec<String> {
+            let Some(symbol) = self.symbols.lookup_type(type_name) else {
+                return Vec::new();
+            };
+            let Type::Object { extends, .. } = self.get_type(symbol.ty) else {
+                return Vec::new();
+            };
+            extends
+                .iter()
+                .filter_map(|&base| match self.get_type(base) {
+                    Type::TypeRef { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut pending = base_names(name);
+        while let Some(base) = pending.pop() {
+            if base == name {
+                return true;
+            }
+            if visited.insert(base.clone()) {
+                pending.extend(base_names(&base));
+            }
+        }
+        false
     }
 }

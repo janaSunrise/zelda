@@ -70,10 +70,14 @@ pub const CANNOT_FIND_MODULE: Diagnostic = Diagnostic::new(
     "Cannot find module '{0}' or its corresponding type declarations.",
 );
 pub const NO_DEFAULT_EXPORT: Diagnostic =
-    Diagnostic::new(2308, "Module '{0}' has no default export.");
+    Diagnostic::new(1192, "Module '{0}' has no default export.");
 pub const CIRCULAR_BASE_TYPE: Diagnostic = Diagnostic::new(
     2310,
     "Type '{0}' recursively references itself as a base type.",
+);
+pub const CIRCULAR_BASE_EXPRESSION: Diagnostic = Diagnostic::new(
+    2506,
+    "'{0}' is referenced directly or indirectly in its own base expression.",
 );
 pub const EXTENDS_NON_CLASS: Diagnostic =
     Diagnostic::new(2311, "A class may only extend another class.");

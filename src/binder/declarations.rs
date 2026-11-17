@@ -342,7 +342,7 @@ impl Binder {
                 match init {
                     Expression::NumericLiteral(n) => {
                         next_value = n.value as i64 + 1;
-                        EnumValue::Number(n.value)
+                        EnumValue::Number(n.value.into())
                     }
                     Expression::StringLiteral(s) => {
                         EnumValue::String(s.value.display().to_string())
@@ -352,24 +352,24 @@ impl Binder {
                     {
                         if let Expression::NumericLiteral(n) = &unary.argument {
                             next_value = -(n.value as i64) + 1;
-                            EnumValue::Number(-n.value)
+                            EnumValue::Number((-n.value).into())
                         } else {
                             // Complex expression - treat as number for now
-                            let val = EnumValue::Number(next_value as f64);
+                            let val = EnumValue::Number((next_value as f64).into());
                             next_value += 1;
                             val
                         }
                     }
                     _ => {
                         // For other expressions (computed values), use the auto-increment
-                        let val = EnumValue::Number(next_value as f64);
+                        let val = EnumValue::Number((next_value as f64).into());
                         next_value += 1;
                         val
                     }
                 }
             } else {
                 // No initializer - use auto-increment value
-                let val = EnumValue::Number(next_value as f64);
+                let val = EnumValue::Number((next_value as f64).into());
                 next_value += 1;
                 val
             };
