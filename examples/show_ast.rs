@@ -19,6 +19,6 @@ const obj = { name: "alice", age: 30 };
     let source_type = SourceType::ts();
     let result = Parser::new(&allocator, source, source_type).parse();
 
-    println!("Source:\n{}\n", source);
+    println!("Source:\n{source}\n");
     println!("AST:\n{:#?}", result.program.body);
 }

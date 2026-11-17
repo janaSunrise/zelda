@@ -1,6 +1,11 @@
 //! TypeScript error codes and messages.
 //!
 //! Reference: https://github.com/microsoft/TypeScript/blob/main/src/compiler/diagnosticMessages.json
+//!
+//! This is a catalog: it lists diagnostics zelda will need, including ones
+//! no check emits yet. Entries get used as features land, so unused ones are
+//! expected here.
+#![allow(dead_code)]
 
 #[derive(Debug, Clone, Copy)]
 pub struct Diagnostic {
@@ -16,14 +21,9 @@ impl Diagnostic {
     pub fn format(&self, args: &[&str]) -> String {
         let mut result = self.message.to_string();
         for (i, arg) in args.iter().enumerate() {
-            result = result.replace(&format!("{{{}}}", i), arg);
+            result = result.replace(&format!("{{{i}}}"), arg);
         }
         result
-    }
-
-    /// "TS{code}: {message}"
-    pub fn format_full(&self, args: &[&str]) -> String {
-        format!("TS{}: {}", self.code, self.format(args))
     }
 }
 
@@ -338,14 +338,6 @@ mod tests {
         assert_eq!(
             NOT_ASSIGNABLE.format(&["string", "number"]),
             "Type 'string' is not assignable to type 'number'."
-        );
-    }
-
-    #[test]
-    fn test_format_full() {
-        assert_eq!(
-            NOT_ASSIGNABLE.format_full(&["string", "number"]),
-            "TS2322: Type 'string' is not assignable to type 'number'."
         );
     }
 

@@ -201,7 +201,7 @@ impl TypeError {
         span: Span,
     ) -> Self {
         if let Some(suggestion) =
-            find_similar_name(prop, available_props.iter().map(|s| s.as_str()))
+            find_similar_name(prop, available_props.iter().map(String::as_str))
         {
             Self::new(
                 errors::PROPERTY_NOT_EXIST_SUGGESTION.format(&[prop, ty, suggestion]),
@@ -332,12 +332,6 @@ impl<'a> Checker<'a> {
             assigned_vars: rustc_hash::FxHashSet::default(),
             uninitialized_vars: rustc_hash::FxHashSet::default(),
         }
-    }
-
-    /// Get a reference to the type arena.
-    #[inline]
-    pub fn arena(&self) -> &TypeArena {
-        &self.symbols.arena
     }
 
     /// Get a mutable reference to the type arena.

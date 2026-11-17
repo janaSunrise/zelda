@@ -398,12 +398,10 @@ impl<'a> Checker<'a> {
             let key_ty = self.get_type(idx_sig.key_type);
             let key_matches = matches!(
                 (&index_type, key_ty),
-                (Type::String, Type::String)
-                    | (Type::StringLiteral(_), Type::String)
-                    | (Type::Number, Type::Number)
-                    | (Type::NumberLiteral(_), Type::Number)
-                    | (Type::Number, Type::String)
-                    | (Type::NumberLiteral(_), Type::String)
+                (
+                    Type::String | Type::StringLiteral(_) | Type::Number | Type::NumberLiteral(_),
+                    Type::String
+                ) | (Type::Number | Type::NumberLiteral(_), Type::Number)
             );
             if key_matches {
                 return idx_sig.value_type;

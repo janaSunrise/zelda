@@ -493,12 +493,10 @@ impl Binder {
             }
         }
 
-        if type_ids.is_empty() {
-            TypeId::ANY
-        } else if type_ids.len() == 1 {
-            type_ids.pop().unwrap()
-        } else {
-            self.symbols.arena.union(type_ids)
+        match type_ids.as_slice() {
+            [] => TypeId::ANY,
+            [single] => *single,
+            _ => self.symbols.arena.union(type_ids),
         }
     }
 

@@ -14,6 +14,10 @@ pub enum ScopeKind {
     Function,
     Block,
     Class,
+    #[expect(
+        dead_code,
+        reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+    )]
     Interface,
 }
 
@@ -29,7 +33,15 @@ pub enum ScopeKind {
 /// This allows `interface User {}` and `const User = {}` to coexist.
 #[derive(Debug, Clone)]
 pub struct Scope {
+    #[expect(
+        dead_code,
+        reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+    )]
     pub id: ScopeId,
+    #[expect(
+        dead_code,
+        reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+    )]
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>, // Parent scope. None for Global, because no parent.
     /// Value namespace: variables, functions. Uses FxHashMap for faster lookups.
@@ -66,11 +78,33 @@ pub enum SymbolKind {
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
+    // Read only by tests.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+        )
+    )]
     pub name: String,
     pub ty: TypeId,
+    // Read only by tests.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+        )
+    )]
     pub kind: SymbolKind,
-    pub span: Span,     // Location in source code
-    pub scope: ScopeId, // Which scope it's declared in
+    /// Location in source code.
+    pub span: Span,
+    /// The scope it's declared in.
+    #[expect(
+        dead_code,
+        reason = "symbols.rs is replaced by oxc_semantic (cleanup plan, phase 4)"
+    )]
+    pub scope: ScopeId,
 }
 
 impl Symbol {
@@ -148,16 +182,6 @@ impl SymbolTable {
             current_scope: ScopeId(0),
             arena: TypeArena::new(),
         }
-    }
-
-    /// Get a type by its TypeId from the arena.
-    pub fn get_type(&self, id: TypeId) -> &crate::types::Type {
-        self.arena.get(id)
-    }
-
-    /// Intern a type in the arena and return its TypeId.
-    pub fn intern(&mut self, ty: crate::types::Type) -> TypeId {
-        self.arena.intern(ty)
     }
 
     pub fn push_scope(&mut self, kind: ScopeKind) -> ScopeId {
@@ -264,30 +288,6 @@ impl SymbolTable {
 
         None
     }
-
-    pub fn resolve(&self, name: &str, span: Span) -> Result<&Symbol, UndefinedSymbolError> {
-        self.lookup(name).ok_or_else(|| UndefinedSymbolError {
-            name: name.to_string(),
-            span,
-            is_type: false,
-        })
-    }
-
-    pub fn resolve_type(&self, name: &str, span: Span) -> Result<&Symbol, UndefinedSymbolError> {
-        self.lookup_type(name).ok_or_else(|| UndefinedSymbolError {
-            name: name.to_string(),
-            span,
-            is_type: true,
-        })
-    }
-
-    pub fn get(&self, id: SymbolId) -> &Symbol {
-        &self.symbols[id.0]
-    }
-
-    pub fn current(&self) -> &Scope {
-        &self.scopes[self.current_scope.0]
-    }
 }
 
 #[cfg(test)]
@@ -392,9 +392,8 @@ mod tests {
     #[test]
     fn test_undefined_reference() {
         let table = SymbolTable::new();
-        let result = table.resolve("undefined_var", span(0, 10));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().name, "undefined_var");
+        assert!(table.lookup("undefined_var").is_none());
+        assert!(table.lookup_type("undefined_var").is_none());
     }
 
     #[test]

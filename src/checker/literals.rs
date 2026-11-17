@@ -105,23 +105,21 @@ impl<'a> Checker<'a> {
         let resolved_id = self.resolve_computed_type(expected_id);
 
         let resolved = self.get_type(resolved_id).clone();
-        let (expected_props_owned, index_signature, extends) = match resolved {
-            Type::Object {
-                properties,
-                index_signature,
-                extends,
-                ..
-            } => (properties, index_signature, extends),
-            _ => {
-                let source_id = self.infer_object_literal(obj);
-                if !self.is_assignable(source_id, expected_id) {
-                    let source_str = self.fmt_type(source_id);
-                    let expected_str = self.fmt_type(expected_id);
-                    self.errors
-                        .push(TypeError::not_assignable(&source_str, &expected_str, span));
-                }
-                return;
+        let Type::Object {
+            properties: expected_props_owned,
+            index_signature,
+            extends,
+            ..
+        } = resolved
+        else {
+            let source_id = self.infer_object_literal(obj);
+            if !self.is_assignable(source_id, expected_id) {
+                let source_str = self.fmt_type(source_id);
+                let expected_str = self.fmt_type(expected_id);
+                self.errors
+                    .push(TypeError::not_assignable(&source_str, &expected_str, span));
             }
+            return;
         };
 
         let expected_props = self.resolve_object_properties(&expected_props_owned, &extends);

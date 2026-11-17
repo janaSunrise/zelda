@@ -191,9 +191,11 @@ pub enum BaselineDiagnostic {
     Global { code: u32, message: String },
 }
 
-static LOCATED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(.+)\((\d+),(\d+)\): error TS(\d+): (.*)$").unwrap());
-static GLOBAL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^error TS(\d+): (.*)$").unwrap());
+static LOCATED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(.+)\((\d+),(\d+)\): error TS(\d+): (.*)$").expect("valid regex")
+});
+static GLOBAL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^error TS(\d+): (.*)$").expect("valid regex"));
 
 /// Parse the summary at the top of an `.errors.txt` baseline: one line per
 /// diagnostic (plus indented continuation lines for message chains), ended by
@@ -228,7 +230,7 @@ mod tests {
     use super::*;
 
     fn index(names: &[&str]) -> SuiteIndex {
-        SuiteIndex::build(names.iter().map(|s| s.to_string()))
+        SuiteIndex::build(names.iter().map(ToString::to_string))
     }
 
     #[test]

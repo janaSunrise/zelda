@@ -15,7 +15,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{Param, Property, Type, TypeParam};
+use super::{Param, Property, Type};
 
 /// A lightweight, copyable handle to an interned type.
 ///
@@ -42,58 +42,10 @@ impl TypeId {
     pub const TRUE: TypeId = TypeId(9);
     pub const FALSE: TypeId = TypeId(10);
 
-    #[inline]
-    pub const fn from_raw(value: u32) -> Self {
-        Self(value)
-    }
-
-    /// Get the raw u32 value of this TypeId.
-    #[inline]
-    pub const fn as_raw(self) -> u32 {
-        self.0
-    }
-
     /// Check if this TypeId refers to a primitive type (one of the pre-cached constants).
     #[inline]
     pub const fn is_primitive(self) -> bool {
         self.0 <= 10
-    }
-}
-
-/// Pre-cached primitive type IDs for instant access.
-///
-/// These are always the first types interned, so their IDs are predictable.
-/// All fields use the TypeId constants (e.g., `TypeId::STRING`).
-#[derive(Debug, Clone, Copy)]
-pub struct PrimitiveTypes {
-    pub string: TypeId,
-    pub number: TypeId,
-    pub boolean: TypeId,
-    pub null: TypeId,
-    pub undefined: TypeId,
-    pub void: TypeId,
-    pub any: TypeId,
-    pub unknown: TypeId,
-    pub never: TypeId,
-    pub true_literal: TypeId,
-    pub false_literal: TypeId,
-}
-
-impl Default for PrimitiveTypes {
-    fn default() -> Self {
-        Self {
-            string: TypeId::STRING,
-            number: TypeId::NUMBER,
-            boolean: TypeId::BOOLEAN,
-            null: TypeId::NULL,
-            undefined: TypeId::UNDEFINED,
-            void: TypeId::VOID,
-            any: TypeId::ANY,
-            unknown: TypeId::UNKNOWN,
-            never: TypeId::NEVER,
-            true_literal: TypeId::TRUE,
-            false_literal: TypeId::FALSE,
-        }
     }
 }
 
@@ -103,16 +55,15 @@ impl Default for PrimitiveTypes {
 /// - Deduplication: Identical types share the same `TypeId`
 /// - Fast lookup: O(1) access by `TypeId`
 /// - Fast interning: O(1) amortized for previously seen types
-/// - Pre-cached primitives: Common types available instantly
+/// - Fixed primitive IDs: `TypeId::STRING`, `TypeId::NUMBER`, ...
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut arena = TypeArena::new();
 ///
-/// // Get primitive types
-/// let string_id = arena.primitives().string;
-/// let number_id = arena.primitives().number;
+/// // Primitive types have fixed IDs
+/// assert_eq!(arena.get(TypeId::STRING), &Type::String);
 ///
 /// // Intern complex types
 /// let obj_type = Type::object(vec![Property::new("x", Type::Number)]);
@@ -131,8 +82,6 @@ pub struct TypeArena {
     /// Uses FxHashMap for faster hashing - Type's hash is compiler-internal,
     /// so we don't need SipHash's DoS resistance.
     intern_cache: FxHashMap<Type, TypeId>,
-    /// Pre-cached primitive type IDs.
-    primitives: PrimitiveTypes,
 }
 
 impl TypeArena {
@@ -166,13 +115,7 @@ impl TypeArena {
         Self {
             types,
             intern_cache,
-            primitives: PrimitiveTypes::default(),
         }
-    }
-
-    #[inline]
-    pub fn primitives(&self) -> &PrimitiveTypes {
-        &self.primitives
     }
 
     /// Intern a type, returning its unique ID.
@@ -200,48 +143,6 @@ impl TypeArena {
     #[inline]
     pub fn get(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
-    }
-
-    #[inline]
-    pub fn try_get(&self, id: TypeId) -> Option<&Type> {
-        self.types.get(id.0 as usize)
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.types.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        // Arena always has primitives, so "empty" means only primitives
-        self.types.len() <= 11
-    }
-
-    /// Get the TypeId for a primitive type, if it matches.
-    ///
-    /// This is faster than interning for known primitives - O(1) constant lookup.
-    #[inline]
-    pub fn primitive_id(&self, ty: &Type) -> Option<TypeId> {
-        match ty {
-            Type::String => Some(TypeId::STRING),
-            Type::Number => Some(TypeId::NUMBER),
-            Type::Boolean => Some(TypeId::BOOLEAN),
-            Type::Null => Some(TypeId::NULL),
-            Type::Undefined => Some(TypeId::UNDEFINED),
-            Type::Void => Some(TypeId::VOID),
-            Type::Any => Some(TypeId::ANY),
-            Type::Unknown => Some(TypeId::UNKNOWN),
-            Type::Never => Some(TypeId::NEVER),
-            Type::BooleanLiteral(true) => Some(TypeId::TRUE),
-            Type::BooleanLiteral(false) => Some(TypeId::FALSE),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    pub fn intern_fast(&mut self, ty: Type) -> TypeId {
-        self.primitive_id(&ty).unwrap_or_else(|| self.intern(ty))
     }
 
     // =====================================================
@@ -308,21 +209,6 @@ impl TypeArena {
         })
     }
 
-    /// Create and intern a generic function type.
-    pub fn generic_function(
-        &mut self,
-        type_params: Vec<TypeParam>,
-        params: Vec<Param>,
-        return_type: TypeId,
-    ) -> TypeId {
-        self.intern(Type::Function {
-            params,
-            return_type,
-            type_params,
-            type_predicate: None,
-        })
-    }
-
     /// Create and intern an object type.
     pub fn object(&mut self, properties: Vec<Property>) -> TypeId {
         self.intern(Type::Object {
@@ -333,138 +219,11 @@ impl TypeArena {
         })
     }
 
-    /// Create and intern an object type with inheritance.
-    pub fn object_with_extends(
-        &mut self,
-        properties: Vec<Property>,
-        extends: Vec<TypeId>,
-    ) -> TypeId {
-        self.intern(Type::Object {
-            properties,
-            index_signature: None,
-            extends,
-            type_params: vec![],
-        })
-    }
-
-    /// Create and intern a generic object type.
-    pub fn generic_object(
-        &mut self,
-        type_params: Vec<TypeParam>,
-        properties: Vec<Property>,
-        extends: Vec<TypeId>,
-    ) -> TypeId {
-        self.intern(Type::Object {
-            properties,
-            index_signature: None,
-            extends,
-            type_params,
-        })
-    }
-
     /// Create and intern a type reference.
     pub fn type_ref(&mut self, name: impl Into<String>, type_args: Vec<TypeId>) -> TypeId {
         self.intern(Type::TypeRef {
             name: name.into(),
             type_args,
-        })
-    }
-
-    /// Create and intern a string literal type.
-    pub fn string_literal(&mut self, value: impl Into<String>) -> TypeId {
-        self.intern(Type::StringLiteral(value.into()))
-    }
-
-    /// Create and intern a number literal type.
-    pub fn number_literal(&mut self, value: f64) -> TypeId {
-        self.intern(Type::NumberLiteral(value))
-    }
-
-    /// Create and intern a keyof type.
-    pub fn keyof(&mut self, inner: TypeId) -> TypeId {
-        self.intern(Type::KeyOf(inner))
-    }
-
-    /// Create and intern an indexed access type.
-    pub fn indexed_access(&mut self, object_type: TypeId, index_type: TypeId) -> TypeId {
-        self.intern(Type::IndexedAccess {
-            object_type,
-            index_type,
-        })
-    }
-
-    /// Create and intern a mapped type.
-    pub fn mapped_type(
-        &mut self,
-        type_param: String,
-        constraint: TypeId,
-        template: TypeId,
-        readonly_modifier: Option<bool>,
-        optional_modifier: Option<bool>,
-    ) -> TypeId {
-        self.intern(Type::MappedType {
-            type_param,
-            constraint,
-            template,
-            readonly_modifier,
-            optional_modifier,
-        })
-    }
-
-    /// Create and intern a conditional type.
-    pub fn conditional_type(
-        &mut self,
-        check_type: TypeId,
-        extends_type: TypeId,
-        true_type: TypeId,
-        false_type: TypeId,
-    ) -> TypeId {
-        self.intern(Type::ConditionalType {
-            check_type,
-            extends_type,
-            true_type,
-            false_type,
-        })
-    }
-
-    /// Create and intern an infer type.
-    pub fn infer_type(&mut self, name: impl Into<String>, constraint: Option<TypeId>) -> TypeId {
-        self.intern(Type::InferType {
-            name: name.into(),
-            constraint,
-        })
-    }
-
-    /// Create and intern a type parameter.
-    pub fn type_parameter(
-        &mut self,
-        name: impl Into<String>,
-        constraint: Option<TypeId>,
-        default: Option<TypeId>,
-    ) -> TypeId {
-        self.intern(Type::TypeParameter {
-            name: name.into(),
-            constraint,
-            default,
-        })
-    }
-
-    /// Create and intern a template literal type.
-    pub fn template_literal_type(&mut self, texts: Vec<String>, types: Vec<TypeId>) -> TypeId {
-        self.intern(Type::TemplateLiteralType { texts, types })
-    }
-
-    /// Create and intern a class constructor type.
-    pub fn class_constructor(
-        &mut self,
-        params: Vec<Param>,
-        type_params: Vec<TypeParam>,
-        static_members: Vec<Property>,
-    ) -> TypeId {
-        self.intern(Type::ClassConstructor {
-            params,
-            type_params,
-            static_members,
         })
     }
 }
@@ -482,24 +241,22 @@ mod tests {
     #[test]
     fn test_primitive_ids_are_stable() {
         let arena = TypeArena::new();
-        // Verify PrimitiveTypes struct matches TypeId constants
-        assert_eq!(arena.primitives().string, TypeId::STRING);
-        assert_eq!(arena.primitives().number, TypeId::NUMBER);
-        assert_eq!(arena.primitives().boolean, TypeId::BOOLEAN);
-        assert_eq!(arena.primitives().null, TypeId::NULL);
-        assert_eq!(arena.primitives().undefined, TypeId::UNDEFINED);
-        assert_eq!(arena.primitives().void, TypeId::VOID);
-        assert_eq!(arena.primitives().any, TypeId::ANY);
-        assert_eq!(arena.primitives().unknown, TypeId::UNKNOWN);
-        assert_eq!(arena.primitives().never, TypeId::NEVER);
-        assert_eq!(arena.primitives().true_literal, TypeId::TRUE);
-        assert_eq!(arena.primitives().false_literal, TypeId::FALSE);
-
-        // Verify the actual numeric values for stability across rebuilds
-        assert_eq!(TypeId::STRING.as_raw(), 0);
-        assert_eq!(TypeId::NUMBER.as_raw(), 1);
-        assert_eq!(TypeId::BOOLEAN.as_raw(), 2);
-        assert_eq!(TypeId::NEVER.as_raw(), 8);
+        let expected = [
+            (TypeId::STRING, Type::String),
+            (TypeId::NUMBER, Type::Number),
+            (TypeId::BOOLEAN, Type::Boolean),
+            (TypeId::NULL, Type::Null),
+            (TypeId::UNDEFINED, Type::Undefined),
+            (TypeId::VOID, Type::Void),
+            (TypeId::ANY, Type::Any),
+            (TypeId::UNKNOWN, Type::Unknown),
+            (TypeId::NEVER, Type::Never),
+            (TypeId::TRUE, Type::BooleanLiteral(true)),
+            (TypeId::FALSE, Type::BooleanLiteral(false)),
+        ];
+        for (id, ty) in expected {
+            assert_eq!(arena.get(id), &ty);
+        }
     }
 
     #[test]
@@ -542,28 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn test_primitive_id_fast_path() {
-        let arena = TypeArena::new();
-
-        assert_eq!(
-            arena.primitive_id(&Type::String),
-            Some(arena.primitives().string)
-        );
-        assert_eq!(
-            arena.primitive_id(&Type::Number),
-            Some(arena.primitives().number)
-        );
-        // Object types don't have a primitive ID
-        let obj = Type::Object {
-            properties: vec![],
-            index_signature: None,
-            extends: vec![],
-            type_params: vec![],
-        };
-        assert_eq!(arena.primitive_id(&obj), None);
-    }
-
-    #[test]
     fn test_union_with_type_ids() {
         let mut arena = TypeArena::new();
 
@@ -576,8 +311,8 @@ mod tests {
 
     #[test]
     fn test_type_id_is_copy() {
-        let arena = TypeArena::new();
-        let id = arena.primitives().string;
+        let mut arena = TypeArena::new();
+        let id = arena.intern(Type::String);
         let id2 = id; // Copy
         assert_eq!(id, id2);
     }
@@ -589,7 +324,7 @@ mod tests {
         let true_id = arena.intern(Type::BooleanLiteral(true));
         let false_id = arena.intern(Type::BooleanLiteral(false));
 
-        assert_eq!(true_id, arena.primitives().true_literal);
-        assert_eq!(false_id, arena.primitives().false_literal);
+        assert_eq!(true_id, TypeId::TRUE);
+        assert_eq!(false_id, TypeId::FALSE);
     }
 }

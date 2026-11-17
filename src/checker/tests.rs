@@ -2836,7 +2836,7 @@ fn test_boolean_method_via_interface() {
 fn test_error_severity_default_is_error() {
     use super::Severity;
 
-    let error = TypeError::new("test message", oxc_span::Span::new(0, 10), 1234);
+    let error = TypeError::new("test message", Span::new(0, 10), 1234);
     assert!(error.is_error());
     assert!(!error.is_warning());
     assert_eq!(error.severity, Severity::Error);
@@ -2846,7 +2846,7 @@ fn test_error_severity_default_is_error() {
 fn test_warning_severity() {
     use super::Severity;
 
-    let warning = TypeError::warning("test warning", oxc_span::Span::new(0, 10), 5678);
+    let warning = TypeError::warning("test warning", Span::new(0, 10), 5678);
     assert!(!warning.is_error());
     assert!(warning.is_warning());
     assert_eq!(warning.severity, Severity::Warning);
@@ -2854,9 +2854,9 @@ fn test_warning_severity() {
 
 #[test]
 fn test_related_spans() {
-    let error = TypeError::new("main error", oxc_span::Span::new(0, 10), 1234)
-        .with_related("related context", oxc_span::Span::new(20, 30))
-        .with_related("another related", oxc_span::Span::new(40, 50));
+    let error = TypeError::new("main error", Span::new(0, 10), 1234)
+        .with_related("related context", Span::new(20, 30))
+        .with_related("another related", Span::new(40, 50));
 
     assert_eq!(error.related.len(), 2);
     assert_eq!(error.related[0].message, "related context");
@@ -3112,8 +3112,7 @@ fn test_assertion_function_narrows_type() {
     );
     assert!(
         errors.is_empty(),
-        "Assertion should narrow x to string. Errors: {:?}",
-        errors
+        "Assertion should narrow x to string. Errors: {errors:?}"
     );
 }
 

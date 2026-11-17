@@ -2,25 +2,76 @@
 members = [".", "ts-conformance"]
 resolver = "3"
 
-[package]
-name = "zelda"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/janaSunrise/zelda"
+publish = false
 
-[dependencies]
-oxc_parser = "0.159"
-oxc_ast = "0.159"
+[workspace.dependencies]
+zelda = { path = "." }
 oxc_allocator = "0.159"
+oxc_ast = "0.159"
+oxc_parser = "0.159"
 oxc_span = "0.159"
-oxc_diagnostics = "0.159"
-clap = { version = "4.5", features = ["derive", "color"] }
-miette = { version = "7.6", features = ["fancy"] }
-owo-colors = "4.2"
-thiserror = "2"
+clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustc-hash = "2.1"
 rayon = "1.11"
+regex = "1"
+indicatif = "0.18"
+tempfile = "3"
+wait-timeout = "0.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Selected pedantic lints that catch real issues without much noise.
+cloned_instead_of_copied = "warn"
+explicit_iter_loop = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+manual_let_else = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
+# Panics belong in tests; library code should propagate errors
+# (see clippy.toml: allowed in tests).
+unwrap_used = "warn"
+
+[package]
+name = "zelda"
+description = "A fast TypeScript type checker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+clap = { workspace = true, features = ["color"] }
+miette = { version = "7.6", features = ["fancy"] }
+owo-colors = { version = "4.2", features = ["supports-colors"] }
+thiserror = "2"
+serde.workspace = true
+serde_json.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

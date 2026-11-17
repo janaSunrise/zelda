@@ -31,7 +31,7 @@ pub fn load_lib_dts(symbols: &mut SymbolTable) {
         #[cfg(debug_assertions)]
         {
             for err in diagnostics.errors() {
-                eprintln!("lib.d.ts parse error: {}", err);
+                eprintln!("lib.d.ts parse error: {err}");
             }
             panic!("Failed to parse built-in lib.d.ts");
         }

@@ -345,7 +345,8 @@ impl<'a> Checker<'a> {
                     params[i].ty
                 } else if has_rest {
                     // Rest parameter - check against element type of the array
-                    let rest_param = params.last().unwrap();
+                    // `has_rest` implies `params` is non-empty.
+                    let rest_param = &params[params.len() - 1];
                     let rest_ty = self.get_type(rest_param.ty).clone();
                     if let Type::Array(elem_type_id) = rest_ty {
                         elem_type_id

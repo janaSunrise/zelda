@@ -6,6 +6,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use owo_colors::OwoColorize;
+use owo_colors::Stream::{Stderr, Stdout};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -158,7 +159,10 @@ fn report_pretty(err: &ProjectError, sources: &mut SourceCache) {
     };
 
     if err.is_warning() {
-        eprintln!("{}: {message}", "warning".yellow());
+        eprintln!(
+            "{}: {message}",
+            "warning".if_supports_color(Stderr, |t| t.yellow())
+        );
         if let Some(span) = err.span() {
             eprintln!("  --> {}:{}", err.file().display(), span.start);
         }
@@ -178,12 +182,21 @@ fn report_pretty(err: &ProjectError, sources: &mut SourceCache) {
 fn print_file_summary(file: &Path, errors: usize, warnings: usize) {
     let name = file.display();
     match (errors, warnings) {
-        (0, 0) => println!("{} {name}: No errors", "✓".green()),
-        (0, w) => println!("{} {name}: {w} warning(s)", "⚠".yellow()),
-        (e, 0) => eprintln!("\n{} Found {e} error(s) in {name}", "✗".red()),
+        (0, 0) => println!(
+            "{} {name}: No errors",
+            "✓".if_supports_color(Stdout, |t| t.green())
+        ),
+        (0, w) => println!(
+            "{} {name}: {w} warning(s)",
+            "⚠".if_supports_color(Stdout, |t| t.yellow())
+        ),
+        (e, 0) => eprintln!(
+            "\n{} Found {e} error(s) in {name}",
+            "✗".if_supports_color(Stderr, |t| t.red())
+        ),
         (e, w) => eprintln!(
             "\n{} Found {e} error(s) and {w} warning(s) in {name}",
-            "✗".red()
+            "✗".if_supports_color(Stderr, |t| t.red())
         ),
     }
 }

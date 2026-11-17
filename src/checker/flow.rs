@@ -441,12 +441,9 @@ fn types_compatible_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) ->
 
     matches!(
         (a, b),
-        (Type::String, Type::String)
-            | (Type::StringLiteral(_), Type::String)
-            | (Type::Number, Type::Number)
-            | (Type::NumberLiteral(_), Type::Number)
-            | (Type::Boolean, Type::Boolean)
-            | (Type::BooleanLiteral(_), Type::Boolean)
+        (Type::String | Type::StringLiteral(_), Type::String)
+            | (Type::Number | Type::NumberLiteral(_), Type::Number)
+            | (Type::Boolean | Type::BooleanLiteral(_), Type::Boolean)
             | (Type::Null, Type::Null)
             | (Type::Undefined, Type::Undefined)
     )
@@ -541,12 +538,9 @@ fn types_match_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) -> bool
         (a, b),
         (Type::Null, Type::Null)
             | (Type::Undefined, Type::Undefined)
-            | (Type::String, Type::String)
-            | (Type::StringLiteral(_), Type::String)
-            | (Type::Number, Type::Number)
-            | (Type::NumberLiteral(_), Type::Number)
-            | (Type::Boolean, Type::Boolean)
-            | (Type::BooleanLiteral(_), Type::Boolean)
+            | (Type::String | Type::StringLiteral(_), Type::String)
+            | (Type::Number | Type::NumberLiteral(_), Type::Number)
+            | (Type::Boolean | Type::BooleanLiteral(_), Type::Boolean)
     )
 }
 

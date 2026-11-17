@@ -57,7 +57,7 @@ impl<'a> Checker<'a> {
     }
 
     /// `typeof x` -> look up x's type in symbol table
-    fn resolve_type_query(&self, query: &oxc_ast::ast::TSTypeQuery) -> TypeId {
+    fn resolve_type_query(&self, query: &TSTypeQuery) -> TypeId {
         use oxc_ast::ast::TSTypeQueryExprName;
 
         match &query.expr_name {
@@ -106,21 +106,19 @@ impl<'a> Checker<'a> {
         type_ids.sort();
         type_ids.dedup();
 
-        if type_ids.len() == 1 {
-            type_ids.pop().unwrap()
-        } else {
-            self.intern(Type::Union(type_ids))
+        match type_ids.as_slice() {
+            [single] => *single,
+            _ => self.intern(Type::Union(type_ids)),
         }
     }
 
     /// [] -> never, [T] -> T, [T, U, ...] -> T | U | ...
     pub(super) fn unify_types(&mut self, type_ids: Vec<TypeId>) -> TypeId {
-        match type_ids.len() {
-            0 => TypeId::NEVER,
-            1 => type_ids.into_iter().next().unwrap(),
-            _ => {
-                let mut iter = type_ids.into_iter();
-                let mut result = iter.next().unwrap();
+        let mut iter = type_ids.into_iter();
+        match iter.next() {
+            None => TypeId::NEVER,
+            Some(first) => {
+                let mut result = first;
                 for ty_id in iter {
                     result = self.union_types(result, ty_id);
                 }
@@ -477,24 +475,20 @@ impl<'a> Checker<'a> {
                     .map(|p| self.intern(Type::StringLiteral(p.name.clone())))
                     .collect();
 
-                if keys.is_empty() {
-                    TypeId::NEVER
-                } else if keys.len() == 1 {
-                    keys.into_iter().next().unwrap()
-                } else {
-                    self.intern(Type::Union(keys))
+                match keys.as_slice() {
+                    [] => TypeId::NEVER,
+                    [single] => *single,
+                    _ => self.intern(Type::Union(keys)),
                 }
             }
             Type::Union(type_ids) => {
                 // keyof (A | B) = (keyof A) & (keyof B)
                 let resolved_keys: Vec<TypeId> =
                     type_ids.iter().map(|&id| self.resolve_keyof(id)).collect();
-                if resolved_keys.is_empty() {
-                    TypeId::NEVER
-                } else if resolved_keys.len() == 1 {
-                    resolved_keys.into_iter().next().unwrap()
-                } else {
-                    self.intern(Type::Intersection(resolved_keys))
+                match resolved_keys.as_slice() {
+                    [] => TypeId::NEVER,
+                    [single] => *single,
+                    _ => self.intern(Type::Intersection(resolved_keys)),
                 }
             }
             Type::Intersection(type_ids) => {
@@ -933,10 +927,9 @@ impl<'a> Checker<'a> {
                 // Substitute inferred types into true_type
                 let result = self.substitute_type_params(true_type_id, &inferred);
                 return result;
-            } else {
-                // Pattern didn't match, return false_type
-                return false_type_id;
             }
+            // Pattern didn't match, return false_type
+            return false_type_id;
         }
 
         // Normal assignability check
@@ -1271,7 +1264,7 @@ impl<'a> Checker<'a> {
         // Cartesian product: `${A|B}${X|Y}` -> "AX" | "AY" | "BX" | "BY"
         let mut results: Vec<String> = vec![texts[0].clone()];
         for (i, values) in type_values.iter().enumerate() {
-            let suffix = texts.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            let suffix = texts.get(i + 1).map(String::as_str).unwrap_or("");
             let mut new_results = Vec::new();
             for prefix in &results {
                 for value in values {
@@ -1281,13 +1274,13 @@ impl<'a> Checker<'a> {
             results = new_results;
         }
 
-        if results.len() == 1 {
-            self.intern(Type::StringLiteral(results.into_iter().next().unwrap()))
+        let mut string_lits: Vec<TypeId> = results
+            .into_iter()
+            .map(|s| self.intern(Type::StringLiteral(s)))
+            .collect();
+        if string_lits.len() == 1 {
+            string_lits.swap_remove(0)
         } else {
-            let string_lits: Vec<TypeId> = results
-                .into_iter()
-                .map(|s| self.intern(Type::StringLiteral(s)))
-                .collect();
             self.intern(Type::Union(string_lits))
         }
     }

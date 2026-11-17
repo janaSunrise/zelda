@@ -1,22 +1,28 @@
 [package]
 name = "ts-conformance"
-version = "0.1.0"
-edition = "2024"
 description = "Runs zelda against TypeScript's own test suite, using tsc's reference baselines as the oracle"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 autobenches = false
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "ts-conformance"
 path = "src/main.rs"
 
 [dependencies]
-zelda = { path = ".." }
-clap = { version = "4.5", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-regex = "1"
-rayon = "1"
-indicatif = "0.18"
-tempfile = "3"
-wait-timeout = "0.2"
+zelda.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+rayon.workspace = true
+indicatif.workspace = true
+tempfile.workspace = true
+wait-timeout.workspace = true

@@ -231,6 +231,6 @@ pub fn write_json(results: &[TestResult], path: &Path) -> io::Result<()> {
         summary: Summary::from_results(results),
         results,
     };
-    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let file = io::BufWriter::new(std::fs::File::create(path)?);
     serde_json::to_writer_pretty(file, &report).map_err(io::Error::other)
 }

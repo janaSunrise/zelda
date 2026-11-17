@@ -17,11 +17,12 @@ pub const SUITES: [&str; 2] = ["compiler", "conformance"];
 
 /// `// @name: value`. `\w` is ASCII-only in JavaScript, so it is here too.
 static OPTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^//\s*@([A-Za-z0-9_]+)\s*:\s*([^\r\n]*)").unwrap());
+    LazyLock::new(|| Regex::new(r"^//\s*@([A-Za-z0-9_]+)\s*:\s*([^\r\n]*)").expect("valid regex"));
 
 /// `// @link: target -> link`
-static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^//\s*@link\s*:\s*([^\r\n]*)\s*->\s*([^\r\n]*)").unwrap());
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^//\s*@link\s*:\s*([^\r\n]*)\s*->\s*([^\r\n]*)").expect("valid regex")
+});
 
 /// A single TypeScript conformance test file.
 #[derive(Debug, Clone)]

@@ -803,7 +803,9 @@ impl<'a> Checker<'a> {
         }
 
         // Must end with last text segment (if there's more than one)
-        if texts.len() > 1 && !s.ends_with(texts.last().unwrap()) {
+        if let [_, .., last] = texts
+            && !s.ends_with(&last[..])
+        {
             return false;
         }
 
@@ -812,7 +814,7 @@ impl<'a> Checker<'a> {
             let ty = self.get_type(type_ids[0]);
             if matches!(ty, Type::String) {
                 let prefix = &texts[0];
-                let suffix = texts.get(1).map(|s| s.as_str()).unwrap_or("");
+                let suffix = texts.get(1).map(String::as_str).unwrap_or("");
                 if prefix.len() + suffix.len() <= s.len() {
                     let middle = &s[prefix.len()..s.len() - suffix.len()];
                     return !middle.is_empty() || (prefix.len() + suffix.len() == s.len());
@@ -823,7 +825,7 @@ impl<'a> Checker<'a> {
             // For union placeholders
             if let Type::Union(union_type_ids) = ty {
                 let prefix = &texts[0];
-                let suffix = texts.get(1).map(|s| s.as_str()).unwrap_or("");
+                let suffix = texts.get(1).map(String::as_str).unwrap_or("");
                 if s.len() >= prefix.len() + suffix.len() {
                     let middle = &s[prefix.len()..s.len() - suffix.len()];
                     return union_type_ids.iter().any(|&t_id| {

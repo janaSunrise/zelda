@@ -126,9 +126,8 @@ impl<'a> Checker<'a> {
         // Get the class's instance type
         let class_type_id = self.symbols.lookup_type(class_name).map(|s| s.ty);
 
-        let class_type_id = match class_type_id {
-            Some(ty_id) => ty_id,
-            None => return,
+        let Some(class_type_id) = class_type_id else {
+            return;
         };
 
         // Check implements clause
@@ -283,7 +282,7 @@ impl<'a> Checker<'a> {
 
             // Assertion functions return void, type guards return boolean.
             let declared_return_id = func.return_type.as_ref().map(|ann| {
-                if let oxc_ast::ast::TSType::TSTypePredicate(pred) = &ann.type_annotation {
+                if let TSType::TSTypePredicate(pred) = &ann.type_annotation {
                     if pred.asserts {
                         TypeId::VOID
                     } else {

@@ -22,11 +22,6 @@ pub enum ResolveError {
         specifier: String,
         tried_paths: Vec<PathBuf>,
     },
-    /// Circular dependency detected.
-    CircularDependency {
-        specifier: String,
-        cycle: Vec<PathBuf>,
-    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,12 +51,14 @@ impl ResolverConfig {
     }
 
     /// Create a config with path mappings from tsconfig.
+    #[cfg(test)]
     pub fn with_paths(mut self, paths: Vec<(String, Vec<String>)>) -> Self {
         self.paths = paths;
         self
     }
 
     /// Set the base URL for non-relative imports.
+    #[cfg(test)]
     pub fn with_base_url(mut self, base_url: PathBuf) -> Self {
         self.base_url = Some(base_url);
         self
@@ -469,7 +466,7 @@ mod tests {
         let resolver = ModuleResolver::new(config);
         let result = resolver.resolve("@/utils", &main_file);
 
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert!(result.is_ok(), "Expected Ok, got {result:?}");
         let resolved = result.unwrap();
         assert!(
             resolved.path.ends_with("src/utils.ts") || resolved.path.ends_with("src\\utils.ts")
@@ -500,6 +497,6 @@ mod tests {
         let resolver = ModuleResolver::new(config);
         let result = resolver.resolve("@/components/Button", &main_file);
 
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert!(result.is_ok(), "Expected Ok, got {result:?}");
     }
 }

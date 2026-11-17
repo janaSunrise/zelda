@@ -6,10 +6,8 @@
 //! - Coordinating parsing, binding, and checking across files
 //! - Caching parsed modules
 
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_parser::{Parser, ParserReturn};
@@ -27,12 +25,9 @@ use crate::types::Type;
 
 #[derive(Debug)]
 pub struct ModuleInfo {
-    pub path: PathBuf,
-    pub source: Arc<String>,
     /// Exported symbols. Uses FxHashMap for faster lookups.
     pub exports: FxHashMap<String, Type>,
     pub default_export: Option<Type>,
-    pub is_declaration: bool,
 }
 
 /// An error produced while checking a project.
@@ -217,25 +212,6 @@ impl Project {
         Ok(errors)
     }
 
-    /// Pre-read multiple files in parallel for faster I/O.
-    ///
-    /// This reads file contents in parallel using Rayon, returning a map of
-    /// path -> source content. Use this before `check_file` when processing
-    /// many files to reduce I/O latency.
-    ///
-    /// Files that fail to read are silently skipped (errors will be reported
-    /// when `check_file` is called on them).
-    pub fn preload_files(&self, paths: &[PathBuf]) -> FxHashMap<PathBuf, Arc<String>> {
-        paths
-            .par_iter()
-            .filter_map(|path| {
-                let canonical = path.canonicalize().ok()?;
-                let source = std::fs::read_to_string(&canonical).ok()?;
-                Some((canonical, Arc::new(source)))
-            })
-            .collect()
-    }
-
     /// Process a file, resolving imports and checking types.
     fn process_file(
         &mut self,
@@ -260,7 +236,6 @@ impl Project {
             path: path.to_path_buf(),
             error: e.to_string(),
         })?;
-        let source = Arc::new(source);
 
         let allocator = Allocator::default();
         let source_type = if path.to_string_lossy().ends_with(".d.ts") {
@@ -368,16 +343,11 @@ impl Project {
             }
         }
 
-        let is_declaration = source_type.is_typescript_definition();
-
         self.modules.insert(
             path.to_path_buf(),
             ModuleInfo {
-                path: path.to_path_buf(),
-                source,
                 exports,
                 default_export,
-                is_declaration,
             },
         );
 
@@ -426,7 +396,7 @@ impl Project {
                                         }
                                     } else {
                                         errors.push(ProjectError::ModuleNotFound {
-                                            specifier: format!("{}#{}", specifier, imported_name),
+                                            specifier: format!("{specifier}#{imported_name}"),
                                             from_file: from_file.to_path_buf(),
                                             span: s.span,
                                         });
@@ -442,7 +412,7 @@ impl Project {
                                         let _ = symbols.define(local_name, ty_id, SymbolKind::Variable, span);
                                     } else {
                                         errors.push(ProjectError::ModuleNotFound {
-                                            specifier: format!("{} (default)", specifier),
+                                            specifier: format!("{specifier} (default)"),
                                             from_file: from_file.to_path_buf(),
                                             span: s.span,
                                         });
@@ -485,9 +455,6 @@ impl Project {
                     from_file: from_file.to_path_buf(),
                     span: import.source.span,
                 });
-            }
-            Err(ResolveError::CircularDependency { .. }) => {
-                // Already handled by processing check
             }
         }
 
@@ -694,7 +661,7 @@ mod tests {
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
 
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
     #[test]
@@ -744,7 +711,7 @@ mod tests {
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
 
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
     #[test]
@@ -802,7 +769,7 @@ mod tests {
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
 
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
     #[test]
@@ -831,7 +798,7 @@ mod tests {
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
 
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
     #[test]
@@ -852,6 +819,6 @@ mod tests {
         let mut project = Project::new();
         let errors = project.check_file(&main).unwrap();
 
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 }

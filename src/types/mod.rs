@@ -13,11 +13,10 @@
 //!
 //! ```ignore
 //! let mut arena = TypeArena::new();
-//! let string_id = arena.primitives().string;
-//! let obj_id = arena.intern(Type::object(vec![Property::new("x", Type::Number)]));
+//! let obj_id = arena.intern(Type::object(vec![Property::new("x", TypeId::NUMBER)]));
 //!
 //! // TypeId comparisons are O(1)
-//! assert_ne!(string_id, obj_id);
+//! assert_ne!(TypeId::STRING, obj_id);
 //! ```
 
 mod arena;
@@ -30,6 +29,10 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names mirror TypeScript's terms (TypeRef, MappedType, ...)"
+)]
 pub enum Type {
     // Primitives
     String,
@@ -545,6 +548,8 @@ impl Ord for Type {
     }
 }
 
+/// Shorthand constructors, used by tests.
+#[cfg(test)]
 impl Type {
     /// Create an object type with the given properties.
     pub fn object(properties: Vec<Property>) -> Self {
@@ -553,30 +558,6 @@ impl Type {
             index_signature: None,
             extends: vec![],
             type_params: vec![],
-        }
-    }
-
-    /// Create an object type with inheritance (for interfaces with extends).
-    pub fn object_with_extends(properties: Vec<Property>, extends: Vec<TypeId>) -> Self {
-        Self::Object {
-            properties,
-            index_signature: None,
-            extends,
-            type_params: vec![],
-        }
-    }
-
-    /// Create a generic object type with type parameters.
-    pub fn generic_object(
-        type_params: Vec<TypeParam>,
-        properties: Vec<Property>,
-        extends: Vec<TypeId>,
-    ) -> Self {
-        Self::Object {
-            properties,
-            index_signature: None,
-            extends,
-            type_params,
         }
     }
 
@@ -626,93 +607,6 @@ impl Type {
             type_args,
         }
     }
-
-    /// Check if this is a primitive type.
-    pub fn is_primitive(&self) -> bool {
-        matches!(
-            self,
-            Type::String | Type::Number | Type::Boolean | Type::Null | Type::Undefined | Type::Void
-        )
-    }
-
-    /// Simplify a type by applying normalization rules.
-    ///
-    /// Note: This simplified version works at the TypeId level.
-    /// For full simplification with nested type resolution, use TypeArena::simplify().
-    ///
-    /// - Flatten nested unions/intersections
-    /// - Deduplicate elements
-    /// - Filter out never from unions
-    /// - Single-element union/intersection -> unwrap
-    /// - Empty union -> `never`
-    /// - Empty intersection -> `unknown`
-    pub fn simplify(self, arena: &TypeArena) -> Self {
-        match self {
-            Type::Union(type_ids) => {
-                // Flatten nested unions and collect all elements
-                let mut flattened: Vec<TypeId> = Vec::new();
-                for id in type_ids {
-                    match arena.get(id) {
-                        Type::Union(inner_ids) => {
-                            // Flatten: add inner union's elements
-                            flattened.extend(inner_ids.iter().copied());
-                        }
-                        Type::Never => {
-                            // Filter out never types
-                        }
-                        _ => {
-                            flattened.push(id);
-                        }
-                    }
-                }
-
-                // Deduplicate while preserving order
-                let mut seen = std::collections::HashSet::new();
-                let deduped: Vec<TypeId> = flattened
-                    .into_iter()
-                    .filter(|id| seen.insert(*id))
-                    .collect();
-
-                match deduped.len() {
-                    0 => Type::Never,
-                    1 => arena.get(deduped[0]).clone(),
-                    _ => Type::Union(deduped),
-                }
-            }
-            Type::Intersection(type_ids) => {
-                // Flatten nested intersections
-                let mut flattened: Vec<TypeId> = Vec::new();
-                for id in type_ids {
-                    match arena.get(id) {
-                        Type::Intersection(inner_ids) => {
-                            flattened.extend(inner_ids.iter().copied());
-                        }
-                        Type::Never => {
-                            // If any member is never, the whole intersection is never
-                            return Type::Never;
-                        }
-                        _ => {
-                            flattened.push(id);
-                        }
-                    }
-                }
-
-                // Deduplicate while preserving order
-                let mut seen = std::collections::HashSet::new();
-                let deduped: Vec<TypeId> = flattened
-                    .into_iter()
-                    .filter(|id| seen.insert(*id))
-                    .collect();
-
-                match deduped.len() {
-                    0 => Type::Unknown,
-                    1 => arena.get(deduped[0]).clone(),
-                    _ => Type::Intersection(deduped),
-                }
-            }
-            other => other,
-        }
-    }
 }
 
 /// Display wrapper for Type that has access to the arena.
@@ -747,9 +641,9 @@ impl Type {
             Type::Unknown => write!(f, "unknown"),
             Type::Never => write!(f, "never"),
 
-            Type::StringLiteral(s) => write!(f, "\"{}\"", s),
-            Type::NumberLiteral(n) => write!(f, "{}", n),
-            Type::BooleanLiteral(b) => write!(f, "{}", b),
+            Type::StringLiteral(s) => write!(f, "\"{s}\""),
+            Type::NumberLiteral(n) => write!(f, "{n}"),
+            Type::BooleanLiteral(b) => write!(f, "{b}"),
 
             Type::Array(elem_id) => {
                 write!(f, "{}[]", arena.get(*elem_id).display(arena))
@@ -930,7 +824,7 @@ impl Type {
             }
 
             Type::TypeRef { name, type_args } => {
-                write!(f, "{}", name)?;
+                write!(f, "{name}")?;
                 if !type_args.is_empty() {
                     write!(f, "<")?;
                     for (i, &arg_id) in type_args.iter().enumerate() {
@@ -949,7 +843,7 @@ impl Type {
                 constraint,
                 default,
             } => {
-                write!(f, "{}", name)?;
+                write!(f, "{name}")?;
                 if let Some(constraint_id) = constraint {
                     write!(f, " extends {}", arena.get(*constraint_id).display(arena))?;
                 }
@@ -1020,7 +914,7 @@ impl Type {
             }
 
             Type::InferType { name, constraint } => {
-                write!(f, "infer {}", name)?;
+                write!(f, "infer {name}")?;
                 if let Some(constraint_id) = constraint {
                     write!(f, " extends {}", arena.get(*constraint_id).display(arena))?;
                 }
@@ -1030,7 +924,7 @@ impl Type {
             Type::TemplateLiteralType { texts, types } => {
                 write!(f, "`")?;
                 for (i, text) in texts.iter().enumerate() {
-                    write!(f, "{}", text)?;
+                    write!(f, "{text}")?;
                     if let Some(&type_id) = types.get(i) {
                         write!(f, "${{{}}}", arena.get(type_id).display(arena))?;
                     }
@@ -1046,7 +940,7 @@ impl Type {
                 if *is_const {
                     write!(f, "const ")?;
                 }
-                write!(f, "enum {} {{ ", name)?;
+                write!(f, "enum {name} {{ ")?;
                 for (i, member) in members.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -1076,9 +970,9 @@ impl fmt::Display for Type {
             Type::Any => write!(f, "any"),
             Type::Unknown => write!(f, "unknown"),
             Type::Never => write!(f, "never"),
-            Type::StringLiteral(s) => write!(f, "\"{}\"", s),
-            Type::NumberLiteral(n) => write!(f, "{}", n),
-            Type::BooleanLiteral(b) => write!(f, "{}", b),
+            Type::StringLiteral(s) => write!(f, "\"{s}\""),
+            Type::NumberLiteral(n) => write!(f, "{n}"),
+            Type::BooleanLiteral(b) => write!(f, "{b}"),
             // For compound types, show a simplified representation without nested details
             Type::Array(_) => write!(f, "<array>"),
             Type::Tuple(_) => write!(f, "<tuple>"),
@@ -1087,15 +981,15 @@ impl fmt::Display for Type {
             Type::Object { .. } => write!(f, "<object>"),
             Type::Function { .. } => write!(f, "<function>"),
             Type::ClassConstructor { .. } => write!(f, "<class>"),
-            Type::TypeRef { name, .. } => write!(f, "{}", name),
-            Type::TypeParameter { name, .. } => write!(f, "{}", name),
+            Type::TypeRef { name, .. } => write!(f, "{name}"),
+            Type::TypeParameter { name, .. } => write!(f, "{name}"),
             Type::KeyOf(_) => write!(f, "keyof <type>"),
             Type::IndexedAccess { .. } => write!(f, "<indexed-access>"),
             Type::MappedType { .. } => write!(f, "<mapped-type>"),
             Type::ConditionalType { .. } => write!(f, "<conditional>"),
-            Type::InferType { name, .. } => write!(f, "infer {}", name),
+            Type::InferType { name, .. } => write!(f, "infer {name}"),
             Type::TemplateLiteralType { .. } => write!(f, "<template-literal>"),
-            Type::Enum { name, .. } => write!(f, "enum {}", name),
+            Type::Enum { name, .. } => write!(f, "enum {name}"),
         }
     }
 }
@@ -1211,20 +1105,6 @@ pub struct TypePredicate {
     pub type_annotation: Option<TypeId>,
 }
 
-impl TypePredicate {
-    pub fn new(
-        parameter_name: impl Into<String>,
-        asserts: bool,
-        type_annotation: Option<TypeId>,
-    ) -> Self {
-        Self {
-            parameter_name: parameter_name.into(),
-            asserts,
-            type_annotation,
-        }
-    }
-}
-
 /// Enum member: { name: string, value: EnumValue }
 ///
 /// Enum members can have numeric or string values.
@@ -1270,7 +1150,7 @@ impl PartialOrd for EnumValue {
 }
 
 /// Manual Hash implementation for EnumValue since f64 doesn't implement Hash
-impl std::hash::Hash for EnumValue {
+impl Hash for EnumValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             EnumValue::Number(n) => {
@@ -1478,15 +1358,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_primitive() {
-        assert!(Type::String.is_primitive());
-        assert!(Type::Number.is_primitive());
-        assert!(Type::Boolean.is_primitive());
-        assert!(!Type::Any.is_primitive());
-        assert!(!Type::array(TypeId::STRING).is_primitive());
-    }
-
-    #[test]
     fn test_object_with_index_signature() {
         let mut arena = TypeArena::new();
         let obj = Type::Object {
@@ -1503,68 +1374,6 @@ mod tests {
             arena.get(obj_id).display(&arena).to_string(),
             "{ [key: string]: number }"
         );
-    }
-
-    #[test]
-    fn test_simplify_union_with_never() {
-        let arena = TypeArena::new();
-        let union = Type::Union(vec![TypeId::STRING, TypeId::NEVER]);
-        assert_eq!(union.simplify(&arena), Type::String);
-    }
-
-    #[test]
-    fn test_simplify_union_all_never() {
-        let arena = TypeArena::new();
-        let union = Type::Union(vec![TypeId::NEVER, TypeId::NEVER]);
-        assert_eq!(union.simplify(&arena), Type::Never);
-    }
-
-    #[test]
-    fn test_simplify_union_single_element() {
-        let arena = TypeArena::new();
-        let union = Type::Union(vec![TypeId::STRING]);
-        assert_eq!(union.simplify(&arena), Type::String);
-    }
-
-    #[test]
-    fn test_simplify_intersection_with_never() {
-        let arena = TypeArena::new();
-        let intersection = Type::Intersection(vec![TypeId::STRING, TypeId::NEVER]);
-        assert_eq!(intersection.simplify(&arena), Type::Never);
-    }
-
-    #[test]
-    fn test_simplify_intersection_single_element() {
-        let arena = TypeArena::new();
-        let intersection = Type::Intersection(vec![TypeId::STRING]);
-        assert_eq!(intersection.simplify(&arena), Type::String);
-    }
-
-    #[test]
-    fn test_simplify_nested_union() {
-        let mut arena = TypeArena::new();
-        // Create inner union first
-        let inner_union = arena.intern(Type::Union(vec![TypeId::NUMBER, TypeId::BOOLEAN]));
-        // Create outer union with the inner union id
-        let nested = Type::Union(vec![TypeId::STRING, inner_union]);
-        let simplified = nested.simplify(&arena);
-        if let Type::Union(type_ids) = simplified {
-            assert_eq!(type_ids.len(), 3);
-        } else {
-            panic!("Expected Union");
-        }
-    }
-
-    #[test]
-    fn test_simplify_deduplicates() {
-        let arena = TypeArena::new();
-        let union = Type::Union(vec![TypeId::STRING, TypeId::STRING, TypeId::NUMBER]);
-        let simplified = union.simplify(&arena);
-        if let Type::Union(type_ids) = simplified {
-            assert_eq!(type_ids.len(), 2);
-        } else {
-            panic!("Expected Union");
-        }
     }
 
     #[test]

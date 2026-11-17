@@ -18,8 +18,6 @@ pub struct CompilerOptions {
     pub base_url: Option<String>,
     /// Path mappings: { "@/*": ["src/*"] }
     pub paths: Option<HashMap<String, Vec<String>>>,
-    /// Library files to include (e.g., ["es2020", "dom"])
-    pub lib: Option<Vec<String>>,
 }
 
 impl TsConfig {
@@ -31,7 +29,7 @@ impl TsConfig {
 
     /// Find the directory containing tsconfig.json.
     pub fn find_tsconfig_dir(start: &Path) -> Option<PathBuf> {
-        Self::find_tsconfig(start).and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        Self::find_tsconfig(start).and_then(|p| p.parent().map(Path::to_path_buf))
     }
 
     fn find_tsconfig(start: &Path) -> Option<PathBuf> {
@@ -134,23 +132,6 @@ mod tests {
             paths.get("@components/*"),
             Some(&vec!["src/components/*".to_string()])
         );
-    }
-
-    #[test]
-    fn test_parse_lib() {
-        let temp = TempDir::new().unwrap();
-        create_tsconfig(
-            temp.path(),
-            r#"{
-                "compilerOptions": {
-                    "lib": ["es2020", "dom"]
-                }
-            }"#,
-        );
-
-        let config = TsConfig::load(temp.path()).unwrap();
-        let lib = config.compiler_options.lib.unwrap();
-        assert_eq!(lib, vec!["es2020", "dom"]);
     }
 
     #[test]
