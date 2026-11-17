@@ -133,8 +133,8 @@ impl ModuleResolver {
     /// Match pattern `@/*` against specifier `@/utils` -> returns `Some("utils")`
     fn match_path_pattern(&self, pattern: &str, specifier: &str) -> Option<String> {
         if let Some(prefix) = pattern.strip_suffix('*') {
-            if specifier.starts_with(prefix) {
-                return Some(specifier[prefix.len()..].to_string());
+            if let Some(rest) = specifier.strip_prefix(prefix) {
+                return Some(rest.to_string());
             }
         } else if pattern == specifier {
             return Some(String::new());
@@ -168,8 +168,8 @@ impl ModuleResolver {
         }
 
         for ext in &self.config.extensions {
-            let try_path = if ext.starts_with('/') {
-                base_path.join(&ext[1..])
+            let try_path = if let Some(index) = ext.strip_prefix('/') {
+                base_path.join(index)
             } else {
                 PathBuf::from(format!("{}{}", base_path.display(), ext))
             };
@@ -220,9 +220,9 @@ impl ModuleResolver {
         }
 
         for ext in &self.config.extensions {
-            let try_path = if ext.starts_with('/') {
+            let try_path = if let Some(index) = ext.strip_prefix('/') {
                 // Directory index: ./foo -> ./foo/index.ts
-                base_path.join(&ext[1..])
+                base_path.join(index)
             } else {
                 // File extension: ./foo -> ./foo.ts
                 PathBuf::from(format!("{}{}", base_path.display(), ext))
@@ -261,21 +261,22 @@ impl ModuleResolver {
             let package_json = node_modules.join("package.json");
             if package_json.exists()
                 && let Ok(content) = std::fs::read_to_string(&package_json)
-                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        // Try "types" field first, then "typings"
-                        for field in &["types", "typings"] {
-                            if let Some(types_path) = json.get(field).and_then(|v| v.as_str()) {
-                                let resolved = node_modules.join(types_path);
-                                if resolved.exists() {
-                                    return Ok(ResolvedModule {
-                                        path: resolved.canonicalize().unwrap_or(resolved),
-                                        is_declaration: true,
-                                    });
-                                }
-                                tried_paths.push(resolved);
-                            }
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            {
+                // Try "types" field first, then "typings"
+                for field in &["types", "typings"] {
+                    if let Some(types_path) = json.get(field).and_then(|v| v.as_str()) {
+                        let resolved = node_modules.join(types_path);
+                        if resolved.exists() {
+                            return Ok(ResolvedModule {
+                                path: resolved.canonicalize().unwrap_or(resolved),
+                                is_declaration: true,
+                            });
                         }
+                        tried_paths.push(resolved);
                     }
+                }
+            }
 
             // Try index.d.ts
             let index_dts = node_modules.join("index.d.ts");

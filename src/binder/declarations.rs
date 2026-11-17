@@ -9,7 +9,7 @@ use oxc_ast::ast::*;
 
 use crate::symbols::{ScopeKind, SymbolKind};
 use crate::types::resolution;
-use crate::types::{Type, TypeId, TypeParam};
+use crate::types::{EnumMember, EnumValue, Type, TypeId, TypeParam};
 
 use super::Binder;
 
@@ -147,7 +147,10 @@ impl Binder {
             let span = ident.span;
             let ty_id = self.resolve_type_annotation_oxc(&param.type_annotation);
 
-            if let Err(err) = self.symbols.define(name, ty_id, SymbolKind::Parameter, span) {
+            if let Err(err) = self
+                .symbols
+                .define(name, ty_id, SymbolKind::Parameter, span)
+            {
                 self.errors.push(err.into());
             }
         }
@@ -167,7 +170,10 @@ impl Binder {
                 .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                 .unwrap_or(TypeId::UNKNOWN);
 
-            if let Err(err) = self.symbols.define(name, ty_id, SymbolKind::Parameter, span) {
+            if let Err(err) = self
+                .symbols
+                .define(name, ty_id, SymbolKind::Parameter, span)
+            {
                 self.errors.push(err.into());
             }
         }
@@ -241,9 +247,9 @@ impl Binder {
                 self.errors.push(err.into());
             }
             // Type namespace: the instance type (Object with properties)
-            if let Err(err) = self
-                .symbols
-                .define_type(name, instance_type_id, SymbolKind::Class, span)
+            if let Err(err) =
+                self.symbols
+                    .define_type(name, instance_type_id, SymbolKind::Class, span)
             {
                 self.errors.push(err.into());
             }
@@ -296,6 +302,101 @@ impl Binder {
         if let Err(err) = self
             .symbols
             .define_type(name, ty_id, SymbolKind::Interface, span)
+        {
+            self.errors.push(err.into());
+        }
+    }
+
+    /// Bind an enum declaration.
+    ///
+    /// Enums exist in both value and type namespaces:
+    /// - Value: an object with enum member properties (Color.Red, Color.Green, etc.)
+    /// - Type: the enum type for type annotations (let x: Color)
+    ///
+    /// For numeric enums, members auto-increment from 0 (or from a specified value).
+    /// For string enums, all members must have explicit string values.
+    pub(super) fn bind_enum_declaration(&mut self, decl: &TSEnumDeclaration) {
+        let name = decl.id.name.as_str();
+        let span = decl.id.span;
+        let is_const = decl.r#const;
+
+        // Build enum members with their computed values
+        let mut members = Vec::new();
+        let mut next_value = 0i64;
+
+        for member in &decl.body.members {
+            let member_name = match &member.id {
+                TSEnumMemberName::Identifier(ident) => ident.name.to_string(),
+                TSEnumMemberName::String(s) => s.value.display().to_string(),
+                TSEnumMemberName::ComputedString(s) => s.value.display().to_string(),
+                TSEnumMemberName::ComputedTemplateString(t) => {
+                    // For template literals, use the first quasi's raw value
+                    t.quasis
+                        .first()
+                        .map(|q| q.value.raw.to_string())
+                        .unwrap_or_default()
+                }
+            };
+
+            let value = if let Some(init) = &member.initializer {
+                match init {
+                    Expression::NumericLiteral(n) => {
+                        next_value = n.value as i64 + 1;
+                        EnumValue::Number(n.value)
+                    }
+                    Expression::StringLiteral(s) => {
+                        EnumValue::String(s.value.display().to_string())
+                    }
+                    Expression::UnaryExpression(unary)
+                        if unary.operator == UnaryOperator::UnaryNegation =>
+                    {
+                        if let Expression::NumericLiteral(n) = &unary.argument {
+                            next_value = -(n.value as i64) + 1;
+                            EnumValue::Number(-n.value)
+                        } else {
+                            // Complex expression - treat as number for now
+                            let val = EnumValue::Number(next_value as f64);
+                            next_value += 1;
+                            val
+                        }
+                    }
+                    _ => {
+                        // For other expressions (computed values), use the auto-increment
+                        let val = EnumValue::Number(next_value as f64);
+                        next_value += 1;
+                        val
+                    }
+                }
+            } else {
+                // No initializer - use auto-increment value
+                let val = EnumValue::Number(next_value as f64);
+                next_value += 1;
+                val
+            };
+
+            members.push(EnumMember::new(member_name, value));
+        }
+
+        // Create the enum type
+        let enum_type_id = self.symbols.arena.intern(Type::Enum {
+            name: name.to_string(),
+            members: members.clone(),
+            is_const,
+        });
+
+        // Register in type namespace (for `let x: Color`)
+        if let Err(err) = self
+            .symbols
+            .define_type(name, enum_type_id, SymbolKind::Enum, span)
+        {
+            self.errors.push(err.into());
+        }
+
+        // Register in value namespace (for `Color.Red`)
+        // The enum value is an object with properties for each member
+        if let Err(err) = self
+            .symbols
+            .define(name, enum_type_id, SymbolKind::Enum, span)
         {
             self.errors.push(err.into());
         }
@@ -372,8 +473,17 @@ impl Binder {
             self.bind_formal_parameter(param);
         }
 
-        for stmt in &arrow.body.statements {
-            self.bind_statement(stmt);
+        match arrow.get_function_body() {
+            Some(body) => {
+                for stmt in &body.statements {
+                    self.bind_statement(stmt);
+                }
+            }
+            None => {
+                if let Some(expr) = arrow.get_expression() {
+                    self.bind_expression(expr);
+                }
+            }
         }
 
         self.symbols.pop_scope();

@@ -7,7 +7,7 @@ use oxc_ast::ast::*;
 
 use rustc_hash::FxHashMap;
 
-use crate::types::{Param, Property, Type, TypeId, TypeParam};
+use crate::types::{EnumValue, Param, Property, Type, TypeId, TypeParam};
 
 use super::Checker;
 
@@ -17,14 +17,10 @@ impl<'a> Checker<'a> {
         match expr {
             // Literals
             Expression::StringLiteral(s) => {
-                self.intern(Type::StringLiteral(s.value.to_string()))
+                self.intern(Type::StringLiteral(s.value.display().to_string()))
             }
-            Expression::NumericLiteral(n) => {
-                self.intern(Type::NumberLiteral(n.value))
-            }
-            Expression::BooleanLiteral(b) => {
-                self.intern(Type::BooleanLiteral(b.value))
-            }
+            Expression::NumericLiteral(n) => self.intern(Type::NumberLiteral(n.value)),
+            Expression::BooleanLiteral(b) => self.intern(Type::BooleanLiteral(b.value)),
             Expression::NullLiteral(_) => TypeId::NULL,
             Expression::BigIntLiteral(_) => TypeId::NUMBER,
 
@@ -198,11 +194,11 @@ impl<'a> Checker<'a> {
 
                     let name = match &p.key {
                         PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-                        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                        PropertyKey::StringLiteral(s) => Some(s.value.display().to_string()),
                         PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
                         _ if p.computed => {
                             if let PropertyKey::StringLiteral(s) = &p.key {
-                                Some(s.value.to_string())
+                                Some(s.value.display().to_string())
                             } else {
                                 None
                             }
@@ -276,22 +272,21 @@ impl<'a> Checker<'a> {
             self.resolve_ts_type(&ann.type_annotation)
         } else {
             // Infer from body
-            if arrow.expression {
-                // Expression body: () => expr
-                if let Some(Statement::ExpressionStatement(expr)) = arrow.body.statements.first() {
-                    self.infer_expression(&expr.expression)
-                } else {
-                    TypeId::UNDEFINED
-                }
-            } else {
+            match arrow.get_function_body() {
                 // Block body: infer from returns
-                let returns = self.collect_return_types(&arrow.body);
-                if returns.is_empty() {
-                    TypeId::VOID
-                } else {
-                    let type_ids: Vec<TypeId> = returns.into_iter().map(|(t, _)| t).collect();
-                    self.unify_types(type_ids)
+                Some(body) => {
+                    let returns = self.collect_return_types(body);
+                    if returns.is_empty() {
+                        TypeId::VOID
+                    } else {
+                        let type_ids: Vec<TypeId> = returns.into_iter().map(|(t, _)| t).collect();
+                        self.unify_types(type_ids)
+                    }
                 }
+                // Expression body: () => expr
+                None => arrow
+                    .get_expression()
+                    .map_or(TypeId::UNDEFINED, |expr| self.infer_expression(expr)),
             }
         };
 
@@ -398,21 +393,20 @@ impl<'a> Checker<'a> {
         if let Type::Object {
             index_signature, ..
         } = resolved_type
+            && let Some(idx_sig) = index_signature
         {
-            if let Some(idx_sig) = index_signature {
-                let key_ty = self.get_type(idx_sig.key_type);
-                let key_matches = match (&index_type, key_ty) {
-                    (Type::String, Type::String) => true,
-                    (Type::StringLiteral(_), Type::String) => true,
-                    (Type::Number, Type::Number) => true,
-                    (Type::NumberLiteral(_), Type::Number) => true,
-                    (Type::Number, Type::String) => true,
-                    (Type::NumberLiteral(_), Type::String) => true,
-                    _ => false,
-                };
-                if key_matches {
-                    return idx_sig.value_type;
-                }
+            let key_ty = self.get_type(idx_sig.key_type);
+            let key_matches = matches!(
+                (&index_type, key_ty),
+                (Type::String, Type::String)
+                    | (Type::StringLiteral(_), Type::String)
+                    | (Type::Number, Type::Number)
+                    | (Type::NumberLiteral(_), Type::Number)
+                    | (Type::Number, Type::String)
+                    | (Type::NumberLiteral(_), Type::String)
+            );
+            if key_matches {
+                return idx_sig.value_type;
             }
         }
 
@@ -432,11 +426,11 @@ impl<'a> Checker<'a> {
         };
 
         // If this is a primitive, look up its interface type
-        if let Some(iface_name) = interface_name {
-            if let Some(symbol) = self.symbols.lookup_type(iface_name) {
-                // Recursively get property type from the interface
-                return self.get_property_type(symbol.ty, prop_name);
-            }
+        if let Some(iface_name) = interface_name
+            && let Some(symbol) = self.symbols.lookup_type(iface_name)
+        {
+            // Recursively get property type from the interface
+            return self.get_property_type(symbol.ty, prop_name);
         }
 
         // Convert primitives to their apparent types
@@ -444,15 +438,17 @@ impl<'a> Checker<'a> {
 
         // Resolve TypeRef to its underlying type, applying type argument substitution
         let apparent_type = self.get_type(apparent_type_id).clone();
-        let (resolved_type_id, type_args) = if let Type::TypeRef { name, type_args } = &apparent_type {
-            let base_id = self.symbols
-                .lookup_type(name)
-                .map(|s| s.ty)
-                .unwrap_or(apparent_type_id);
-            (base_id, type_args.clone())
-        } else {
-            (apparent_type_id, vec![])
-        };
+        let (resolved_type_id, type_args) =
+            if let Type::TypeRef { name, type_args } = &apparent_type {
+                let base_id = self
+                    .symbols
+                    .lookup_type(name)
+                    .map(|s| s.ty)
+                    .unwrap_or(apparent_type_id);
+                (base_id, type_args.clone())
+            } else {
+                (apparent_type_id, vec![])
+            };
 
         // For TypeParameter with a constraint, use the constraint for property lookup
         let resolved_type = self.get_type(resolved_type_id).clone();
@@ -507,6 +503,16 @@ impl<'a> Checker<'a> {
             Type::ClassConstructor { static_members, .. } => {
                 if let Some(prop) = static_members.iter().find(|p| p.name == prop_name) {
                     return prop.ty;
+                }
+                TypeId::ANY
+            }
+            Type::Enum { ref members, .. } => {
+                // Enum member access: Color.Red returns the member's literal type
+                if let Some(member) = members.iter().find(|m| m.name == prop_name) {
+                    return match &member.value {
+                        EnumValue::Number(n) => self.intern(Type::NumberLiteral(*n)),
+                        EnumValue::String(s) => self.intern(Type::StringLiteral(s.clone())),
+                    };
                 }
                 TypeId::ANY
             }
@@ -630,10 +636,11 @@ impl<'a> Checker<'a> {
     /// Unwrap Promise<T> to T.
     fn unwrap_promise(&self, ty_id: TypeId) -> TypeId {
         let ty = self.get_type(ty_id);
-        if let Type::TypeRef { name, type_args } = ty {
-            if name == "Promise" && !type_args.is_empty() {
-                return type_args[0];
-            }
+        if let Type::TypeRef { name, type_args } = ty
+            && name == "Promise"
+            && !type_args.is_empty()
+        {
+            return type_args[0];
         }
         ty_id
     }

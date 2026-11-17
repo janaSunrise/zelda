@@ -165,6 +165,23 @@ pub enum Type {
         /// For `hello${T}world`, this is [T]
         types: Vec<TypeId>,
     },
+
+    /// TypeScript enum type
+    ///
+    /// Enums are a way to define a set of named constants.
+    /// `enum Color { Red, Green, Blue }` creates both a type and a value.
+    ///
+    /// Enums exist in both value and type namespaces:
+    /// - As a type: `let x: Color`
+    /// - As a value: `Color.Red`
+    Enum {
+        /// The name of the enum (e.g., "Color")
+        name: String,
+        /// The members of the enum with their computed values
+        members: Vec<EnumMember>,
+        /// Whether this is a `const enum`
+        is_const: bool,
+    },
 }
 
 /// We can't derive `Eq` because `f64` doesn't implement it (NaN != NaN violates reflexivity).
@@ -282,6 +299,15 @@ impl Hash for Type {
                 texts.hash(state);
                 types.hash(state);
             }
+            Type::Enum {
+                name,
+                members,
+                is_const,
+            } => {
+                name.hash(state);
+                members.hash(state);
+                is_const.hash(state);
+            }
         }
     }
 }
@@ -320,6 +346,7 @@ impl Type {
             Type::ConditionalType { .. } => 24,
             Type::InferType { .. } => 25,
             Type::TemplateLiteralType { .. } => 26,
+            Type::Enum { .. } => 27,
         }
     }
 }
@@ -501,6 +528,18 @@ impl Ord for Type {
                     types: tyb,
                 },
             ) => ta.cmp(tb).then_with(|| tya.cmp(tyb)),
+            (
+                Type::Enum {
+                    name: na,
+                    members: ma,
+                    is_const: ca,
+                },
+                Type::Enum {
+                    name: nb,
+                    members: mb,
+                    is_const: cb,
+                },
+            ) => na.cmp(nb).then_with(|| ma.cmp(mb)).then_with(|| ca.cmp(cb)),
             _ => Ordering::Equal, // Same discriminant, shouldn't happen
         }
     }
@@ -799,9 +838,12 @@ impl Type {
                     if !first {
                         write!(f, "; ")?;
                     }
-                    write!(f, "[key: {}]: {}",
+                    write!(
+                        f,
+                        "[key: {}]: {}",
                         arena.get(idx.key_type).display(arena),
-                        arena.get(idx.value_type).display(arena))?;
+                        arena.get(idx.value_type).display(arena)
+                    )?;
                 }
                 write!(f, " }}")
             }
@@ -867,7 +909,12 @@ impl Type {
                         if i > 0 {
                             write!(f, "; ")?;
                         }
-                        write!(f, "static {}: {}", prop.name, arena.get(prop.ty).display(arena))?;
+                        write!(
+                            f,
+                            "static {}: {}",
+                            prop.name,
+                            arena.get(prop.ty).display(arena)
+                        )?;
                     }
                     write!(f, " }}")?;
                 }
@@ -918,9 +965,12 @@ impl Type {
                 object_type,
                 index_type,
             } => {
-                write!(f, "{}[{}]",
+                write!(
+                    f,
+                    "{}[{}]",
                     arena.get(*object_type).display(arena),
-                    arena.get(*index_type).display(arena))
+                    arena.get(*index_type).display(arena)
+                )
             }
 
             Type::MappedType {
@@ -938,7 +988,12 @@ impl Type {
                     None => {}
                 }
                 // Key mapping
-                write!(f, "[{} in {}]", type_param, arena.get(*constraint).display(arena))?;
+                write!(
+                    f,
+                    "[{} in {}]",
+                    type_param,
+                    arena.get(*constraint).display(arena)
+                )?;
                 // Optional modifier
                 match optional_modifier {
                     Some(true) => write!(f, "?")?,
@@ -982,6 +1037,27 @@ impl Type {
                 }
                 write!(f, "`")
             }
+
+            Type::Enum {
+                name,
+                members,
+                is_const,
+            } => {
+                if *is_const {
+                    write!(f, "const ")?;
+                }
+                write!(f, "enum {} {{ ", name)?;
+                for (i, member) in members.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    match &member.value {
+                        EnumValue::Number(n) => write!(f, "{} = {}", member.name, n)?,
+                        EnumValue::String(s) => write!(f, "{} = \"{}\"", member.name, s)?,
+                    }
+                }
+                write!(f, " }}")
+            }
         }
     }
 }
@@ -1019,6 +1095,7 @@ impl fmt::Display for Type {
             Type::ConditionalType { .. } => write!(f, "<conditional>"),
             Type::InferType { name, .. } => write!(f, "infer {}", name),
             Type::TemplateLiteralType { .. } => write!(f, "<template-literal>"),
+            Type::Enum { name, .. } => write!(f, "enum {}", name),
         }
     }
 }
@@ -1148,6 +1225,78 @@ impl TypePredicate {
     }
 }
 
+/// Enum member: { name: string, value: EnumValue }
+///
+/// Enum members can have numeric or string values.
+/// Numeric enums auto-increment, string enums require explicit values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EnumMember {
+    pub name: String,
+    pub value: EnumValue,
+}
+
+impl EnumMember {
+    pub fn new(name: impl Into<String>, value: EnumValue) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
+/// Enum member value - can be numeric or string
+///
+/// Equality, ordering, and hashing all compare numbers by `total_cmp` / bit
+/// pattern, so they agree with each other (as `Hash`/`Eq` require) even for
+/// NaN and signed zeros.
+#[derive(Debug, Clone)]
+pub enum EnumValue {
+    Number(f64),
+    String(String),
+}
+
+impl PartialEq for EnumValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for EnumValue {}
+
+impl PartialOrd for EnumValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Manual Hash implementation for EnumValue since f64 doesn't implement Hash
+impl std::hash::Hash for EnumValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            EnumValue::Number(n) => {
+                0u8.hash(state);
+                n.to_bits().hash(state);
+            }
+            EnumValue::String(s) => {
+                1u8.hash(state);
+                s.hash(state);
+            }
+        }
+    }
+}
+
+/// Manual Ord implementation for EnumValue since f64 doesn't implement Ord
+impl Ord for EnumValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (EnumValue::Number(a), EnumValue::Number(b)) => a.total_cmp(b),
+            (EnumValue::String(a), EnumValue::String(b)) => a.cmp(b),
+            (EnumValue::Number(_), EnumValue::String(_)) => Ordering::Less,
+            (EnumValue::String(_), EnumValue::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,7 +1339,10 @@ mod tests {
         let mut arena = TypeArena::new();
         let tuple = Type::Tuple(vec![TypeId::STRING, TypeId::NUMBER]);
         let tuple_id = arena.intern(tuple.clone());
-        assert_eq!(arena.get(tuple_id).display(&arena).to_string(), "[string, number]");
+        assert_eq!(
+            arena.get(tuple_id).display(&arena).to_string(),
+            "[string, number]"
+        );
     }
 
     #[test]
@@ -1198,7 +1350,10 @@ mod tests {
         let mut arena = TypeArena::new();
         let union = Type::union(vec![TypeId::STRING, TypeId::NUMBER]);
         let union_id = arena.intern(union.clone());
-        assert_eq!(arena.get(union_id).display(&arena).to_string(), "string | number");
+        assert_eq!(
+            arena.get(union_id).display(&arena).to_string(),
+            "string | number"
+        );
     }
 
     #[test]
@@ -1224,22 +1379,34 @@ mod tests {
             Property::new("age", TypeId::NUMBER).optional(),
         ]);
         let obj_id = arena.intern(obj);
-        assert_eq!(arena.get(obj_id).display(&arena).to_string(), "{ name: string; age?: number }");
+        assert_eq!(
+            arena.get(obj_id).display(&arena).to_string(),
+            "{ name: string; age?: number }"
+        );
 
         let readonly_obj = Type::object(vec![Property::new("id", TypeId::NUMBER).readonly()]);
         let readonly_id = arena.intern(readonly_obj);
-        assert_eq!(arena.get(readonly_id).display(&arena).to_string(), "{ readonly id: number }");
+        assert_eq!(
+            arena.get(readonly_id).display(&arena).to_string(),
+            "{ readonly id: number }"
+        );
     }
 
     #[test]
     fn test_function_display() {
         let mut arena = TypeArena::new();
         let func = Type::function(
-            vec![Param::new("x", TypeId::NUMBER), Param::new("y", TypeId::NUMBER)],
+            vec![
+                Param::new("x", TypeId::NUMBER),
+                Param::new("y", TypeId::NUMBER),
+            ],
             TypeId::NUMBER,
         );
         let func_id = arena.intern(func);
-        assert_eq!(arena.get(func_id).display(&arena).to_string(), "(x: number, y: number) => number");
+        assert_eq!(
+            arena.get(func_id).display(&arena).to_string(),
+            "(x: number, y: number) => number"
+        );
 
         let func_optional = Type::function(
             vec![
@@ -1255,12 +1422,12 @@ mod tests {
         );
 
         let arr_num = arena.intern(Type::array(TypeId::NUMBER));
-        let func_rest = Type::function(
-            vec![Param::new("args", arr_num).rest()],
-            TypeId::NUMBER,
-        );
+        let func_rest = Type::function(vec![Param::new("args", arr_num).rest()], TypeId::NUMBER);
         let func_rest_id = arena.intern(func_rest);
-        assert_eq!(arena.get(func_rest_id).display(&arena).to_string(), "(...args: number[]) => number");
+        assert_eq!(
+            arena.get(func_rest_id).display(&arena).to_string(),
+            "(...args: number[]) => number"
+        );
     }
 
     #[test]
@@ -1273,7 +1440,10 @@ mod tests {
             t_ref,
         );
         let func_id = arena.intern(func);
-        assert_eq!(arena.get(func_id).display(&arena).to_string(), "<T>(x: T) => T");
+        assert_eq!(
+            arena.get(func_id).display(&arena).to_string(),
+            "<T>(x: T) => T"
+        );
 
         let func_constrained = Type::generic_function(
             vec![TypeParam::new("T").with_constraint(TypeId::STRING)],
@@ -1292,11 +1462,17 @@ mod tests {
         let mut arena = TypeArena::new();
         let arr_str = Type::type_ref("Array", vec![TypeId::STRING]);
         let arr_id = arena.intern(arr_str);
-        assert_eq!(arena.get(arr_id).display(&arena).to_string(), "Array<string>");
+        assert_eq!(
+            arena.get(arr_id).display(&arena).to_string(),
+            "Array<string>"
+        );
 
         let map_type = Type::type_ref("Map", vec![TypeId::STRING, TypeId::NUMBER]);
         let map_id = arena.intern(map_type);
-        assert_eq!(arena.get(map_id).display(&arena).to_string(), "Map<string, number>");
+        assert_eq!(
+            arena.get(map_id).display(&arena).to_string(),
+            "Map<string, number>"
+        );
 
         assert_eq!(Type::type_ref("User", vec![]).to_string(), "User");
     }
@@ -1323,7 +1499,10 @@ mod tests {
             type_params: vec![],
         };
         let obj_id = arena.intern(obj);
-        assert_eq!(arena.get(obj_id).display(&arena).to_string(), "{ [key: string]: number }");
+        assert_eq!(
+            arena.get(obj_id).display(&arena).to_string(),
+            "{ [key: string]: number }"
+        );
     }
 
     #[test]

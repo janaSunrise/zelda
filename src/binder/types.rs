@@ -207,16 +207,15 @@ impl Binder {
                         }
                         TSSignature::TSIndexSignature(idx) => {
                             // Index signature: [key: string]: T or [key: number]: T
-                            if let Some(param) = idx.parameters.first() {
-                                let key_type_id =
-                                    self.resolve_ts_type(&param.type_annotation.type_annotation);
-                                let value_type_id =
-                                    self.resolve_ts_type(&idx.type_annotation.type_annotation);
-                                index_signature = Some(IndexSignature {
-                                    key_type: key_type_id,
-                                    value_type: value_type_id,
-                                });
-                            }
+                            let param = &idx.parameter;
+                            let key_type_id =
+                                self.resolve_ts_type(&param.type_annotation.type_annotation);
+                            let value_type_id =
+                                self.resolve_ts_type(&idx.type_annotation.type_annotation);
+                            index_signature = Some(IndexSignature {
+                                key_type: key_type_id,
+                                value_type: value_type_id,
+                            });
                         }
                         _ => {}
                     }
@@ -306,11 +305,10 @@ impl Binder {
     /// Infer expression type for initializers (quick inference during binding).
     pub(super) fn infer_expression_type(&mut self, expr: &Expression) -> TypeId {
         match expr {
-            Expression::StringLiteral(s) => {
-                self.symbols
-                    .arena
-                    .intern(Type::StringLiteral(s.value.to_string()))
-            }
+            Expression::StringLiteral(s) => self
+                .symbols
+                .arena
+                .intern(Type::StringLiteral(s.value.display().to_string())),
             Expression::NumericLiteral(n) => {
                 self.symbols.arena.intern(Type::NumberLiteral(n.value))
             }
@@ -388,7 +386,9 @@ impl Binder {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    self.symbols.arena.type_ref(ident.name.to_string(), type_args)
+                    self.symbols
+                        .arena
+                        .type_ref(ident.name.to_string(), type_args)
                 } else {
                     TypeId::ANY
                 }

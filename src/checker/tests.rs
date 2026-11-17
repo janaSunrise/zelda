@@ -10,7 +10,7 @@ fn check(source: &str) -> Vec<TypeError> {
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let result = Parser::new(&allocator, source, source_type).parse();
-    assert!(!result.panicked);
+    assert!(!result.fatal_error);
 
     let mut symbols = SymbolTable::new();
     load_lib_dts(&mut symbols);

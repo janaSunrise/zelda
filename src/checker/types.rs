@@ -63,12 +63,18 @@ impl<'a> Checker<'a> {
         match &query.expr_name {
             TSTypeQueryExprName::IdentifierReference(ident) => {
                 let name = ident.name.as_str();
-                self.symbols.lookup(name).map(|s| s.ty).unwrap_or(TypeId::ANY)
+                self.symbols
+                    .lookup(name)
+                    .map(|s| s.ty)
+                    .unwrap_or(TypeId::ANY)
             }
             // TODO: resolve full qualified chain instead of just the last part
             TSTypeQueryExprName::QualifiedName(qual) => {
                 let name = qual.right.name.as_str();
-                self.symbols.lookup(name).map(|s| s.ty).unwrap_or(TypeId::ANY)
+                self.symbols
+                    .lookup(name)
+                    .map(|s| s.ty)
+                    .unwrap_or(TypeId::ANY)
             }
             TSTypeQueryExprName::TSImportType(_) => TypeId::ANY,
             TSTypeQueryExprName::ThisExpression(_) => TypeId::ANY,
@@ -141,12 +147,15 @@ impl<'a> Checker<'a> {
                 substitutions.get(name).copied().unwrap_or(ty_id)
             }
 
-            Type::TypeRef { ref name, ref type_args } => {
+            Type::TypeRef {
+                ref name,
+                ref type_args,
+            } => {
                 // Bare TypeRef with no args might be a type parameter reference
-                if type_args.is_empty() {
-                    if let Some(&substituted) = substitutions.get(name) {
-                        return substituted;
-                    }
+                if type_args.is_empty()
+                    && let Some(&substituted) = substitutions.get(name)
+                {
+                    return substituted;
                 }
 
                 let new_args: Vec<TypeId> = type_args
@@ -262,15 +271,15 @@ impl<'a> Checker<'a> {
                     })
                     .collect();
 
-                let new_predicate = type_predicate.as_ref().map(|tp| {
-                    crate::types::TypePredicate {
+                let new_predicate = type_predicate
+                    .as_ref()
+                    .map(|tp| crate::types::TypePredicate {
                         parameter_name: tp.parameter_name.clone(),
                         asserts: tp.asserts,
                         type_annotation: tp
                             .type_annotation
                             .map(|id| self.substitute_type_params(id, &filtered_subs)),
-                    }
-                });
+                    });
 
                 self.intern(Type::Function {
                     params: new_params,
@@ -390,7 +399,8 @@ impl<'a> Checker<'a> {
                 constraint,
             } => {
                 let filtered_subs = filter_substitution_single(substitutions, name);
-                let new_constraint = constraint.map(|c| self.substitute_type_params(c, &filtered_subs));
+                let new_constraint =
+                    constraint.map(|c| self.substitute_type_params(c, &filtered_subs));
 
                 self.intern(Type::InferType {
                     name: name.clone(),
@@ -426,6 +436,9 @@ impl<'a> Checker<'a> {
             | Type::StringLiteral(_)
             | Type::NumberLiteral(_)
             | Type::BooleanLiteral(_) => ty_id,
+
+            // Enums don't have type parameters to substitute
+            Type::Enum { .. } => ty_id,
         }
     }
 
@@ -575,7 +588,11 @@ impl<'a> Checker<'a> {
     ///
     /// `Person["name"]` resolves to `string`
     /// `Person[keyof Person]` resolves to union of all property types
-    pub fn resolve_indexed_access(&mut self, object_type_id: TypeId, index_type_id: TypeId) -> TypeId {
+    pub fn resolve_indexed_access(
+        &mut self,
+        object_type_id: TypeId,
+        index_type_id: TypeId,
+    ) -> TypeId {
         // First, try to resolve KeyOf if that's what index_type is
         let index_ty = self.get_type(index_type_id).clone();
         let resolved_index_id = if let Type::KeyOf(inner_id) = index_ty {
@@ -608,16 +625,14 @@ impl<'a> Checker<'a> {
                 self.unify_types(type_ids)
             }
             // Number literal: mainly for tuples
-            Type::NumberLiteral(idx) => {
-                match resolved_object {
-                    Type::Tuple(type_ids) => {
-                        let i = idx as usize;
-                        type_ids.get(i).copied().unwrap_or(TypeId::ANY)
-                    }
-                    Type::Array(elem_id) => elem_id,
-                    _ => TypeId::ANY,
+            Type::NumberLiteral(idx) => match resolved_object {
+                Type::Tuple(type_ids) => {
+                    let i = idx as usize;
+                    type_ids.get(i).copied().unwrap_or(TypeId::ANY)
                 }
-            }
+                Type::Array(elem_id) => elem_id,
+                _ => TypeId::ANY,
+            },
             // String index: get index signature value type
             Type::String => {
                 if let Type::Object {
@@ -701,9 +716,10 @@ impl<'a> Checker<'a> {
         // Fill in defaults for type parameters that weren't inferred
         for tp in type_params {
             if !inferred.contains_key(&tp.name)
-                && let Some(default_id) = tp.default {
-                    inferred.insert(tp.name.clone(), default_id);
-                }
+                && let Some(default_id) = tp.default
+            {
+                inferred.insert(tp.name.clone(), default_id);
+            }
         }
 
         inferred
@@ -732,7 +748,10 @@ impl<'a> Checker<'a> {
 
         match param_type {
             // If param is a TypeRef to one of our type params, infer it
-            Type::TypeRef { ref name, ref type_args } if type_args.is_empty() => {
+            Type::TypeRef {
+                ref name,
+                ref type_args,
+            } if type_args.is_empty() => {
                 // Check if this is a type parameter
                 if type_params.iter().any(|tp| &tp.name == name) {
                     // Widen the argument type for inference
@@ -825,7 +844,11 @@ impl<'a> Checker<'a> {
         // First, resolve TypeRefs in check_type to handle cases like MyExtract<MyUnion, string>
         // where MyUnion is a TypeRef to a union type
         let check_ty = self.get_type(check_type_id).clone();
-        let resolved_check_id = if let Type::TypeRef { ref name, ref type_args } = check_ty {
+        let resolved_check_id = if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = check_ty
+        {
             self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or(check_type_id)
         } else {
@@ -834,7 +857,11 @@ impl<'a> Checker<'a> {
 
         // Also resolve true_type and false_type if they're TypeRefs
         let true_ty = self.get_type(true_type_id).clone();
-        let resolved_true_id = if let Type::TypeRef { ref name, ref type_args } = true_ty {
+        let resolved_true_id = if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = true_ty
+        {
             self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or(true_type_id)
         } else {
@@ -842,7 +869,11 @@ impl<'a> Checker<'a> {
         };
 
         let false_ty = self.get_type(false_type_id).clone();
-        let resolved_false_id = if let Type::TypeRef { ref name, ref type_args } = false_ty {
+        let resolved_false_id = if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = false_ty
+        {
             self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or(false_type_id)
         } else {
@@ -993,12 +1024,16 @@ impl<'a> Checker<'a> {
 
         match extends_type {
             // Infer type: capture the corresponding part of check_type
-            Type::InferType { ref name, constraint } => {
+            Type::InferType {
+                ref name,
+                constraint,
+            } => {
                 // Check constraint if present
                 if let Some(c_id) = constraint
-                    && !self.is_assignable(check_type_id, c_id) {
-                        return false;
-                    }
+                    && !self.is_assignable(check_type_id, c_id)
+                {
+                    return false;
+                }
                 inferred.insert(name.clone(), check_type_id);
                 true
             }
@@ -1016,30 +1051,26 @@ impl<'a> Checker<'a> {
                 } = check_type
                 {
                     // Check if extends_type has a rest parameter with infer type
-                    let ext_has_rest_infer = ext_params.len() == 1
-                        && ext_params[0].rest
-                        && {
-                            let param_ty = self.get_type(ext_params[0].ty);
-                            if let Type::Array(elem_id) = param_ty {
-                                let elem_ty = self.get_type(*elem_id);
-                                matches!(elem_ty, Type::InferType { .. })
-                            } else {
-                                false
-                            }
-                        };
+                    let ext_has_rest_infer = ext_params.len() == 1 && ext_params[0].rest && {
+                        let param_ty = self.get_type(ext_params[0].ty);
+                        if let Type::Array(elem_id) = param_ty {
+                            let elem_ty = self.get_type(*elem_id);
+                            matches!(elem_ty, Type::InferType { .. })
+                        } else {
+                            false
+                        }
+                    };
 
                     // Check if extends_type has a rest parameter with 'any[]' type
-                    let ext_has_any_rest = ext_params.len() == 1
-                        && ext_params[0].rest
-                        && {
-                            let param_ty = self.get_type(ext_params[0].ty);
-                            if let Type::Array(elem_id) = param_ty {
-                                let elem_ty = self.get_type(*elem_id);
-                                matches!(elem_ty, Type::Any)
-                            } else {
-                                false
-                            }
-                        };
+                    let ext_has_any_rest = ext_params.len() == 1 && ext_params[0].rest && {
+                        let param_ty = self.get_type(ext_params[0].ty);
+                        if let Type::Array(elem_id) = param_ty {
+                            let elem_ty = self.get_type(*elem_id);
+                            matches!(elem_ty, Type::Any)
+                        } else {
+                            false
+                        }
+                    };
 
                     if ext_has_rest_infer {
                         // Capture all params as a tuple type for infer P
@@ -1128,10 +1159,11 @@ impl<'a> Checker<'a> {
                 ref type_args,
             } => {
                 // Special case: Array<infer R> matches Type::Array
-                if name == "Array" && type_args.len() == 1 {
-                    if let Type::Array(check_elem_id) = check_type {
-                        return self.infer_from_conditional(check_elem_id, type_args[0], inferred);
-                    }
+                if name == "Array"
+                    && type_args.len() == 1
+                    && let Type::Array(check_elem_id) = check_type
+                {
+                    return self.infer_from_conditional(check_elem_id, type_args[0], inferred);
                 }
 
                 if let Type::TypeRef {
@@ -1165,7 +1197,11 @@ impl<'a> Checker<'a> {
     }
 
     /// Evaluate `\`prefix${T}suffix\`` - unions produce cartesian product of all combinations.
-    pub fn evaluate_template_literal_type(&mut self, texts: &[String], type_ids: &[TypeId]) -> TypeId {
+    pub fn evaluate_template_literal_type(
+        &mut self,
+        texts: &[String],
+        type_ids: &[TypeId],
+    ) -> TypeId {
         if type_ids.is_empty() {
             return self.intern(Type::StringLiteral(texts.join("")));
         }
@@ -1175,7 +1211,11 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|&ty_id| {
                 let ty = self.get_type(ty_id).clone();
-                if let Type::TypeRef { ref name, ref type_args } = ty {
+                if let Type::TypeRef {
+                    ref name,
+                    ref type_args,
+                } = ty
+                {
                     self.resolve_type_ref_with_args(name, type_args)
                         .unwrap_or(ty_id)
                 } else {

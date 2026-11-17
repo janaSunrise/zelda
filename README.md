@@ -8,53 +8,47 @@ Built on [oxc](https://oxc.rs).
 
 ```sh
 cargo build --release
-./target/release/zelda path/to/file.ts
+./target/release/zelda check path/to/file.ts
+./target/release/zelda check --format json path/to/file.ts
 ```
+
+The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
+rustup installs it automatically.
 
 ## Testing
 
-Unit tests:
 ```sh
-cargo test
+cargo test --workspace                       # unit tests
+cargo clippy --workspace --all-targets       # lints (CI uses -D warnings)
 ```
 
-### Conformance Tests
+### Conformance
 
-Conformance tests compare zelda's output against TypeScript's official `tsc` compiler. We use TypeScript's own test suite (~12,000 tests) as the oracle.
+zelda is tested against TypeScript's own test suite: ~12,400 tests from
+`tests/cases/{compiler,conformance}` in the TypeScript repo, compared against
+the diagnostics tsc reports for each (its checked-in reference baselines, so
+tsc itself never needs to run).
 
-**Test Suite Structure:**
-
-The tests come from `_submodules/typescript/tests/cases/`:
-- `compiler/` - General compiler tests
-- `conformance/` - Language conformance tests
-
-Each test is a `.ts` file. We run both zelda and tsc on each file, then compare the error codes they produce.
-
-**Setup:**
 ```sh
-# Clone TypeScript submodule
-git submodule update --init --depth 1
-
-# Install TypeScript (required for running tsc)
-npm install -g typescript
+./scripts/setup-ts-tests.sh       # once: sparse checkout of the test suite (~90 MB)
+cargo conformance                 # run it all (~10s)
+cargo conformance enum            # tests whose path contains "enum"
+cargo conformance compiler/foo.ts # one test, with a diff of the diagnostics
+cargo conformance --update        # lock in newly passing tests
 ```
 
-**Run:**
-```sh
-cargo build --release
-cargo run -p ts-conformance
-```
+[`ts-conformance/passing.txt`](ts-conformance/passing.txt) lists the tests
+that currently pass; a run fails if any of them regress. See
+[`ts-conformance/README.md`](ts-conformance/README.md) for how tests are
+selected and compared.
 
-**Filtering:**
+## Layout
 
-Use `--filter` to run a subset of tests. The pattern matches against filenames:
-```sh
-# Run tests with "union" in the filename
-cargo run -p ts-conformance -- --filter "union*"
-
-# Run tests starting with "generic"
-cargo run -p ts-conformance -- --filter "generic*"
-
-# Run a specific test
-cargo run -p ts-conformance -- -r _submodules/typescript/tests/cases/compiler/foo.ts
-```
+| Path | |
+|------|-|
+| `src/binder/` | Builds the symbol table from the AST |
+| `src/checker/` | Type inference, assignability, control-flow narrowing |
+| `src/types/` | Type representation and interning arena |
+| `src/project/` | Multi-file checking and module resolution |
+| `ts-conformance/` | Conformance test runner |
+| `docs/` | Notes on how the type system works |

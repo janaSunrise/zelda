@@ -250,7 +250,12 @@ impl TypeError {
             let shown_props = missing_props[..SHOWN_MISSING_PROPS_COUNT].join(", ");
             let remaining = missing_props.len() - SHOWN_MISSING_PROPS_COUNT;
             Self::new(
-                errors::MANY_PROPERTIES_MISSING.format(&[source, target, &shown_props, &remaining.to_string()]),
+                errors::MANY_PROPERTIES_MISSING.format(&[
+                    source,
+                    target,
+                    &shown_props,
+                    &remaining.to_string(),
+                ]),
                 span,
                 errors::MANY_PROPERTIES_MISSING.code,
             )
@@ -355,7 +360,11 @@ impl<'a> Checker<'a> {
 
     /// Format a type for display in error messages.
     pub fn fmt_type(&self, id: TypeId) -> String {
-        self.symbols.arena.get(id).display(&self.symbols.arena).to_string()
+        self.symbols
+            .arena
+            .get(id)
+            .display(&self.symbols.arena)
+            .to_string()
     }
 
     pub fn check_program(&mut self, program: &Program) {
@@ -395,7 +404,8 @@ impl<'a> Checker<'a> {
                     && let Some(original_id) = self.lookup_variable_type(&extracted.variable)
                 {
                     // Apply the guard using symbols directly to avoid borrow conflicts
-                    let narrowed = self.apply_type_guard(original_id, &extracted.guard, extracted.negated);
+                    let narrowed =
+                        self.apply_type_guard(original_id, &extracted.guard, extracted.negated);
                     self.narrowing.narrow(extracted.variable.clone(), narrowed);
                 }
 
@@ -407,7 +417,11 @@ impl<'a> Checker<'a> {
                     if let Some(extracted) = &guard
                         && let Some(original_id) = self.lookup_variable_type(&extracted.variable)
                     {
-                        let narrowed = self.apply_type_guard(original_id, &extracted.guard, !extracted.negated);
+                        let narrowed = self.apply_type_guard(
+                            original_id,
+                            &extracted.guard,
+                            !extracted.negated,
+                        );
                         self.narrowing.narrow(extracted.variable.clone(), narrowed);
                     }
                     self.check_statement(alt);
@@ -420,9 +434,10 @@ impl<'a> Checker<'a> {
             }
             Statement::ForStatement(for_stmt) => {
                 if let Some(init) = &for_stmt.init
-                    && let ForStatementInit::VariableDeclaration(decl) = init {
-                        self.check_variable_declaration(decl);
-                    }
+                    && let ForStatementInit::VariableDeclaration(decl) = init
+                {
+                    self.check_variable_declaration(decl);
+                }
                 if let Some(test) = &for_stmt.test {
                     self.check_expression(test);
                 }
@@ -487,6 +502,36 @@ impl<'a> Checker<'a> {
                 self.check_class_declaration(class);
             }
 
+            // `export <declaration>`
+            Statement::ExportDeclaration(export) => self.check_declaration(&export.declaration),
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                    self.check_function_declaration(func);
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    self.check_class_declaration(class);
+                }
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) => {
+                    self.check_interface_declaration(decl);
+                }
+                kind => {
+                    if let Some(expr) = kind.as_expression() {
+                        self.check_expression(expr);
+                    }
+                }
+            },
+
+            _ => {}
+        }
+    }
+
+    /// Check a declaration that appears in an `export` statement.
+    fn check_declaration(&mut self, decl: &Declaration) {
+        match decl {
+            Declaration::VariableDeclaration(decl) => self.check_variable_declaration(decl),
+            Declaration::FunctionDeclaration(func) => self.check_function_declaration(func),
+            Declaration::ClassDeclaration(class) => self.check_class_declaration(class),
+            Declaration::TSInterfaceDeclaration(decl) => self.check_interface_declaration(decl),
             _ => {}
         }
     }
@@ -571,11 +616,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expression::ArrowFunctionExpression(arrow) => {
-                for stmt in &arrow.body.statements {
-                    self.check_statement(stmt);
+            Expression::ArrowFunctionExpression(arrow) => match arrow.get_function_body() {
+                Some(body) => {
+                    for stmt in &body.statements {
+                        self.check_statement(stmt);
+                    }
                 }
-            }
+                None => {
+                    if let Some(expr) = arrow.get_expression() {
+                        self.check_expression(expr);
+                    }
+                }
+            },
             Expression::ParenthesizedExpression(paren) => {
                 self.check_expression(&paren.expression);
             }
@@ -674,8 +726,11 @@ impl<'a> Checker<'a> {
             if !self.is_assignable(value_type_id, target_type_id) {
                 let value_str = self.fmt_type(value_type_id);
                 let target_str = self.fmt_type(target_type_id);
-                self.errors
-                    .push(TypeError::not_assignable(&value_str, &target_str, assign.span));
+                self.errors.push(TypeError::not_assignable(
+                    &value_str,
+                    &target_str,
+                    assign.span,
+                ));
             }
         }
     }
@@ -746,13 +801,13 @@ impl<'a> Checker<'a> {
         // If indexing with a string literal, check property existence
         let index_type = self.get_type(index_type_id).clone();
         if let Type::StringLiteral(prop_name) = &index_type
-            && !self.has_property(object_type_id, &prop_name)
+            && !self.has_property(object_type_id, prop_name)
         {
             let available_props = self.get_available_properties(object_type_id);
             let object_str = self.fmt_type(object_type_id);
             self.errors
                 .push(TypeError::property_not_found_with_suggestion(
-                    &prop_name,
+                    prop_name,
                     &object_str,
                     &available_props,
                     member.span,

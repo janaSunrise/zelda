@@ -70,14 +70,17 @@ impl<'a> Checker<'a> {
                             true_type,
                             false_type,
                         )),
-                        Type::TemplateLiteralType { ref texts, ref types } => {
-                            Some(self.evaluate_template_literal_type(texts, types))
-                        }
+                        Type::TemplateLiteralType {
+                            ref texts,
+                            ref types,
+                        } => Some(self.evaluate_template_literal_type(texts, types)),
                         _ => Some(substituted_id),
                     }
                 }
             }
-            Type::Object { ref type_params, .. } if !type_params.is_empty() => {
+            Type::Object {
+                ref type_params, ..
+            } if !type_params.is_empty() => {
                 let subs = self.build_substitution_map(type_params, type_args);
                 if subs.is_empty() {
                     Some(base_type_id)
@@ -85,7 +88,9 @@ impl<'a> Checker<'a> {
                     Some(self.substitute_type_params(base_type_id, &subs))
                 }
             }
-            Type::Function { ref type_params, .. } if !type_params.is_empty() => {
+            Type::Function {
+                ref type_params, ..
+            } if !type_params.is_empty() => {
                 let subs = self.build_substitution_map(type_params, type_args);
                 if subs.is_empty() {
                     Some(base_type_id)
@@ -108,19 +113,19 @@ impl<'a> Checker<'a> {
 
         for &base_type_id in extends {
             let base_type = self.get_type(base_type_id);
-            if let Type::TypeRef { name, .. } = base_type {
-                if let Some(resolved_id) = self.resolve_type_ref(name) {
-                    let resolved = self.get_type(resolved_id);
-                    if let Type::Object {
-                        properties,
-                        extends: base_extends,
-                        ..
-                    } = resolved
-                    {
-                        let base_props = self.resolve_object_properties(properties, base_extends);
-                        for prop in base_props {
-                            props_map.entry(prop.name.clone()).or_insert(prop);
-                        }
+            if let Type::TypeRef { name, .. } = base_type
+                && let Some(resolved_id) = self.resolve_type_ref(name)
+            {
+                let resolved = self.get_type(resolved_id);
+                if let Type::Object {
+                    properties,
+                    extends: base_extends,
+                    ..
+                } = resolved
+                {
+                    let base_props = self.resolve_object_properties(properties, base_extends);
+                    for prop in base_props {
+                        props_map.entry(prop.name.clone()).or_insert(prop);
                     }
                 }
             }
@@ -254,18 +259,34 @@ impl<'a> Checker<'a> {
         }
 
         // Resolve TemplateLiteralType by evaluating it
-        if let Type::TemplateLiteralType { ref texts, ref types } = source {
+        if let Type::TemplateLiteralType {
+            ref texts,
+            ref types,
+        } = source
+        {
             return self.is_template_literal_assignable(texts, types, target_id);
         }
-        if let Type::TemplateLiteralType { ref texts, ref types } = target {
+        if let Type::TemplateLiteralType {
+            ref texts,
+            ref types,
+        } = target
+        {
             return self.is_source_assignable_to_template_literal(source_id, texts, types);
         }
 
         // Handle TypeRef resolution with type argument instantiation
-        if let Type::TypeRef { ref name, ref type_args } = source {
+        if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = source
+        {
             return self.is_type_ref_assignable(name, type_args, target_id);
         }
-        if let Type::TypeRef { ref name, ref type_args } = target {
+        if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = target
+        {
             return self.is_source_assignable_to_type_ref(source_id, name, type_args);
         }
 
@@ -289,6 +310,61 @@ impl<'a> Checker<'a> {
             (Type::StringLiteral(_), Type::String) => return true,
             (Type::NumberLiteral(_), Type::Number) => return true,
             (Type::BooleanLiteral(_), Type::Boolean) => return true,
+            _ => {}
+        }
+
+        // Enum assignability rules
+        // 1. Enum is assignable to number (for numeric enums)
+        // 2. Number literal matching an enum value is assignable to that enum
+        // 3. Same enum types are assignable to each other
+        match (&source, &target) {
+            // Same enum type
+            (
+                Type::Enum {
+                    name: source_name, ..
+                },
+                Type::Enum {
+                    name: target_name, ..
+                },
+            ) => {
+                if source_name == target_name {
+                    return true;
+                }
+            }
+            // Numeric enum is assignable to number
+            (Type::Enum { members, .. }, Type::Number) => {
+                // All members must be numeric for enum to be assignable to number
+                if members
+                    .iter()
+                    .all(|m| matches!(m.value, crate::types::EnumValue::Number(_)))
+                {
+                    return true;
+                }
+            }
+            // Number/number literal is assignable to numeric enum
+            // In TypeScript, any number is assignable to a numeric enum
+            (Type::Number, Type::Enum { members, .. })
+            | (Type::NumberLiteral(_), Type::Enum { members, .. }) => {
+                // If all members are numeric, number is assignable
+                if members
+                    .iter()
+                    .all(|m| matches!(m.value, crate::types::EnumValue::Number(_)))
+                {
+                    return true;
+                }
+            }
+            // String literal is assignable to string enum if it matches a member value
+            (Type::StringLiteral(s), Type::Enum { members, .. })
+                if members.iter().any(|m| {
+                    if let crate::types::EnumValue::String(ref v) = m.value {
+                        v == s
+                    } else {
+                        false
+                    }
+                }) =>
+            {
+                return true;
+            }
             _ => {}
         }
 
@@ -379,16 +455,13 @@ impl<'a> Checker<'a> {
         } = target
         {
             // Check if source has all required properties (works for primitives via interface lookup)
-            let source_has_props = target_props
-                .iter()
-                .filter(|p| !p.optional)
-                .all(|p| {
-                    let prop_ty = self.get_property_type(source_id, &p.name);
-                    if prop_ty == TypeId::ANY {
-                        return false;
-                    }
-                    self.is_assignable(prop_ty, p.ty)
-                });
+            let source_has_props = target_props.iter().filter(|p| !p.optional).all(|p| {
+                let prop_ty = self.get_property_type(source_id, &p.name);
+                if prop_ty == TypeId::ANY {
+                    return false;
+                }
+                self.is_assignable(prop_ty, p.ty)
+            });
             if source_has_props {
                 return true;
             }
@@ -423,8 +496,10 @@ impl<'a> Checker<'a> {
     fn is_keyof_assignable(&self, _inner_id: TypeId, target_id: TypeId) -> bool {
         // keyof T is assignable to string | number | symbol
         let target = self.get_type(target_id);
-        matches!(target, Type::String | Type::Number | Type::Any | Type::Unknown)
-            || matches!(target, Type::Union(_))
+        matches!(
+            target,
+            Type::String | Type::Number | Type::Any | Type::Unknown
+        ) || matches!(target, Type::Union(_))
     }
 
     fn is_source_assignable_to_keyof(&self, source_id: TypeId, _inner_id: TypeId) -> bool {
@@ -629,14 +704,22 @@ impl<'a> Checker<'a> {
     ) -> Vec<String> {
         // Resolve TypeRefs first
         let source = self.get_type(source_id).clone();
-        let resolved_source_id = if let Type::TypeRef { ref name, ref type_args } = source {
+        let resolved_source_id = if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = source
+        {
             self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or(source_id)
         } else {
             source_id
         };
         let target = self.get_type(target_id).clone();
-        let resolved_target_id = if let Type::TypeRef { ref name, ref type_args } = target {
+        let resolved_target_id = if let Type::TypeRef {
+            ref name,
+            ref type_args,
+        } = target
+        {
             self.resolve_type_ref_with_args(name, type_args)
                 .unwrap_or(target_id)
         } else {

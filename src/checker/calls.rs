@@ -89,21 +89,26 @@ impl<'a> Checker<'a> {
             for tp in &type_params {
                 if let Some(constraint_id) = tp.constraint
                     && let Some(&type_arg_id) = substitutions.get(&tp.name)
-                        && !self.satisfies_constraint(type_arg_id, constraint_id) {
-                            let type_arg_str = self.fmt_type(type_arg_id);
-                            let constraint_str = self.fmt_type(constraint_id);
-                            if has_explicit_type_args {
-                                // Explicit type args: "Type 'X' does not satisfy constraint 'Y'"
-                                self.errors.push(TypeError::constraint_violation(
-                                    &type_arg_str, &constraint_str, call.span,
-                                ));
-                            } else {
-                                // Inferred type args: "Argument of type 'X' is not assignable to parameter of type 'Y'"
-                                self.errors.push(TypeError::argument_not_assignable(
-                                    &type_arg_str, &constraint_str, call.span,
-                                ));
-                            }
-                        }
+                    && !self.satisfies_constraint(type_arg_id, constraint_id)
+                {
+                    let type_arg_str = self.fmt_type(type_arg_id);
+                    let constraint_str = self.fmt_type(constraint_id);
+                    if has_explicit_type_args {
+                        // Explicit type args: "Type 'X' does not satisfy constraint 'Y'"
+                        self.errors.push(TypeError::constraint_violation(
+                            &type_arg_str,
+                            &constraint_str,
+                            call.span,
+                        ));
+                    } else {
+                        // Inferred type args: "Argument of type 'X' is not assignable to parameter of type 'Y'"
+                        self.errors.push(TypeError::argument_not_assignable(
+                            &type_arg_str,
+                            &constraint_str,
+                            call.span,
+                        ));
+                    }
+                }
             }
 
             // Substitute type parameters in parameter types for checking
@@ -155,10 +160,7 @@ impl<'a> Checker<'a> {
         };
 
         // Get parent's constructor type
-        let parent_constructor_id = self
-            .symbols
-            .lookup(&parent_class_name)
-            .map(|s| s.ty);
+        let parent_constructor_id = self.symbols.lookup(&parent_class_name).map(|s| s.ty);
 
         let params = match parent_constructor_id {
             Some(ty_id) => {
@@ -251,23 +253,24 @@ impl<'a> Checker<'a> {
         for tp in &type_params {
             if let Some(constraint_id) = tp.constraint
                 && let Some(&type_arg_id) = substitutions.get(&tp.name)
-                    && !self.satisfies_constraint(type_arg_id, constraint_id) {
-                        let type_arg_str = self.fmt_type(type_arg_id);
-                        let constraint_str = self.fmt_type(constraint_id);
-                        if has_explicit_type_args {
-                            self.errors.push(TypeError::constraint_violation(
-                                &type_arg_str,
-                                &constraint_str,
-                                new_expr.span,
-                            ));
-                        } else {
-                            self.errors.push(TypeError::argument_not_assignable(
-                                &type_arg_str,
-                                &constraint_str,
-                                new_expr.span,
-                            ));
-                        }
-                    }
+                && !self.satisfies_constraint(type_arg_id, constraint_id)
+            {
+                let type_arg_str = self.fmt_type(type_arg_id);
+                let constraint_str = self.fmt_type(constraint_id);
+                if has_explicit_type_args {
+                    self.errors.push(TypeError::constraint_violation(
+                        &type_arg_str,
+                        &constraint_str,
+                        new_expr.span,
+                    ));
+                } else {
+                    self.errors.push(TypeError::argument_not_assignable(
+                        &type_arg_str,
+                        &constraint_str,
+                        new_expr.span,
+                    ));
+                }
+            }
         }
 
         // Instantiate parameter types

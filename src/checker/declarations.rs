@@ -59,7 +59,11 @@ impl<'a> Checker<'a> {
                         );
                     } else if let Expression::ArrayExpression(arr) = init {
                         // Contextual typing: check array literal against tuple type
-                        self.check_array_literal_against_type(arr, declared_type_id, declarator.span);
+                        self.check_array_literal_against_type(
+                            arr,
+                            declared_type_id,
+                            declarator.span,
+                        );
                     } else if !self.is_assignable(init_type_id, declared_type_id) {
                         // Check if the error is due to missing properties
                         let missing = self.find_missing_properties(init_type_id, declared_type_id);
@@ -104,8 +108,8 @@ impl<'a> Checker<'a> {
     /// Check an interface declaration.
     pub(super) fn check_interface_declaration(&mut self, decl: &TSInterfaceDeclaration) {
         for heritage in &decl.extends {
-            let name = match &heritage.expression {
-                Expression::Identifier(ident) => ident.name.to_string(),
+            let name = match &heritage.type_name {
+                TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
                 _ => continue,
             };
             if self.symbols.lookup_type(&name).is_none() {
@@ -234,14 +238,8 @@ impl<'a> Checker<'a> {
             if let Some(type_params) = &func.type_parameters {
                 for param in &type_params.params {
                     let name = param.name.name.as_str();
-                    let constraint_id = param
-                        .constraint
-                        .as_ref()
-                        .map(|c| self.resolve_ts_type(c));
-                    let default_id = param
-                        .default
-                        .as_ref()
-                        .map(|d| self.resolve_ts_type(d));
+                    let constraint_id = param.constraint.as_ref().map(|c| self.resolve_ts_type(c));
+                    let default_id = param.default.as_ref().map(|d| self.resolve_ts_type(d));
 
                     let ty_id = self.intern(Type::TypeParameter {
                         name: name.to_string(),
@@ -249,9 +247,12 @@ impl<'a> Checker<'a> {
                         default: default_id,
                     });
 
-                    let _ =
-                        self.symbols
-                            .define_type(name, ty_id, SymbolKind::TypeAlias, param.name.span);
+                    let _ = self.symbols.define_type(
+                        name,
+                        ty_id,
+                        SymbolKind::TypeAlias,
+                        param.name.span,
+                    );
                 }
             }
 

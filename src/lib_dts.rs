@@ -21,16 +21,16 @@ pub fn load_lib_dts(symbols: &mut SymbolTable) {
 
     let ParserReturn {
         program,
-        errors,
-        panicked,
+        diagnostics,
+        fatal_error,
         ..
     } = Parser::new(&allocator, LIB_DTS, source_type).parse();
 
-    if panicked || !errors.is_empty() {
+    if fatal_error || diagnostics.has_errors() {
         // lib.d.ts should always parse successfully
         #[cfg(debug_assertions)]
         {
-            for err in &errors {
+            for err in diagnostics.errors() {
                 eprintln!("lib.d.ts parse error: {}", err);
             }
             panic!("Failed to parse built-in lib.d.ts");
@@ -58,14 +58,18 @@ mod tests {
         let source_type = SourceType::d_ts();
 
         let ParserReturn {
-            errors, panicked, ..
+            diagnostics,
+            fatal_error,
+            ..
         } = Parser::new(&allocator, LIB_DTS, source_type).parse();
 
-        assert!(!panicked, "lib.d.ts should not cause parser panic");
         assert!(
-            errors.is_empty(),
-            "lib.d.ts should parse without errors: {:?}",
-            errors
+            !fatal_error,
+            "lib.d.ts should not cause a fatal parse error"
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "lib.d.ts should parse without errors: {diagnostics:?}"
         );
     }
 

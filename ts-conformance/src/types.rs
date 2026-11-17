@@ -1,168 +1,101 @@
-//! Data types for test results.
+//! Per-test results.
 
-use std::path::PathBuf;
+use std::fmt;
 
 use serde::Serialize;
 
-use crate::compare::CompareResult;
+use crate::diagnostic::Diagnostic;
 
-#[derive(Debug, Clone)]
-pub struct TestCase {
-    pub path: PathBuf,
-    pub category: Option<String>,
+/// What happened when running one test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", content = "detail", rename_all = "snake_case")]
+pub enum Outcome {
+    /// zelda reported exactly tsc's diagnostics.
+    Pass,
+    /// zelda's diagnostics differ from tsc's.
+    Fail,
+    /// oxc failed to parse a file that tsc accepts (or reports differently).
+    ParseError,
+    /// The checker panicked, overflowed its stack, or otherwise died.
+    Crash(String),
+    Timeout,
+    /// Not compared; the reason says why.
+    Skipped(String),
 }
 
-impl TestCase {
-    pub fn from_path(path: PathBuf) -> Self {
-        let category = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().to_string());
+impl Outcome {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::ParseError => "parse error",
+            Self::Crash(_) => "crash",
+            Self::Timeout => "timeout",
+            Self::Skipped(_) => "skipped",
+        }
+    }
 
-        Self { path, category }
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Self::Pass)
+    }
+
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped(_))
     }
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Crash(detail) | Self::Skipped(detail) => write!(f, "{} ({detail})", self.label()),
+            _ => f.write_str(self.label()),
+        }
+    }
+}
+
+/// The result of running one test.
+#[derive(Debug, Clone, Serialize)]
 pub struct TestResult {
-    pub test: TestCase,
-    pub comparison: CompareResult,
+    /// Path relative to `tests/cases`, e.g. `compiler/foo.ts`.
+    pub id: String,
+    /// The baseline configuration compared against, e.g. `foo(strict=true)`.
+    pub config: Option<String>,
+    pub outcome: Outcome,
+    /// tsc's diagnostics.
+    pub expected: Vec<Diagnostic>,
+    /// zelda's diagnostics.
+    pub actual: Vec<Diagnostic>,
+    /// Syntax errors from the parser, if any.
+    pub parse_errors: Vec<String>,
+    /// In `expected` but not `actual`.
+    pub missing: Vec<Diagnostic>,
+    /// In `actual` but not `expected`.
+    pub extra: Vec<Diagnostic>,
+    pub duration_ms: u64,
 }
 
 impl TestResult {
-    pub fn passed(&self) -> bool {
-        self.comparison.passed()
-    }
-
-    pub fn category(&self) -> Option<&str> {
-        self.test.category.as_deref()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Summary {
-    pub total_files: usize,
-    pub passed: usize,
-    pub failed: usize,
-    pub missing_errors: usize,
-    pub extra_errors: usize,
-    pub zelda_total_ms: u64,
-    pub tsc_total_ms: u64,
-    pub speedup: f64,
-}
-
-impl Summary {
-    pub fn from_results(results: &[TestResult]) -> Self {
-        let total_files = results.len();
-        let passed = results.iter().filter(|r| r.passed()).count();
-        let failed = total_files - passed;
-
-        let missing_errors: usize = results.iter().map(|r| r.comparison.missing).sum();
-        let extra_errors: usize = results.iter().map(|r| r.comparison.extra).sum();
-
-        let zelda_total_ms: u64 = results.iter().map(|r| r.comparison.zelda_ms).sum();
-        let tsc_total_ms: u64 = results.iter().map(|r| r.comparison.tsc_ms).sum();
-
-        let speedup = if zelda_total_ms > 0 {
-            tsc_total_ms as f64 / zelda_total_ms as f64
-        } else {
-            0.0
-        };
-
+    pub fn new(id: impl Into<String>, outcome: Outcome) -> Self {
         Self {
-            total_files,
-            passed,
-            failed,
-            missing_errors,
-            extra_errors,
-            zelda_total_ms,
-            tsc_total_ms,
-            speedup,
+            id: id.into(),
+            config: None,
+            outcome,
+            expected: Vec::new(),
+            actual: Vec::new(),
+            parse_errors: Vec::new(),
+            missing: Vec::new(),
+            extra: Vec::new(),
+            duration_ms: 0,
         }
     }
 
-    pub fn pass_rate(&self) -> f64 {
-        if self.total_files == 0 {
-            1.0
-        } else {
-            self.passed as f64 / self.total_files as f64
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CategoryResult {
-    pub name: String,
-    pub total: usize,
-    pub passed: usize,
-    pub missing: usize,
-    pub extra: usize,
-    pub pass_rate: f64,
-}
-
-impl CategoryResult {
-    pub fn from_results(name: String, results: &[&TestResult]) -> Self {
-        let total = results.len();
-        let passed = results.iter().filter(|r| r.passed()).count();
-        let missing: usize = results.iter().map(|r| r.comparison.missing).sum();
-        let extra: usize = results.iter().map(|r| r.comparison.extra).sum();
-
-        let pass_rate = if total == 0 {
-            1.0
-        } else {
-            passed as f64 / total as f64
-        };
-
-        Self { name, total, passed, missing, extra, pass_rate }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct JsonReport {
-    pub summary: Summary,
-    pub categories: Vec<CategoryResult>,
-    pub results: Vec<JsonTestResult>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct JsonTestResult {
-    pub file: String,
-    pub category: Option<String>,
-    pub passed: bool,
-    pub missing: usize,
-    pub extra: usize,
-    pub missing_codes: Vec<u32>,
-    pub extra_codes: Vec<u32>,
-    pub zelda_ms: u64,
-    pub tsc_ms: u64,
-}
-
-impl From<&TestResult> for JsonTestResult {
-    fn from(result: &TestResult) -> Self {
-        let missing_codes: Vec<u32> = result
-            .comparison
-            .missing_diagnostics()
-            .iter()
-            .map(|d| d.code)
-            .collect();
-
-        let extra_codes: Vec<u32> = result
-            .comparison
-            .extra_diagnostics()
-            .iter()
-            .map(|d| d.code)
-            .collect();
-
-        Self {
-            file: result.test.path.display().to_string(),
-            category: result.test.category.clone(),
-            passed: result.passed(),
-            missing: result.comparison.missing,
-            extra: result.comparison.extra,
-            missing_codes,
-            extra_codes,
-            zelda_ms: result.comparison.zelda_ms,
-            tsc_ms: result.comparison.tsc_ms,
+    /// Grouping for the report: `compiler`, or `conformance/<area>`.
+    pub fn category(&self) -> &str {
+        let mut parts = self.id.splitn(3, '/');
+        let suite = parts.next().unwrap_or_default();
+        match (suite, parts.next(), parts.next()) {
+            ("conformance", Some(area), Some(_)) => &self.id[..suite.len() + 1 + area.len()],
+            _ => suite,
         }
     }
 }
@@ -172,8 +105,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_category_extraction() {
-        let test = TestCase::from_path(PathBuf::from("fixtures/generics/constraints.ts"));
-        assert_eq!(test.category, Some("generics".to_string()));
+    fn categories() {
+        let r = |id: &str| TestResult::new(id, Outcome::Pass);
+        assert_eq!(r("compiler/foo.ts").category(), "compiler");
+        assert_eq!(
+            r("conformance/types/union/u.ts").category(),
+            "conformance/types"
+        );
+        assert_eq!(r("conformance/top.ts").category(), "conformance");
     }
 }

@@ -23,7 +23,7 @@ pub fn resolve_ts_type(ts_type: &TSType, arena: &mut TypeArena) -> TypeId {
         // Literal types
         TSType::TSLiteralType(lit) => match &lit.literal {
             TSLiteral::StringLiteral(s) => {
-                arena.intern(Type::StringLiteral(s.value.to_string()))
+                arena.intern(Type::StringLiteral(s.value.display().to_string()))
             }
             TSLiteral::NumericLiteral(n) => arena.intern(Type::NumberLiteral(n.value)),
             TSLiteral::BooleanLiteral(b) => {
@@ -83,7 +83,13 @@ pub fn resolve_ts_type(ts_type: &TSType, arena: &mut TypeArena) -> TypeId {
             let type_args: Vec<TypeId> = type_ref
                 .type_arguments
                 .as_ref()
-                .map(|params| params.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
+                .map(|params| {
+                    params
+                        .params
+                        .iter()
+                        .map(|t| resolve_ts_type(t, arena))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             arena.type_ref(name, type_args)
@@ -290,14 +296,13 @@ pub fn resolve_type_literal(lit: &TSTypeLiteral, arena: &mut TypeArena) -> TypeI
             }
             TSSignature::TSIndexSignature(idx) => {
                 // Index signature: [key: string]: T or [key: number]: T
-                if let Some(param) = idx.parameters.first() {
-                    let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
-                    let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
-                    index_signature = Some(IndexSignature {
-                        key_type: key_type_id,
-                        value_type: value_type_id,
-                    });
-                }
+                let param = &idx.parameter;
+                let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
+                let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
+                index_signature = Some(IndexSignature {
+                    key_type: key_type_id,
+                    value_type: value_type_id,
+                });
             }
             _ => {}
         }
@@ -355,7 +360,7 @@ pub fn resolve_formal_parameters(params: &FormalParameters, arena: &mut TypeAren
 pub fn get_property_key_name(key: &PropertyKey) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.display().to_string()),
         PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
         _ => None,
     }
@@ -496,14 +501,19 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration, arena: &mut TypeArena
         .extends
         .iter()
         .map(|heritage| {
-            let name = match &heritage.expression {
-                Expression::Identifier(ident) => ident.name.to_string(),
+            let name = match &heritage.type_name {
+                TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
                 _ => return TypeId::ANY,
             };
             let type_args: Vec<TypeId> = heritage
                 .type_arguments
                 .as_ref()
-                .map(|args| args.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
+                .map(|args| {
+                    args.params
+                        .iter()
+                        .map(|t| resolve_ts_type(t, arena))
+                        .collect()
+                })
                 .unwrap_or_default();
             arena.type_ref(name, type_args)
         })
@@ -546,14 +556,13 @@ pub fn build_interface_type(decl: &TSInterfaceDeclaration, arena: &mut TypeArena
             }
             TSSignature::TSIndexSignature(idx) => {
                 // Index signature: [key: string]: T or [key: number]: T
-                if let Some(param) = idx.parameters.first() {
-                    let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
-                    let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
-                    index_signature = Some(IndexSignature {
-                        key_type: key_type_id,
-                        value_type: value_type_id,
-                    });
-                }
+                let param = &idx.parameter;
+                let key_type_id = resolve_ts_type(&param.type_annotation.type_annotation, arena);
+                let value_type_id = resolve_ts_type(&idx.type_annotation.type_annotation, arena);
+                index_signature = Some(IndexSignature {
+                    key_type: key_type_id,
+                    value_type: value_type_id,
+                });
             }
             _ => {}
         }
@@ -601,17 +610,22 @@ pub fn build_class_type(decl: &Class, arena: &mut TypeArena) -> (TypeId, Option<
         .unwrap_or_default();
 
     // Build extends list from super class
-    let extends: Vec<TypeId> =
-        if let Some(Expression::Identifier(ident)) = decl.super_class.as_ref() {
-            let type_args: Vec<TypeId> = decl
-                .super_type_arguments
-                .as_ref()
-                .map(|args| args.params.iter().map(|t| resolve_ts_type(t, arena)).collect())
-                .unwrap_or_default();
-            vec![arena.type_ref(ident.name.to_string(), type_args)]
-        } else {
-            vec![]
-        };
+    let extends: Vec<TypeId> = if let Some(Expression::Identifier(ident)) =
+        decl.heritage.as_ref().map(|h| &h.expression)
+    {
+        let type_args: Vec<TypeId> = decl
+            .heritage_type_arguments()
+            .map(|args| {
+                args.params
+                    .iter()
+                    .map(|t| resolve_ts_type(t, arena))
+                    .collect()
+            })
+            .unwrap_or_default();
+        vec![arena.type_ref(ident.name.to_string(), type_args)]
+    } else {
+        vec![]
+    };
 
     // Process class elements
     for element in &decl.body.body {

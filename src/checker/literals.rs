@@ -37,8 +37,11 @@ impl<'a> Checker<'a> {
                 let inferred_id = self.infer_array_literal(arr);
                 let inferred_str = self.fmt_type(inferred_id);
                 let expected_str = self.fmt_type(expected_id);
-                self.errors
-                    .push(TypeError::not_assignable(&inferred_str, &expected_str, span));
+                self.errors.push(TypeError::not_assignable(
+                    &inferred_str,
+                    &expected_str,
+                    span,
+                ));
                 return;
             }
 
@@ -49,11 +52,8 @@ impl<'a> Checker<'a> {
                     if !self.is_assignable(elem_type_id, expected_type_id) {
                         let elem_str = self.fmt_type(elem_type_id);
                         let expected_str = self.fmt_type(expected_type_id);
-                        self.errors.push(TypeError::not_assignable(
-                            &elem_str,
-                            &expected_str,
-                            span,
-                        ));
+                        self.errors
+                            .push(TypeError::not_assignable(&elem_str, &expected_str, span));
                     }
                 }
             }
@@ -68,11 +68,8 @@ impl<'a> Checker<'a> {
                     if !self.is_assignable(elem_type_id, expected_elem_id) {
                         let elem_str = self.fmt_type(elem_type_id);
                         let expected_str = self.fmt_type(expected_elem_id);
-                        self.errors.push(TypeError::not_assignable(
-                            &elem_str,
-                            &expected_str,
-                            span,
-                        ));
+                        self.errors
+                            .push(TypeError::not_assignable(&elem_str, &expected_str, span));
                     }
                 }
             }
@@ -84,8 +81,11 @@ impl<'a> Checker<'a> {
         if !self.is_assignable(inferred_id, expected_id) {
             let inferred_str = self.fmt_type(inferred_id);
             let expected_str = self.fmt_type(expected_id);
-            self.errors
-                .push(TypeError::not_assignable(&inferred_str, &expected_str, span));
+            self.errors.push(TypeError::not_assignable(
+                &inferred_str,
+                &expected_str,
+                span,
+            ));
         }
     }
 
@@ -132,7 +132,7 @@ impl<'a> Checker<'a> {
             if let ObjectPropertyKind::ObjectProperty(p) = prop
                 && let Some(name) = match &p.key {
                     PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-                    PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                    PropertyKey::StringLiteral(s) => Some(s.value.display().to_string()),
                     PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
                     _ => None,
                 }
@@ -144,8 +144,7 @@ impl<'a> Checker<'a> {
                     let value_type_id = self.infer_expression(&p.value);
                     if !self.is_assignable(value_type_id, expected_prop.ty) {
                         // Check if the error is due to missing properties
-                        let missing =
-                            self.find_missing_properties(value_type_id, expected_prop.ty);
+                        let missing = self.find_missing_properties(value_type_id, expected_prop.ty);
                         let value_str = self.fmt_type(value_type_id);
                         let expected_str = self.fmt_type(expected_prop.ty);
                         if missing.len() > 1 {
@@ -217,7 +216,7 @@ impl<'a> Checker<'a> {
             if let ObjectPropertyKind::ObjectProperty(p) = prop
                 && let Some(name) = match &p.key {
                     PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-                    PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                    PropertyKey::StringLiteral(s) => Some(s.value.display().to_string()),
                     PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
                     _ => None,
                 }

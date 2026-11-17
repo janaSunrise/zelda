@@ -313,6 +313,12 @@ pub const IMPLICIT_ANY_INDEX: Diagnostic = Diagnostic::new(
     "Element implicitly has an 'any' type because expression of type '{0}' can't be used to index type '{1}'.",
 );
 
+// ============================================
+// 5000-5999: Compiler Option / File Errors
+// ============================================
+
+pub const CANNOT_READ_FILE: Diagnostic = Diagnostic::new(5083, "Cannot read file '{0}': {1}.");
+
 #[cfg(test)]
 mod tests {
     use super::*;

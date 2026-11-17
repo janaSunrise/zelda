@@ -1,0 +1,3 @@
+[alias]
+# Run zelda against TypeScript's conformance suite. See ts-conformance/README.md.
+conformance = "run --release --quiet -p ts-conformance --"

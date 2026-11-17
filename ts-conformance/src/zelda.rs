@@ -1,117 +1,52 @@
-//! Run zelda and parse JSON output.
+//! The worker side: run zelda's checker in-process on a test's files.
+//!
+//! The runner invokes this in a child process (`ts-conformance worker`) so
+//! that a crash or hang in the checker is isolated to one test.
 
 use std::path::Path;
-use std::process::Command;
-use std::time::Instant;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use zelda::Project;
 
-use crate::diagnostic::Diagnostic;
-
-#[derive(Debug, Deserialize)]
-struct ZeldaFileResult {
-    #[allow(dead_code)]
-    file: String,
-    errors: Vec<ZeldaError>,
+/// A diagnostic as zelda reports it: a byte span within a test file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawDiagnostic {
+    /// Path relative to the test root, with `/` separators.
+    pub file: String,
+    pub start: u32,
+    /// TypeScript error code, or `None` for syntax errors from the parser.
+    pub code: Option<u32>,
+    pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ZeldaError {
-    Type(ZeldaTypeError),
-    Binding(ZeldaBindingError),
-    ModuleNotFound { specifier: String },
-    FileReadError { path: String, error: String },
-}
+/// Check `files` (relative to `root`) and return all errors found, including
+/// errors in files they import.
+pub fn check(root: &Path, files: &[String]) -> Vec<RawDiagnostic> {
+    // Project paths are canonical (on macOS, /var → /private/var), so the
+    // root must be too for `strip_prefix` to work.
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut project = Project::new();
+    let mut diagnostics = Vec::new();
 
-#[derive(Debug, Deserialize)]
-struct ZeldaTypeError {
-    message: String,
-    code: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ZeldaBindingError {
-    DuplicateSymbol { name: String },
-    UndefinedSymbol { name: String },
-}
-
-#[derive(Debug, Deserialize)]
-struct ZeldaOutput {
-    files: Vec<ZeldaFileResult>,
-}
-
-pub struct ZeldaResult {
-    pub errors: Vec<Diagnostic>,
-    pub duration_ms: u64,
-}
-
-pub fn run_zelda(file: &Path, zelda_binary: &Path) -> Result<ZeldaResult, String> {
-    let start = Instant::now();
-
-    let output = Command::new(zelda_binary)
-        .args(["check", "--format", "json"])
-        .arg(file)
-        .output()
-        .map_err(|e| format!("Failed to run zelda: {}", e))?;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    if stdout.trim().is_empty() {
-        return Err(format!(
-            "Zelda produced no output. stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let zelda_output: ZeldaOutput =
-        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse zelda output: {}", e))?;
-
-    let mut errors = Vec::new();
-    for file_result in zelda_output.files {
-        for error in file_result.errors {
-            if let Some(diag) = convert_zelda_error(&error) {
-                errors.push(diag);
-            }
+    for file in files {
+        let errors = match project.check_file(&root.join(file)) {
+            Ok(errors) => errors,
+            Err(err) => vec![err],
+        };
+        for err in errors.iter().filter(|e| !e.is_warning()) {
+            let path = err.file();
+            let rel = path.strip_prefix(&root).unwrap_or(path);
+            diagnostics.push(RawDiagnostic {
+                file: rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                start: err.span().map_or(0, |s| s.start),
+                code: err.code(),
+                message: err.message(),
+            });
         }
     }
-
-    Ok(ZeldaResult { errors, duration_ms })
-}
-
-fn convert_zelda_error(error: &ZeldaError) -> Option<Diagnostic> {
-    match error {
-        ZeldaError::Type(e) => Some(Diagnostic {
-            code: e.code,
-            message: e.message.clone(),
-            line: 1,
-            col: 1,
-        }),
-        ZeldaError::Binding(ZeldaBindingError::DuplicateSymbol { name }) => Some(Diagnostic {
-            code: 2300,
-            message: format!("Duplicate identifier '{}'.", name),
-            line: 1,
-            col: 1,
-        }),
-        ZeldaError::Binding(ZeldaBindingError::UndefinedSymbol { name }) => Some(Diagnostic {
-            code: 2304,
-            message: format!("Cannot find name '{}'.", name),
-            line: 1,
-            col: 1,
-        }),
-        ZeldaError::ModuleNotFound { specifier } => Some(Diagnostic {
-            code: 2307,
-            message: format!("Cannot find module '{}'.", specifier),
-            line: 1,
-            col: 1,
-        }),
-        ZeldaError::FileReadError { path, error } => Some(Diagnostic {
-            code: 5083,
-            message: format!("Cannot read file '{}': {}", path, error),
-            line: 1,
-            col: 1,
-        }),
-    }
+    diagnostics
 }

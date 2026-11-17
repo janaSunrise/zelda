@@ -5,7 +5,10 @@ mod expressions;
 mod types;
 
 use oxc_ast::ast::*;
+use oxc_span::Span;
 use serde::Serialize;
+
+use crate::errors;
 
 use crate::symbols::{
     DuplicateSymbolError, ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError,
@@ -16,6 +19,29 @@ use crate::symbols::{
 pub enum BindingError {
     DuplicateSymbol(DuplicateSymbolError),
     UndefinedSymbol(UndefinedSymbolError),
+}
+
+impl BindingError {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::DuplicateSymbol(e) => e.duplicate,
+            Self::UndefinedSymbol(e) => e.span,
+        }
+    }
+
+    pub fn code(&self) -> u32 {
+        match self {
+            Self::DuplicateSymbol(_) => errors::DUPLICATE_IDENTIFIER.code,
+            Self::UndefinedSymbol(_) => errors::CANNOT_FIND_NAME.code,
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::DuplicateSymbol(e) => errors::DUPLICATE_IDENTIFIER.format(&[&e.name]),
+            Self::UndefinedSymbol(e) => errors::CANNOT_FIND_NAME.format(&[&e.name]),
+        }
+    }
 }
 
 impl From<DuplicateSymbolError> for BindingError {
@@ -79,7 +105,12 @@ impl Binder {
             Statement::ClassDeclaration(decl) => self.bind_class_declaration(decl),
             Statement::TSInterfaceDeclaration(decl) => self.bind_interface_declaration(decl),
             Statement::TSTypeAliasDeclaration(decl) => self.bind_type_alias_declaration(decl),
-            Statement::TSModuleDeclaration(decl) => self.bind_ts_module_declaration(decl),
+            Statement::TSNamespaceDeclaration(decl) => self.bind_namespace_declaration(decl),
+            Statement::TSExternalModuleDeclaration(decl) => {
+                self.bind_external_module_declaration(decl);
+            }
+            Statement::TSGlobalDeclaration(decl) => self.bind_module_block(&decl.body),
+            Statement::TSEnumDeclaration(decl) => self.bind_enum_declaration(decl),
 
             // Control flow (creates scopes, checks expressions)
             Statement::BlockStatement(block) => self.bind_block_statement(block),
@@ -104,12 +135,9 @@ impl Binder {
             }
 
             // Export declarations - bind the declaration inside
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = &export.declaration {
-                    self.bind_declaration(decl);
-                }
-                // Re-export specifiers (export { x from "./other" }) are handled at project level
-            }
+            Statement::ExportDeclaration(export) => self.bind_declaration(&export.declaration),
+            // Export specifiers (`export { x }`, `export { x } from "./other"`)
+            // are handled at project level.
             Statement::ExportDefaultDeclaration(export) => {
                 self.bind_export_default_declaration(export);
             }
@@ -202,17 +230,16 @@ impl Binder {
             ForStatementLeft::VariableDeclaration(decl) => {
                 self.bind_variable_declaration(decl);
             }
-            ForStatementLeft::AssignmentTargetIdentifier(ident) => {
+            ForStatementLeft::AssignmentTargetIdentifier(ident)
                 if self.symbols.lookup(ident.name.as_str()).is_none()
-                    && !is_builtin_global(ident.name.as_str())
-                {
-                    self.errors
-                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                            name: ident.name.to_string(),
-                            span: ident.span,
-                            is_type: false,
-                        }));
-                }
+                    && !is_builtin_global(ident.name.as_str()) =>
+            {
+                self.errors
+                    .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
+                        name: ident.name.to_string(),
+                        span: ident.span,
+                        is_type: false,
+                    }));
             }
             _ => {}
         }
@@ -227,17 +254,16 @@ impl Binder {
             ForStatementLeft::VariableDeclaration(decl) => {
                 self.bind_variable_declaration(decl);
             }
-            ForStatementLeft::AssignmentTargetIdentifier(ident) => {
+            ForStatementLeft::AssignmentTargetIdentifier(ident)
                 if self.symbols.lookup(ident.name.as_str()).is_none()
-                    && !is_builtin_global(ident.name.as_str())
-                {
-                    self.errors
-                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                            name: ident.name.to_string(),
-                            span: ident.span,
-                            is_type: false,
-                        }));
-                }
+                    && !is_builtin_global(ident.name.as_str()) =>
+            {
+                self.errors
+                    .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
+                        name: ident.name.to_string(),
+                        span: ident.span,
+                        is_type: false,
+                    }));
             }
             _ => {}
         }
@@ -284,48 +310,54 @@ impl Binder {
             Declaration::ClassDeclaration(class) => self.bind_class_declaration(class),
             Declaration::TSInterfaceDeclaration(iface) => self.bind_interface_declaration(iface),
             Declaration::TSTypeAliasDeclaration(alias) => self.bind_type_alias_declaration(alias),
-            Declaration::TSModuleDeclaration(module) => self.bind_ts_module_declaration(module),
+            Declaration::TSNamespaceDeclaration(ns) => self.bind_namespace_declaration(ns),
+            Declaration::TSExternalModuleDeclaration(module) => {
+                self.bind_external_module_declaration(module);
+            }
+            Declaration::TSGlobalDeclaration(global) => self.bind_module_block(&global.body),
+            Declaration::TSEnumDeclaration(decl) => self.bind_enum_declaration(decl),
             _ => {}
         }
     }
 
-    /// Bind a `declare module "name"` or `namespace Name { }` declaration.
-    /// Ambient modules provide types for external packages without implementation.
-    fn bind_ts_module_declaration(&mut self, decl: &oxc_ast::ast::TSModuleDeclaration) {
-        // Get the module name
-        let name = match &decl.id {
-            oxc_ast::ast::TSModuleDeclarationName::Identifier(ident) => ident.name.to_string(),
-            oxc_ast::ast::TSModuleDeclarationName::StringLiteral(lit) => lit.value.to_string(),
-        };
-
-        // For now, we create an empty module type. In a full implementation,
-        // we'd process the body and collect exports.
-        if let Some(body) = &decl.body {
-            match body {
-                oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
-                    // Process statements in the module block
-                    self.symbols.push_scope(ScopeKind::Block);
-                    for stmt in &block.body {
-                        self.bind_statement(stmt);
-                    }
-                    self.symbols.pop_scope();
-                }
-                oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-                    // Nested module: `module A.B { }`
-                    self.bind_ts_module_declaration(nested);
-                }
+    /// Bind a `namespace Name { }` (or legacy `module Name { }`) declaration.
+    ///
+    /// For now the namespace is registered as an empty object type; its body
+    /// is bound in a nested scope so that references inside are still checked.
+    fn bind_namespace_declaration(&mut self, decl: &TSNamespaceDeclaration) {
+        match &decl.body {
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => self.bind_module_block(block),
+            // Dotted namespace: `namespace A.B { }`
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
+                self.bind_namespace_declaration(nested);
             }
         }
+        self.define_empty_module(decl.id.name.to_string(), decl.id.span);
+    }
 
-        // Register the module name in the type namespace
-        let span = match &decl.id {
-            oxc_ast::ast::TSModuleDeclarationName::Identifier(ident) => ident.span,
-            oxc_ast::ast::TSModuleDeclarationName::StringLiteral(lit) => lit.span,
-        };
+    /// Bind an ambient `declare module "name" { }` declaration.
+    ///
+    /// Ambient modules provide types for external packages without implementation.
+    fn bind_external_module_declaration(&mut self, decl: &TSExternalModuleDeclaration) {
+        if let Some(body) = &decl.body {
+            self.bind_module_block(body);
+        }
+        self.define_empty_module(decl.id.value.display().to_string(), decl.id.span);
+    }
 
-        // Modules are registered as empty objects for now
+    fn bind_module_block(&mut self, block: &TSModuleBlock) {
+        self.symbols.push_scope(ScopeKind::Block);
+        for stmt in &block.body {
+            self.bind_statement(stmt);
+        }
+        self.symbols.pop_scope();
+    }
+
+    fn define_empty_module(&mut self, name: String, span: Span) {
         let empty_object_id = self.symbols.arena.object(vec![]);
-        let _ = self.symbols.define_type(name, empty_object_id, SymbolKind::TypeAlias, span);
+        let _ = self
+            .symbols
+            .define_type(name, empty_object_id, SymbolKind::TypeAlias, span);
     }
 
     /// Bind an export default declaration.
@@ -411,7 +443,7 @@ mod tests {
         let allocator = Allocator::default();
         let source_type = SourceType::ts();
         let result = Parser::new(&allocator, source, source_type).parse();
-        assert!(!result.panicked);
+        assert!(!result.fatal_error);
 
         let mut binder = Binder::new();
         binder.bind_program(&result.program);

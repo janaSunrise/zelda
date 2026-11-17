@@ -144,15 +144,15 @@ impl TypeArena {
         // Intern primitives in a fixed order so their IDs are predictable.
         // The order MUST match the TypeId constants (STRING=0, NUMBER=1, etc.)
         let primitives_list = [
-            Type::String,            // TypeId::STRING = 0
-            Type::Number,            // TypeId::NUMBER = 1
-            Type::Boolean,           // TypeId::BOOLEAN = 2
-            Type::Null,              // TypeId::NULL = 3
-            Type::Undefined,         // TypeId::UNDEFINED = 4
-            Type::Void,              // TypeId::VOID = 5
-            Type::Any,               // TypeId::ANY = 6
-            Type::Unknown,           // TypeId::UNKNOWN = 7
-            Type::Never,             // TypeId::NEVER = 8
+            Type::String,                // TypeId::STRING = 0
+            Type::Number,                // TypeId::NUMBER = 1
+            Type::Boolean,               // TypeId::BOOLEAN = 2
+            Type::Null,                  // TypeId::NULL = 3
+            Type::Undefined,             // TypeId::UNDEFINED = 4
+            Type::Void,                  // TypeId::VOID = 5
+            Type::Any,                   // TypeId::ANY = 6
+            Type::Unknown,               // TypeId::UNKNOWN = 7
+            Type::Never,                 // TypeId::NEVER = 8
             Type::BooleanLiteral(true),  // TypeId::TRUE = 9
             Type::BooleanLiteral(false), // TypeId::FALSE = 10
         ];
@@ -282,7 +282,7 @@ impl TypeArena {
     /// Create and intern an intersection type. Returns never if any element is never.
     pub fn intersection(&mut self, types: Vec<TypeId>) -> TypeId {
         // If any is never, result is never
-        if types.iter().any(|&id| id == TypeId::NEVER) {
+        if types.contains(&TypeId::NEVER) {
             return TypeId::NEVER;
         }
 
@@ -334,7 +334,11 @@ impl TypeArena {
     }
 
     /// Create and intern an object type with inheritance.
-    pub fn object_with_extends(&mut self, properties: Vec<Property>, extends: Vec<TypeId>) -> TypeId {
+    pub fn object_with_extends(
+        &mut self,
+        properties: Vec<Property>,
+        extends: Vec<TypeId>,
+    ) -> TypeId {
         self.intern(Type::Object {
             properties,
             index_signature: None,

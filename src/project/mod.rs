@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::binder::{Binder, BindingError};
 use crate::checker::{Checker, TypeError};
+use crate::errors;
 use crate::lib_dts;
 use crate::resolver::{ModuleResolver, ResolveError, ResolverConfig};
 use crate::symbols::{SymbolKind, SymbolTable};
@@ -34,11 +35,32 @@ pub struct ModuleInfo {
     pub is_declaration: bool,
 }
 
+/// An error produced while checking a project.
+///
+/// Every variant records the file it belongs to, so errors found in a
+/// dependency are attributed to that dependency rather than to the file that
+/// triggered checking it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProjectError {
-    Binding(BindingError),
-    Type(TypeError),
+    /// A syntax error reported by the parser. Files with syntax errors are not
+    /// bound or checked.
+    Parse {
+        file: PathBuf,
+        message: String,
+        #[serde(serialize_with = "serialize_span")]
+        span: Span,
+    },
+    Binding {
+        file: PathBuf,
+        #[serde(flatten)]
+        error: BindingError,
+    },
+    Type {
+        file: PathBuf,
+        #[serde(flatten)]
+        error: TypeError,
+    },
     ModuleNotFound {
         specifier: String,
         from_file: PathBuf,
@@ -49,6 +71,61 @@ pub enum ProjectError {
         path: PathBuf,
         error: String,
     },
+}
+
+impl ProjectError {
+    /// The file this error belongs to.
+    pub fn file(&self) -> &Path {
+        match self {
+            Self::Parse { file, .. } | Self::Binding { file, .. } | Self::Type { file, .. } => file,
+            Self::ModuleNotFound { from_file, .. } => from_file,
+            Self::FileReadError { path, .. } => path,
+        }
+    }
+
+    /// The source span of the error, if it points at a location in [`Self::file`].
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::Parse { span, .. } | Self::ModuleNotFound { span, .. } => Some(*span),
+            Self::Binding { error, .. } => Some(error.span()),
+            Self::Type { error, .. } => Some(error.span),
+            Self::FileReadError { .. } => None,
+        }
+    }
+
+    /// The TypeScript diagnostic code (`TS2322` => `2322`).
+    ///
+    /// Parse errors come from oxc, which does not use TypeScript's codes, so
+    /// they have none.
+    pub fn code(&self) -> Option<u32> {
+        match self {
+            Self::Parse { .. } => None,
+            Self::Binding { error, .. } => Some(error.code()),
+            Self::Type { error, .. } => Some(error.code),
+            Self::ModuleNotFound { .. } => Some(errors::CANNOT_FIND_MODULE.code),
+            Self::FileReadError { .. } => Some(errors::CANNOT_READ_FILE.code),
+        }
+    }
+
+    /// The human-readable diagnostic message.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Parse { message, .. } => message.clone(),
+            Self::Binding { error, .. } => error.message(),
+            Self::Type { error, .. } => error.message.clone(),
+            Self::ModuleNotFound { specifier, .. } => {
+                errors::CANNOT_FIND_MODULE.format(&[specifier])
+            }
+            Self::FileReadError { path, error } => {
+                errors::CANNOT_READ_FILE.format(&[&path.display().to_string(), error])
+            }
+        }
+    }
+
+    /// Whether this is a warning rather than an error.
+    pub fn is_warning(&self) -> bool {
+        matches!(self, Self::Type { error, .. } if error.is_warning())
+    }
 }
 
 /// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
@@ -101,9 +178,10 @@ impl Project {
 
             let tsconfig_dir = TsConfig::find_tsconfig_dir(project_root);
             if let Some(dir) = tsconfig_dir
-                && let Some(base_url) = tsconfig.get_base_url(&dir) {
-                    config.base_url = Some(base_url);
-                }
+                && let Some(base_url) = tsconfig.get_base_url(&dir)
+            {
+                config.base_url = Some(base_url);
+            }
 
             config
         } else {
@@ -195,13 +273,23 @@ impl Project {
 
         let ParserReturn {
             program,
-            errors: parse_errors,
-            panicked,
+            diagnostics,
+            fatal_error,
             ..
         } = Parser::new(&allocator, &source, source_type).parse();
 
-        if panicked || !parse_errors.is_empty() {
-            // TODO: Better parse error handling
+        if fatal_error || diagnostics.has_errors() {
+            for diagnostic in diagnostics.errors() {
+                let span = diagnostic.labels.first().map_or(Span::default(), |label| {
+                    let start = label.offset();
+                    Span::new(start, start + label.len())
+                });
+                errors.push(ProjectError::Parse {
+                    file: path.to_path_buf(),
+                    message: diagnostic.message.to_string(),
+                    span,
+                });
+            }
             self.processing.pop();
             return Ok(());
         }
@@ -221,7 +309,10 @@ impl Project {
 
         // Collect binding errors
         for error in &binder.errors {
-            errors.push(ProjectError::Binding(error.clone()));
+            errors.push(ProjectError::Binding {
+                file: path.to_path_buf(),
+                error: error.clone(),
+            });
         }
 
         // Check the module
@@ -229,7 +320,10 @@ impl Project {
         checker.check_program(&program);
 
         for error in &checker.errors {
-            errors.push(ProjectError::Type(error.clone()));
+            errors.push(ProjectError::Type {
+                file: path.to_path_buf(),
+                error: error.clone(),
+            });
         }
 
         // Collect exports
@@ -238,11 +332,15 @@ impl Project {
 
         for stmt in &program.body {
             match stmt {
+                // `export const name = ...`
+                oxc_ast::ast::Statement::ExportDeclaration(export) => {
+                    self.extract_exports_from_declaration(
+                        &export.declaration,
+                        &binder.symbols,
+                        &mut exports,
+                    );
+                }
                 oxc_ast::ast::Statement::ExportNamedDeclaration(export) => {
-                    // Handle `export { name }` or `export const name = ...`
-                    if let Some(decl) = &export.declaration {
-                        self.extract_exports_from_declaration(decl, &binder.symbols, &mut exports);
-                    }
                     // Handle `export { name }` specifiers
                     for spec in &export.specifiers {
                         let local_name = spec.local.name().as_str();
@@ -295,7 +393,8 @@ impl Project {
         symbols: &mut SymbolTable,
         errors: &mut Vec<ProjectError>,
     ) -> Result<(), ProjectError> {
-        let specifier = import.source.value.as_str();
+        let specifier = import.source.value.display().to_string();
+        let specifier = specifier.as_str();
 
         // Type-only imports don't need runtime resolution
         let _import_kind = import.import_kind;
@@ -522,7 +621,55 @@ mod tests {
         let errors = project.check_file(&main).unwrap();
 
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], ProjectError::Type(_)));
+        assert!(matches!(errors[0], ProjectError::Type { .. }));
+        assert_eq!(errors[0].code(), Some(2322));
+    }
+
+    #[test]
+    fn test_syntax_errors_are_reported() {
+        let temp = TempDir::new().unwrap();
+        let main = create_test_file(temp.path(), "main.ts", "let = ;");
+
+        let errors = Project::new().check_file(&main).unwrap();
+
+        assert!(!errors.is_empty());
+        assert!(
+            errors
+                .iter()
+                .all(|e| matches!(e, ProjectError::Parse { .. }) && e.code().is_none())
+        );
+    }
+
+    #[test]
+    fn test_exported_declarations_are_checked() {
+        let temp = TempDir::new().unwrap();
+        let main = create_test_file(temp.path(), "main.ts", "export const x: number = 'a';");
+
+        let errors = Project::new().check_file(&main).unwrap();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code(), Some(2322));
+    }
+
+    #[test]
+    fn test_errors_in_imported_file_are_attributed_to_it() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        create_test_file(dir, "dep.ts", "export const x: number = 'a';");
+        let main = create_test_file(
+            dir,
+            "main.ts",
+            "import { x } from './dep';\nconst y: string = 1;",
+        );
+
+        let errors = Project::new().check_file(&main).unwrap();
+
+        let mut files: Vec<_> = errors
+            .iter()
+            .map(|e| e.file().file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(files, ["dep.ts", "main.ts"]);
     }
 
     #[test]

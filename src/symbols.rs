@@ -61,6 +61,7 @@ pub enum SymbolKind {
     Class,
     Interface,
     TypeAlias,
+    Enum,
 }
 
 #[derive(Debug, Clone)]

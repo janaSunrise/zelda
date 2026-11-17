@@ -142,7 +142,10 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
 }
 
 /// Extract guard from equality/inequality expressions.
-fn extract_equality_guard(binary: &BinaryExpression, is_inequality: bool) -> Option<ExtractedGuard> {
+fn extract_equality_guard(
+    binary: &BinaryExpression,
+    is_inequality: bool,
+) -> Option<ExtractedGuard> {
     // typeof x === "string"
     if let Some(guard) = extract_typeof_guard(&binary.left, &binary.right, is_inequality) {
         return Some(guard);
@@ -195,7 +198,7 @@ fn extract_typeof_guard(
     {
         return Some(ExtractedGuard {
             variable: ident.name.to_string(),
-            guard: TypeGuard::Typeof(lit.value.to_string()),
+            guard: TypeGuard::Typeof(lit.value.display().to_string()),
             negated,
         });
     }
@@ -260,7 +263,7 @@ fn extract_discriminant_guard(
             if let Expression::StringLiteral(lit) = right {
                 let variable = obj_ident.name.to_string();
                 let property = member.property.name.to_string();
-                let value = lit.value.to_string();
+                let value = lit.value.display().to_string();
 
                 return Some(ExtractedGuard {
                     variable,
@@ -341,7 +344,13 @@ where
         }
         TypeGuard::Discriminant(prop_name, prop_value) => {
             // Narrow union to members that have the matching discriminant property
-            narrow_by_discriminant_with_arena(arena, original_id, prop_name, prop_value, type_resolver)
+            narrow_by_discriminant_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            )
         }
     }
 }
@@ -387,13 +396,23 @@ where
         }
         TypeGuard::Discriminant(prop_name, prop_value) => {
             // Negated discriminant: remove members that match the discriminant
-            exclude_by_discriminant_with_arena(arena, original_id, prop_name, prop_value, type_resolver)
+            exclude_by_discriminant_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            )
         }
     }
 }
 
 /// Narrow a type to a target type (for positive guards).
-fn narrow_to_type_with_arena(arena: &mut TypeArena, original_id: TypeId, target_id: TypeId) -> TypeId {
+fn narrow_to_type_with_arena(
+    arena: &mut TypeArena,
+    original_id: TypeId,
+    target_id: TypeId,
+) -> TypeId {
     let original = arena.get(original_id).clone();
 
     match original {
@@ -420,17 +439,17 @@ fn types_compatible_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) ->
     let a = arena.get(a_id);
     let b = arena.get(b_id);
 
-    match (a, b) {
-        (Type::String, Type::String) => true,
-        (Type::StringLiteral(_), Type::String) => true,
-        (Type::Number, Type::Number) => true,
-        (Type::NumberLiteral(_), Type::Number) => true,
-        (Type::Boolean, Type::Boolean) => true,
-        (Type::BooleanLiteral(_), Type::Boolean) => true,
-        (Type::Null, Type::Null) => true,
-        (Type::Undefined, Type::Undefined) => true,
-        _ => false,
-    }
+    matches!(
+        (a, b),
+        (Type::String, Type::String)
+            | (Type::StringLiteral(_), Type::String)
+            | (Type::Number, Type::Number)
+            | (Type::NumberLiteral(_), Type::Number)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::BooleanLiteral(_), Type::Boolean)
+            | (Type::Null, Type::Null)
+            | (Type::Undefined, Type::Undefined)
+    )
 }
 
 /// Remove a type from a union.
@@ -518,17 +537,17 @@ fn types_match_with_arena(arena: &TypeArena, a_id: TypeId, b_id: TypeId) -> bool
     let a = arena.get(a_id);
     let b = arena.get(b_id);
 
-    match (a, b) {
-        (Type::Null, Type::Null) => true,
-        (Type::Undefined, Type::Undefined) => true,
-        (Type::String, Type::String) => true,
-        (Type::StringLiteral(_), Type::String) => true,
-        (Type::Number, Type::Number) => true,
-        (Type::NumberLiteral(_), Type::Number) => true,
-        (Type::Boolean, Type::Boolean) => true,
-        (Type::BooleanLiteral(_), Type::Boolean) => true,
-        _ => false,
-    }
+    matches!(
+        (a, b),
+        (Type::Null, Type::Null)
+            | (Type::Undefined, Type::Undefined)
+            | (Type::String, Type::String)
+            | (Type::StringLiteral(_), Type::String)
+            | (Type::Number, Type::Number)
+            | (Type::NumberLiteral(_), Type::Number)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::BooleanLiteral(_), Type::Boolean)
+    )
 }
 
 /// Narrow a union type to members that have a matching discriminant property.
@@ -549,7 +568,13 @@ where
             let matching: Vec<TypeId> = type_ids
                 .iter()
                 .filter(|&&id| {
-                    has_discriminant_property_with_arena(arena, id, prop_name, prop_value, type_resolver)
+                    has_discriminant_property_with_arena(
+                        arena,
+                        id,
+                        prop_name,
+                        prop_value,
+                        type_resolver,
+                    )
                 })
                 .copied()
                 .collect();
@@ -571,7 +596,13 @@ where
                 }
             }
             // For non-union types, check if it matches
-            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+            if has_discriminant_property_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            ) {
                 original_id
             } else {
                 TypeId::NEVER
@@ -579,7 +610,13 @@ where
         }
         _ => {
             // For non-union types, check if it matches
-            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+            if has_discriminant_property_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            ) {
                 original_id
             } else {
                 TypeId::NEVER
@@ -606,7 +643,13 @@ where
             let remaining: Vec<TypeId> = type_ids
                 .iter()
                 .filter(|&&id| {
-                    !has_discriminant_property_with_arena(arena, id, prop_name, prop_value, type_resolver)
+                    !has_discriminant_property_with_arena(
+                        arena,
+                        id,
+                        prop_name,
+                        prop_value,
+                        type_resolver,
+                    )
                 })
                 .copied()
                 .collect();
@@ -628,14 +671,26 @@ where
                 }
             }
             // For non-union types, check if it matches
-            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+            if has_discriminant_property_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            ) {
                 TypeId::NEVER
             } else {
                 original_id
             }
         }
         _ => {
-            if has_discriminant_property_with_arena(arena, original_id, prop_name, prop_value, type_resolver) {
+            if has_discriminant_property_with_arena(
+                arena,
+                original_id,
+                prop_name,
+                prop_value,
+                type_resolver,
+            ) {
                 TypeId::NEVER
             } else {
                 original_id
@@ -668,7 +723,13 @@ where
         Type::TypeRef { name, .. } => {
             // Try to resolve the type reference
             if let Some(resolved_id) = type_resolver(name) {
-                has_discriminant_property_with_arena(arena, resolved_id, prop_name, expected_value, type_resolver)
+                has_discriminant_property_with_arena(
+                    arena,
+                    resolved_id,
+                    prop_name,
+                    expected_value,
+                    type_resolver,
+                )
             } else {
                 // If we can't resolve, be conservative and return false
                 false
@@ -713,7 +774,11 @@ mod tests {
     #[test]
     fn test_remove_multiple_keeps_union() {
         let mut arena = TypeArena::new();
-        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NUMBER, TypeId::NULL]));
+        let union_id = arena.intern(Type::Union(vec![
+            TypeId::STRING,
+            TypeId::NUMBER,
+            TypeId::NULL,
+        ]));
         let result = remove_from_union_with_arena(&mut arena, union_id, TypeId::NULL);
 
         let result_ty = arena.get(result).clone();
@@ -745,15 +810,21 @@ mod tests {
     fn test_apply_not_null_guard() {
         let mut arena = TypeArena::new();
         let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NULL]));
-        let result = apply_guard_with_arena(&mut arena, union_id, &TypeGuard::NotNull, false, |_| None);
+        let result =
+            apply_guard_with_arena(&mut arena, union_id, &TypeGuard::NotNull, false, |_| None);
         assert_eq!(result, TypeId::STRING);
     }
 
     #[test]
     fn test_apply_truthy_guard() {
         let mut arena = TypeArena::new();
-        let union_id = arena.intern(Type::Union(vec![TypeId::STRING, TypeId::NULL, TypeId::UNDEFINED]));
-        let result = apply_guard_with_arena(&mut arena, union_id, &TypeGuard::Truthy, false, |_| None);
+        let union_id = arena.intern(Type::Union(vec![
+            TypeId::STRING,
+            TypeId::NULL,
+            TypeId::UNDEFINED,
+        ]));
+        let result =
+            apply_guard_with_arena(&mut arena, union_id, &TypeGuard::Truthy, false, |_| None);
         assert_eq!(result, TypeId::STRING);
     }
 }

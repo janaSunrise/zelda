@@ -8,11 +8,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-oxc_parser = "0.110"
-oxc_ast = "0.110"
-oxc_allocator = "0.110"
-oxc_span = "0.110"
-oxc_diagnostics = "0.110"
+oxc_parser = "0.159"
+oxc_ast = "0.159"
+oxc_allocator = "0.159"
+oxc_span = "0.159"
+oxc_diagnostics = "0.159"
 clap = { version = "4.5", features = ["derive", "color"] }
 miette = { version = "7.6", features = ["fancy"] }
 owo-colors = "4.2"

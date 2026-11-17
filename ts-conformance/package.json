@@ -1,8 +1,0 @@
-{
-  "name": "tsc-tests",
-  "private": true,
-  "description": "TSC compatibility testing for zelda",
-  "devDependencies": {
-    "typescript": "^5.9.3"
-  }
-}
