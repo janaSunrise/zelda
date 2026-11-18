@@ -7,7 +7,6 @@
 
 use oxc_ast::ast::*;
 
-use crate::symbols::{ScopeKind, SymbolKind};
 use crate::types::resolution;
 use crate::types::{EnumMember, EnumValue, Type, TypeId, TypeParam};
 
@@ -32,7 +31,6 @@ impl Binder<'_> {
     fn bind_variable_declarator(&mut self, declarator: &VariableDeclarator, is_const: bool) {
         if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
             let name = ident.name.as_str();
-            let span = ident.span;
 
             let ty_id = self.resolve_binding_type(declarator);
             // Widen literal types for let/var
@@ -48,9 +46,7 @@ impl Binder<'_> {
             if let Some(Expression::ClassExpression(class)) = &declarator.init {
                 let (instance_type_id, _, _) =
                     resolution::build_class_type(class, &mut self.symbols.arena);
-                let _ = self
-                    .symbols
-                    .define_type(name, instance_type_id, SymbolKind::Class, span);
+                self.symbols.define_type(name, instance_type_id);
             }
         }
 
@@ -74,7 +70,7 @@ impl Binder<'_> {
             self.define_value(ident, ty_id);
         }
 
-        self.symbols.push_scope(ScopeKind::Function);
+        self.symbols.push_scope();
 
         // Bind type parameters to type namespace within function scope
         self.bind_type_parameters(&decl.type_parameters);
@@ -132,9 +128,7 @@ impl Binder<'_> {
                 });
 
                 // Register in type namespace
-                let _ = self
-                    .symbols
-                    .define_type(name, ty_id, SymbolKind::TypeAlias, span);
+                self.symbols.define_type(name, ty_id);
             }
         }
     }
@@ -171,7 +165,6 @@ impl Binder<'_> {
     pub(super) fn bind_class_declaration(&mut self, decl: &Class) {
         if let Some(ident) = &decl.id {
             let name = ident.name.as_str();
-            let span = ident.span;
 
             // Build the class type (instance type, constructor type, and static type)
             let (instance_type_id, constructor_type_id, static_type_id) =
@@ -226,12 +219,10 @@ impl Binder<'_> {
 
             self.define_value(ident, value_type_id);
             // Type namespace: the instance type (Object with properties)
-            let _ = self
-                .symbols
-                .define_type(name, instance_type_id, SymbolKind::Class, span);
+            self.symbols.define_type(name, instance_type_id);
         }
 
-        self.symbols.push_scope(ScopeKind::Class);
+        self.symbols.push_scope();
 
         for element in &decl.body.body {
             self.bind_class_element(element);
@@ -244,7 +235,7 @@ impl Binder<'_> {
         match element {
             ClassElement::MethodDefinition(method) => {
                 let func = &method.value;
-                self.symbols.push_scope(ScopeKind::Function);
+                self.symbols.push_scope();
 
                 for param in &func.params.items {
                     self.bind_formal_parameter(param);
@@ -272,12 +263,9 @@ impl Binder<'_> {
     /// Interfaces only exist in the type namespace.
     pub(super) fn bind_interface_declaration(&mut self, decl: &TSInterfaceDeclaration) {
         let name = decl.id.name.as_str();
-        let span = decl.id.span;
         let ty_id = self.build_interface_type(decl);
 
-        let _ = self
-            .symbols
-            .define_type(name, ty_id, SymbolKind::Interface, span);
+        self.symbols.define_type(name, ty_id);
     }
 
     /// Bind an enum declaration.
@@ -290,7 +278,6 @@ impl Binder<'_> {
     /// For string enums, all members must have explicit string values.
     pub(super) fn bind_enum_declaration(&mut self, decl: &TSEnumDeclaration) {
         let name = decl.id.name.as_str();
-        let span = decl.id.span;
         let is_const = decl.r#const;
 
         // Build enum members with their computed values
@@ -358,9 +345,7 @@ impl Binder<'_> {
         });
 
         // Register in type namespace (for `let x: Color`)
-        let _ = self
-            .symbols
-            .define_type(name, enum_type_id, SymbolKind::Enum, span);
+        self.symbols.define_type(name, enum_type_id);
 
         // Register in value namespace (for `Color.Red`)
         // The enum value is an object with properties for each member
@@ -374,7 +359,6 @@ impl Binder<'_> {
     /// GenericTypeAlias structure to preserve type parameters for later instantiation.
     pub(super) fn bind_type_alias_declaration(&mut self, decl: &TSTypeAliasDeclaration) {
         let name = decl.id.name.as_str();
-        let span = decl.id.span;
         let body_type_id = self.resolve_ts_type(&decl.type_annotation);
 
         // Extract type parameters for generic type aliases
@@ -415,9 +399,7 @@ impl Binder<'_> {
             })
         };
 
-        let _ = self
-            .symbols
-            .define_type(name, ty_id, SymbolKind::TypeAlias, span);
+        self.symbols.define_type(name, ty_id);
     }
 
     /// Bind an arrow function expression.
@@ -426,7 +408,7 @@ impl Binder<'_> {
     /// In oxc, the body is always a FunctionBody struct. When `arrow.expression` is true,
     /// it contains a single ExpressionStatement wrapping the expression.
     pub(super) fn bind_arrow_function(&mut self, arrow: &ArrowFunctionExpression) {
-        self.symbols.push_scope(ScopeKind::Function);
+        self.symbols.push_scope();
 
         // Bind type parameters for generic arrow functions
         self.bind_type_parameters(&arrow.type_parameters);
@@ -456,7 +438,7 @@ impl Binder<'_> {
     /// Named function expressions bind their name inside their own scope.
     /// `const f = function foo() { foo(); }` - `foo` is only visible inside.
     pub(super) fn bind_function_expression(&mut self, func: &Function) {
-        self.symbols.push_scope(ScopeKind::Function);
+        self.symbols.push_scope();
 
         // Bind type parameters for generic function expressions
         self.bind_type_parameters(&func.type_parameters);

@@ -934,10 +934,8 @@ impl<'a> Checker<'a> {
         // This is needed for discriminated union narrowing where union members are TypeRefs.
         let type_map: rustc_hash::FxHashMap<String, TypeId> = self
             .symbols
-            .scopes
-            .iter()
-            .flat_map(|scope| scope.type_symbols.iter())
-            .map(|(name, sym_id)| (name.clone(), self.symbols.symbols[sym_id.0].ty))
+            .all_types()
+            .map(|(name, ty)| (name.to_string(), ty))
             .collect();
 
         apply_guard_with_arena(

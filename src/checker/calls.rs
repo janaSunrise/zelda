@@ -140,7 +140,7 @@ impl<'a> Checker<'a> {
         };
 
         // Look up the class type and its extends clause
-        let class_type_id = self.symbols.lookup_type(&class_name).map(|s| s.ty);
+        let class_type_id = self.symbols.lookup_type(&class_name);
         let parent_class_name = match class_type_id {
             Some(ty_id) => {
                 let ty = self.get_type(ty_id).clone();

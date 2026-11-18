@@ -115,10 +115,7 @@ impl<'a> Checker<'a> {
             Expression::ThisExpression(_) => {
                 // Return the current class's instance type
                 if let Some(class_name) = &self.current_class {
-                    self.symbols
-                        .lookup_type(class_name)
-                        .map(|s| s.ty)
-                        .unwrap_or(TypeId::ANY)
+                    self.symbols.lookup_type(class_name).unwrap_or(TypeId::ANY)
                 } else {
                     TypeId::ANY
                 }
@@ -355,10 +352,7 @@ impl<'a> Checker<'a> {
         // Resolve TypeRef first
         let object_type = self.get_type(object_type_id).clone();
         let resolved_type_id = if let Type::TypeRef { name, .. } = &object_type {
-            self.symbols
-                .lookup_type(name)
-                .map(|s| s.ty)
-                .unwrap_or(object_type_id)
+            self.symbols.lookup_type(name).unwrap_or(object_type_id)
         } else {
             object_type_id
         };
@@ -424,10 +418,9 @@ impl<'a> Checker<'a> {
 
         // If this is a primitive, look up its interface type
         if let Some(iface_name) = interface_name
-            && let Some(symbol) = self.symbols.lookup_type(iface_name)
+            && let Some(iface_type) = self.symbols.lookup_type(iface_name)
         {
-            // Recursively get property type from the interface
-            return self.get_property_type(symbol.ty, prop_name);
+            return self.get_property_type(iface_type, prop_name);
         }
 
         // Convert primitives to their apparent types
@@ -437,11 +430,7 @@ impl<'a> Checker<'a> {
         let apparent_type = self.get_type(apparent_type_id).clone();
         let (resolved_type_id, type_args) =
             if let Type::TypeRef { name, type_args } = &apparent_type {
-                let base_id = self
-                    .symbols
-                    .lookup_type(name)
-                    .map(|s| s.ty)
-                    .unwrap_or(apparent_type_id);
+                let base_id = self.symbols.lookup_type(name).unwrap_or(apparent_type_id);
                 (base_id, type_args.clone())
             } else {
                 (apparent_type_id, vec![])
@@ -464,7 +453,6 @@ impl<'a> Checker<'a> {
         let final_type_id = if let Type::TypeRef { name, .. } = &after_param_type {
             self.symbols
                 .lookup_type(name)
-                .map(|s| s.ty)
                 .unwrap_or(after_param_type_id)
         } else {
             after_param_type_id

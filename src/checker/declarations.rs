@@ -9,7 +9,6 @@ use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 
 use crate::errors;
-use crate::symbols::{ScopeKind, SymbolKind};
 use crate::types::{Type, TypeId};
 
 use super::{Checker, TypeError};
@@ -139,7 +138,7 @@ impl<'a> Checker<'a> {
         }
 
         // Get the class's instance type
-        let class_type_id = self.symbols.lookup_type(class_name).map(|s| s.ty);
+        let class_type_id = self.symbols.lookup_type(class_name);
 
         let Some(class_type_id) = class_type_id else {
             return;
@@ -246,7 +245,7 @@ impl<'a> Checker<'a> {
 
         if let Some(body) = &func.body {
             // Push function scope to match binder's scope structure
-            self.symbols.push_scope(ScopeKind::Function);
+            self.symbols.push_scope();
 
             // Bind type parameters to type namespace for generic functions
             if let Some(type_params) = &func.type_parameters {
@@ -261,12 +260,7 @@ impl<'a> Checker<'a> {
                         default: default_id,
                     });
 
-                    let _ = self.symbols.define_type(
-                        name,
-                        ty_id,
-                        SymbolKind::TypeAlias,
-                        param.name.span,
-                    );
+                    self.symbols.define_type(name, ty_id);
                 }
             }
 
@@ -457,10 +451,10 @@ impl<'a> Checker<'a> {
     /// types (`class A extends B {}; class B extends A {}`).
     fn is_own_base_type(&self, name: &str) -> bool {
         let base_names = |type_name: &str| -> Vec<String> {
-            let Some(symbol) = self.symbols.lookup_type(type_name) else {
+            let Some(ty) = self.symbols.lookup_type(type_name) else {
                 return Vec::new();
             };
-            let Type::Object { extends, .. } = self.get_type(symbol.ty) else {
+            let Type::Object { extends, .. } = self.get_type(ty) else {
                 return Vec::new();
             };
             extends

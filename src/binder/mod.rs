@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::errors;
 
-use crate::symbols::{ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError};
+use crate::symbols::{SymbolTable, UndefinedSymbolError};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -239,7 +239,7 @@ impl<'s> Binder<'s> {
     }
 
     fn bind_block_statement(&mut self, block: &BlockStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         for stmt in &block.body {
             self.bind_statement(stmt);
         }
@@ -255,14 +255,14 @@ impl<'s> Binder<'s> {
     }
 
     fn bind_while_statement(&mut self, while_stmt: &WhileStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         self.bind_expression(&while_stmt.test);
         self.bind_statement(&while_stmt.body);
         self.symbols.pop_scope();
     }
 
     fn bind_do_while_statement(&mut self, do_while: &DoWhileStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         self.bind_statement(&do_while.body);
         self.bind_expression(&do_while.test);
         self.symbols.pop_scope();
@@ -271,7 +271,7 @@ impl<'s> Binder<'s> {
     /// For loops create a block scope for their initializer.
     /// `for (let i = 0; ...)` - the `i` is scoped to the loop.
     fn bind_for_statement(&mut self, for_stmt: &ForStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
 
         if let Some(init) = &for_stmt.init {
             match init {
@@ -302,7 +302,7 @@ impl<'s> Binder<'s> {
     fn bind_switch_statement(&mut self, switch_stmt: &SwitchStatement) {
         self.bind_expression(&switch_stmt.discriminant);
         for case in &switch_stmt.cases {
-            self.symbols.push_scope(ScopeKind::Block);
+            self.symbols.push_scope();
             if let Some(test) = &case.test {
                 self.bind_expression(test);
             }
@@ -314,7 +314,7 @@ impl<'s> Binder<'s> {
     }
 
     fn bind_for_in_statement(&mut self, for_in: &ForInStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         if let ForStatementLeft::VariableDeclaration(decl) = &for_in.left {
             self.bind_variable_declaration(decl);
         }
@@ -324,7 +324,7 @@ impl<'s> Binder<'s> {
     }
 
     fn bind_for_of_statement(&mut self, for_of: &ForOfStatement) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         if let ForStatementLeft::VariableDeclaration(decl) = &for_of.left {
             self.bind_variable_declaration(decl);
         }
@@ -335,7 +335,7 @@ impl<'s> Binder<'s> {
 
     fn bind_try_statement(&mut self, try_stmt: &TryStatement) {
         // Try block
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         for stmt in &try_stmt.block.body {
             self.bind_statement(stmt);
         }
@@ -343,7 +343,7 @@ impl<'s> Binder<'s> {
 
         // Catch handler
         if let Some(handler) = &try_stmt.handler {
-            self.symbols.push_scope(ScopeKind::Block);
+            self.symbols.push_scope();
             if let Some(param) = &handler.param {
                 self.bind_catch_parameter(param);
             }
@@ -355,7 +355,7 @@ impl<'s> Binder<'s> {
 
         // Finally block
         if let Some(finalizer) = &try_stmt.finalizer {
-            self.symbols.push_scope(ScopeKind::Block);
+            self.symbols.push_scope();
             for stmt in &finalizer.body {
                 self.bind_statement(stmt);
             }
@@ -393,7 +393,7 @@ impl<'s> Binder<'s> {
                 self.bind_namespace_declaration(nested);
             }
         }
-        self.define_empty_module(decl.id.name.to_string(), decl.id.span);
+        self.define_empty_module(decl.id.name.to_string());
     }
 
     /// Bind an ambient `declare module "name" { }` declaration.
@@ -403,22 +403,20 @@ impl<'s> Binder<'s> {
         if let Some(body) = &decl.body {
             self.bind_module_block(body);
         }
-        self.define_empty_module(decl.id.value.display().to_string(), decl.id.span);
+        self.define_empty_module(decl.id.value.display().to_string());
     }
 
     fn bind_module_block(&mut self, block: &TSModuleBlock) {
-        self.symbols.push_scope(ScopeKind::Block);
+        self.symbols.push_scope();
         for stmt in &block.body {
             self.bind_statement(stmt);
         }
         self.symbols.pop_scope();
     }
 
-    fn define_empty_module(&mut self, name: String, span: Span) {
+    fn define_empty_module(&mut self, name: String) {
         let empty_object_id = self.symbols.arena.object(vec![]);
-        let _ = self
-            .symbols
-            .define_type(name, empty_object_id, SymbolKind::TypeAlias, span);
+        self.symbols.define_type(name, empty_object_id);
     }
 
     /// Bind an export default declaration.

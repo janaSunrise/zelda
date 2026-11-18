@@ -20,7 +20,7 @@ use crate::checker::{Checker, TypeError};
 use crate::errors;
 use crate::lib_dts;
 use crate::resolver::{ModuleResolver, ResolverConfig};
-use crate::symbols::{SymbolKind, SymbolTable};
+use crate::symbols::SymbolTable;
 use crate::tsconfig::TsConfig;
 use crate::types::{Type, TypeArena, TypeId};
 
@@ -175,9 +175,9 @@ impl ScriptGlobals {
                 self.values.insert(name.to_string(), ty);
             }
             if flags.intersects(SymbolFlags::Type)
-                && let Some(type_symbol) = symbols.lookup_type(name)
+                && let Some(ty) = symbols.lookup_type(name)
             {
-                self.types.insert(name.to_string(), type_symbol.ty);
+                self.types.insert(name.to_string(), ty);
             }
         }
     }
@@ -356,7 +356,7 @@ impl Project {
             symbols.add_global_value(name.clone(), ty);
         }
         for (name, &ty) in &self.script_globals.types {
-            let _ = symbols.define_type(name.clone(), ty, SymbolKind::TypeAlias, Span::default());
+            symbols.define_type(name.clone(), ty);
         }
         let mut binder = Binder::new(symbols, scoping);
 
@@ -422,8 +422,7 @@ impl Project {
                             }
                             _ => None,
                         };
-                        let ty =
-                            value.or_else(|| binder.symbols.lookup_type(local_name).map(|s| s.ty));
+                        let ty = value.or_else(|| binder.symbols.lookup_type(local_name));
                         if let Some(ty) = ty {
                             if exported_name == "default" {
                                 default_export = Some(ty);
@@ -503,14 +502,10 @@ impl Project {
                 // default import receives `x`.
                 oxc_ast::ast::Statement::TSExportAssignment(export) => {
                     let ty = match export.expression.without_parentheses() {
-                        oxc_ast::ast::Expression::Identifier(ident) => {
-                            binder.symbols.value_of(scoping, ident).or_else(|| {
-                                binder
-                                    .symbols
-                                    .lookup_type(ident.name.as_str())
-                                    .map(|s| s.ty)
-                            })
-                        }
+                        oxc_ast::ast::Expression::Identifier(ident) => binder
+                            .symbols
+                            .value_of(scoping, ident)
+                            .or_else(|| binder.symbols.lookup_type(ident.name.as_str())),
                         _ => None,
                     };
                     default_export = Some(ty.unwrap_or(TypeId::ANY));
@@ -596,7 +591,6 @@ impl Project {
                         );
                         continue;
                     };
-                    let span = s.local.span;
                     if let Some(symbol) = s.local.symbol_id.get() {
                         symbols.define_value(scoping, symbol, ty_id);
                     }
@@ -605,7 +599,7 @@ impl Project {
                         symbols.arena.get(ty_id),
                         Type::Object { .. } | Type::TypeRef { .. }
                     ) {
-                        let _ = symbols.define_type(local_name, ty_id, SymbolKind::TypeAlias, span);
+                        symbols.define_type(local_name, ty_id);
                     }
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
@@ -684,19 +678,19 @@ impl Project {
                     // TODO: a class is both a value and a type; exports keep
                     // only one meaning per name, so the instance type wins.
                     export_value(ident);
-                    if let Some(sym) = symbols.lookup_type(name) {
-                        exports.insert(name.to_string(), sym.ty);
+                    if let Some(ty) = symbols.lookup_type(name) {
+                        exports.insert(name.to_string(), ty);
                     }
                 }
             }
             Declaration::TSInterfaceDeclaration(iface) => {
-                if let Some(sym) = symbols.lookup_type(iface.id.name.as_str()) {
-                    exports.insert(iface.id.name.to_string(), sym.ty);
+                if let Some(ty) = symbols.lookup_type(iface.id.name.as_str()) {
+                    exports.insert(iface.id.name.to_string(), ty);
                 }
             }
             Declaration::TSTypeAliasDeclaration(alias) => {
-                if let Some(sym) = symbols.lookup_type(alias.id.name.as_str()) {
-                    exports.insert(alias.id.name.to_string(), sym.ty);
+                if let Some(ty) = symbols.lookup_type(alias.id.name.as_str()) {
+                    exports.insert(alias.id.name.to_string(), ty);
                 }
             }
             _ => {}
@@ -718,9 +712,9 @@ impl Project {
         let ty = match decl {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => value_of(&func.id),
             ExportDefaultDeclarationKind::ClassDeclaration(class) => value_of(&class.id),
-            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => symbols
-                .lookup_type(iface.id.name.as_str())
-                .map(|sym| sym.ty),
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
+                symbols.lookup_type(iface.id.name.as_str())
+            }
             _ => None,
         };
         ty.unwrap_or(TypeId::ANY)

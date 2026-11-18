@@ -8,7 +8,7 @@ use super::Checker;
 
 impl<'a> Checker<'a> {
     fn resolve_type_ref(&self, name: &str) -> Option<TypeId> {
-        self.symbols.lookup_type(name).map(|s| s.ty)
+        self.symbols.lookup_type(name)
     }
 
     /// Resolve a TypeRef with type arguments, instantiating generic types.
@@ -61,8 +61,7 @@ impl<'a> Checker<'a> {
             return Some(TypeId::STRING);
         }
 
-        let symbol = self.symbols.lookup_type(name)?;
-        let base_type_id = symbol.ty;
+        let base_type_id = self.symbols.lookup_type(name)?;
         let base_type = self.get_type(base_type_id).clone();
 
         match base_type {
