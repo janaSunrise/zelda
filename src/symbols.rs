@@ -2,8 +2,6 @@ use rustc_hash::FxHashMap;
 
 use oxc_ast::ast::IdentifierReference;
 use oxc_semantic::Scoping;
-use oxc_span::Span;
-use serde::Serialize;
 
 use crate::types::{TypeArena, TypeId};
 
@@ -16,14 +14,6 @@ struct ScopeId(usize);
 struct Scope {
     parent: Option<ScopeId>,
     types: FxHashMap<String, TypeId>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UndefinedSymbolError {
-    pub name: String,
-    #[serde(serialize_with = "crate::errors::serialize_span")]
-    pub span: Span,
-    pub is_type: bool,
 }
 
 /// The symbol table tracks all declared symbols and their scopes.

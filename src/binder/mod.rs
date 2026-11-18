@@ -11,8 +11,7 @@ use oxc_span::Span;
 use serde::Serialize;
 
 use crate::errors;
-
-use crate::symbols::{SymbolTable, UndefinedSymbolError};
+use crate::symbols::SymbolTable;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -20,6 +19,14 @@ pub enum BindingError {
     /// A declaration conflicts with another of the same name in its scope.
     Redeclared(RedeclaredError),
     UndefinedSymbol(UndefinedSymbolError),
+}
+
+/// A reference to a name that is declared nowhere (TS2304).
+#[derive(Debug, Clone, Serialize)]
+pub struct UndefinedSymbolError {
+    pub name: String,
+    #[serde(serialize_with = "crate::errors::serialize_span")]
+    pub span: Span,
 }
 
 /// One declaration of a name that is declared more than once in a scope, in
@@ -94,7 +101,6 @@ pub fn semantic_errors(
             errors.push(BindingError::UndefinedSymbol(UndefinedSymbolError {
                 name: name.to_string(),
                 span: semantic.reference_span(reference),
-                is_type: false,
             }));
         }
     }
