@@ -144,12 +144,8 @@ pub fn semantic_errors(
     errors
 }
 
-/// Binder performs two main tasks:
-/// 1. Register declarations (variables, functions, types) in the symbol table
-/// 2. Check for undefined references in expressions
-///
-/// `scoping` is oxc's semantic model of the same program: scopes, symbols,
-/// and resolved references.
+/// Records the declared types of a file's declarations. Name
+/// resolution itself comes from oxc's semantic model (`scoping`).
 pub struct Binder<'s> {
     pub symbols: SymbolTable,
     pub errors: Vec<BindingError>,
@@ -157,7 +153,7 @@ pub struct Binder<'s> {
 }
 
 impl<'s> Binder<'s> {
-    /// Create a binder over a pre-populated symbol table (e.g., from lib.d.ts).
+    /// `symbols` usually starts with the lib.d.ts globals.
     pub fn new(symbols: SymbolTable, scoping: &'s Scoping) -> Self {
         Self {
             symbols,
@@ -166,14 +162,12 @@ impl<'s> Binder<'s> {
         }
     }
 
-    /// Record the value type of a declaration's binding.
     pub(super) fn define_value(&mut self, ident: &BindingIdentifier, ty: crate::types::TypeId) {
         if let Some(symbol) = ident.symbol_id.get() {
             self.symbols.define_value(self.scoping, symbol, ty);
         }
     }
 
-    /// Consume the binder and return the symbol table.
     pub fn into_symbols(self) -> SymbolTable {
         self.symbols
     }
@@ -186,7 +180,6 @@ impl<'s> Binder<'s> {
 
     fn bind_statement(&mut self, stmt: &Statement) {
         match stmt {
-            // Declarations
             Statement::VariableDeclaration(decl) => self.bind_variable_declaration(decl),
             Statement::FunctionDeclaration(decl) => self.bind_function_declaration(decl),
             Statement::ClassDeclaration(decl) => self.bind_class_declaration(decl),
@@ -199,7 +192,6 @@ impl<'s> Binder<'s> {
             Statement::TSGlobalDeclaration(decl) => self.bind_module_block(&decl.body),
             Statement::TSEnumDeclaration(decl) => self.bind_enum_declaration(decl),
 
-            // Control flow (creates scopes, checks expressions)
             Statement::BlockStatement(block) => self.bind_block_statement(block),
             Statement::IfStatement(if_stmt) => self.bind_if_statement(if_stmt),
             Statement::WhileStatement(while_stmt) => self.bind_while_statement(while_stmt),
@@ -211,7 +203,6 @@ impl<'s> Binder<'s> {
             Statement::TryStatement(try_stmt) => self.bind_try_statement(try_stmt),
             Statement::ForStatement(for_stmt) => self.bind_for_statement(for_stmt),
 
-            // Expressions
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
                     self.bind_expression(arg);
@@ -221,17 +212,13 @@ impl<'s> Binder<'s> {
                 self.bind_expression(&expr_stmt.expression);
             }
 
-            // Export declarations - bind the declaration inside
             Statement::ExportDeclaration(export) => self.bind_declaration(&export.declaration),
-            // Export specifiers (`export { x }`, `export { x } from "./other"`)
-            // are handled at project level.
             Statement::ExportDefaultDeclaration(export) => {
                 self.bind_export_default_declaration(export);
             }
 
-            // Import declarations are handled at project level
-            Statement::ImportDeclaration(_) => {}
-
+            // Imports and `export { x }` lists are bound by the project, which
+            // knows the other modules.
             _ => {}
         }
     }
@@ -266,8 +253,6 @@ impl<'s> Binder<'s> {
         self.symbols.pop_scope();
     }
 
-    /// For loops create a block scope for their initializer.
-    /// `for (let i = 0; ...)` - the `i` is scoped to the loop.
     fn bind_for_statement(&mut self, for_stmt: &ForStatement) {
         self.symbols.push_scope();
 
@@ -332,14 +317,12 @@ impl<'s> Binder<'s> {
     }
 
     fn bind_try_statement(&mut self, try_stmt: &TryStatement) {
-        // Try block
         self.symbols.push_scope();
         for stmt in &try_stmt.block.body {
             self.bind_statement(stmt);
         }
         self.symbols.pop_scope();
 
-        // Catch handler
         if let Some(handler) = &try_stmt.handler {
             self.symbols.push_scope();
             if let Some(param) = &handler.param {
@@ -351,7 +334,6 @@ impl<'s> Binder<'s> {
             self.symbols.pop_scope();
         }
 
-        // Finally block
         if let Some(finalizer) = &try_stmt.finalizer {
             self.symbols.push_scope();
             for stmt in &finalizer.body {
@@ -361,7 +343,6 @@ impl<'s> Binder<'s> {
         }
     }
 
-    /// Bind a declaration (used for export declarations).
     fn bind_declaration(&mut self, decl: &Declaration) {
         match decl {
             Declaration::VariableDeclaration(var_decl) => self.bind_variable_declaration(var_decl),
@@ -381,8 +362,8 @@ impl<'s> Binder<'s> {
 
     /// Bind a `namespace Name { }` (or legacy `module Name { }`) declaration.
     ///
-    /// For now the namespace is registered as an empty object type; its body
-    /// is bound in a nested scope so that references inside are still checked.
+    /// The namespace's members are not collected yet: it is registered as an
+    /// empty object type, and only its body's own declarations are bound.
     fn bind_namespace_declaration(&mut self, decl: &TSNamespaceDeclaration) {
         match &decl.body {
             TSNamespaceDeclarationBody::TSModuleBlock(block) => self.bind_module_block(block),
@@ -394,9 +375,8 @@ impl<'s> Binder<'s> {
         self.define_empty_module(decl.id.name.to_string());
     }
 
-    /// Bind an ambient `declare module "name" { }` declaration.
-    ///
-    /// Ambient modules provide types for external packages without implementation.
+    /// Bind an ambient `declare module "name" { }` declaration. Imports don't
+    /// resolve to it yet.
     fn bind_external_module_declaration(&mut self, decl: &TSExternalModuleDeclaration) {
         if let Some(body) = &decl.body {
             self.bind_module_block(body);
@@ -417,7 +397,6 @@ impl<'s> Binder<'s> {
         self.symbols.define_type(name, empty_object_id);
     }
 
-    /// Bind an export default declaration.
     fn bind_export_default_declaration(&mut self, export: &ExportDefaultDeclaration) {
         match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
@@ -430,7 +409,6 @@ impl<'s> Binder<'s> {
                 self.bind_interface_declaration(iface);
             }
             _ => {
-                // Expression exports (export default expr) - just check the expression
                 if let Some(expr) = export.declaration.as_expression() {
                     self.bind_expression(expr);
                 }
@@ -439,8 +417,6 @@ impl<'s> Binder<'s> {
     }
 }
 
-/// Built-in globals that we skip for now (no lib.d.ts yet).
-/// Once we load lib.d.ts, these will be properly defined.
 /// Globals that TypeScript's standard lib declares but the bundled lib.d.ts
 /// may not: ECMAScript built-ins, common DOM/Node globals, and `arguments`.
 pub(crate) fn is_builtin_global(name: &str) -> bool {

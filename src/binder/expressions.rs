@@ -1,16 +1,13 @@
-//! Walking expressions to bind the declarations nested inside them (arrow
-//! functions, function and class expressions). Undefined names are found by
-//! oxc's semantic analysis instead (see `semantic_errors`).
+//! Walking expressions to bind the functions nested inside them. Class
+//! expressions are not walked yet.
 
 use oxc_ast::ast::*;
 
 use super::Binder;
 
 impl Binder<'_> {
-    /// Walk an expression to find undefined variable references.
     pub(super) fn bind_expression(&mut self, expr: &Expression) {
         match expr {
-            // Call expressions
             Expression::CallExpression(call) => {
                 self.bind_expression(&call.callee);
                 for arg in &call.arguments {
@@ -22,7 +19,6 @@ impl Binder<'_> {
                 }
             }
 
-            // Member expressions (oxc splits into separate variants)
             Expression::StaticMemberExpression(member) => {
                 self.bind_expression(&member.object);
             }
@@ -34,7 +30,6 @@ impl Binder<'_> {
                 self.bind_expression(&member.object);
             }
 
-            // Binary and unary
             Expression::BinaryExpression(binary) => {
                 self.bind_expression(&binary.left);
                 self.bind_expression(&binary.right);
@@ -43,13 +38,11 @@ impl Binder<'_> {
                 self.bind_expression(&unary.argument);
             }
 
-            // Assignment
             Expression::AssignmentExpression(assign) => {
                 self.bind_assignment_target(&assign.left);
                 self.bind_expression(&assign.right);
             }
 
-            // Array literal
             Expression::ArrayExpression(arr) => {
                 for elem in &arr.elements {
                     match elem {
@@ -66,7 +59,6 @@ impl Binder<'_> {
                 }
             }
 
-            // Object literal
             Expression::ObjectExpression(obj) => {
                 for prop in &obj.properties {
                     match prop {
@@ -80,31 +72,26 @@ impl Binder<'_> {
                 }
             }
 
-            // Functions (create their own scope)
             Expression::ArrowFunctionExpression(arrow) => self.bind_arrow_function(arrow),
             Expression::FunctionExpression(func) => self.bind_function_expression(func),
 
-            // Conditional (ternary)
             Expression::ConditionalExpression(cond) => {
                 self.bind_expression(&cond.test);
                 self.bind_expression(&cond.consequent);
                 self.bind_expression(&cond.alternate);
             }
 
-            // Logical operators
             Expression::LogicalExpression(logical) => {
                 self.bind_expression(&logical.left);
                 self.bind_expression(&logical.right);
             }
 
-            // Sequence (comma operator)
             Expression::SequenceExpression(seq) => {
                 for expr in &seq.expressions {
                     self.bind_expression(expr);
                 }
             }
 
-            // Template literals
             Expression::TemplateLiteral(template) => {
                 for expr in &template.expressions {
                     self.bind_expression(expr);
@@ -117,7 +104,6 @@ impl Binder<'_> {
                 }
             }
 
-            // New expression
             Expression::NewExpression(new_expr) => {
                 self.bind_expression(&new_expr.callee);
                 for arg in &new_expr.arguments {
@@ -129,7 +115,6 @@ impl Binder<'_> {
                 }
             }
 
-            // Await/yield
             Expression::AwaitExpression(await_expr) => {
                 self.bind_expression(&await_expr.argument);
             }
@@ -139,20 +124,10 @@ impl Binder<'_> {
                 }
             }
 
-            // Literals and `this` have no references to check
-            Expression::BooleanLiteral(_)
-            | Expression::NullLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::StringLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::RegExpLiteral(_)
-            | Expression::ThisExpression(_) => {}
-
             _ => {}
         }
     }
 
-    /// Check assignment targets for undefined references.
     pub(super) fn bind_assignment_target(&mut self, target: &AssignmentTarget) {
         match target {
             AssignmentTarget::StaticMemberExpression(member) => {
