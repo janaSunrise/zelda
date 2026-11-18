@@ -5,84 +5,173 @@ mod expressions;
 mod types;
 
 use oxc_ast::ast::*;
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_semantic::{Scoping, Semantic, SymbolFlags};
 use oxc_span::Span;
 use serde::Serialize;
 
 use crate::errors;
 
-use crate::symbols::{
-    DuplicateSymbolError, ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError,
-};
+use crate::symbols::{ScopeKind, SymbolKind, SymbolTable, UndefinedSymbolError};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BindingError {
-    DuplicateSymbol(DuplicateSymbolError),
+    /// A declaration conflicts with another of the same name in its scope.
+    Redeclared(RedeclaredError),
     UndefinedSymbol(UndefinedSymbolError),
+}
+
+/// One declaration of a name that is declared more than once in a scope, in
+/// a way TypeScript doesn't allow to merge. tsc reports every such declaration.
+#[derive(Debug, Clone, Serialize)]
+pub struct RedeclaredError {
+    pub name: String,
+    #[serde(serialize_with = "serialize_span")]
+    pub span: Span,
+    /// `let`/`const` are involved (TS2451 rather than TS2300).
+    pub block_scoped: bool,
 }
 
 impl BindingError {
     pub fn span(&self) -> Span {
         match self {
-            Self::DuplicateSymbol(e) => e.duplicate,
+            Self::Redeclared(e) => e.span,
             Self::UndefinedSymbol(e) => e.span,
         }
     }
 
     pub fn code(&self) -> u32 {
         match self {
-            Self::DuplicateSymbol(_) => errors::DUPLICATE_IDENTIFIER.code,
+            Self::Redeclared(e) if e.block_scoped => errors::CANNOT_REDECLARE_BLOCK_SCOPED.code,
+            Self::Redeclared(_) => errors::DUPLICATE_IDENTIFIER.code,
             Self::UndefinedSymbol(_) => errors::CANNOT_FIND_NAME.code,
         }
     }
 
     pub fn message(&self) -> String {
         match self {
-            Self::DuplicateSymbol(e) => errors::DUPLICATE_IDENTIFIER.format(&[&e.name]),
+            Self::Redeclared(e) if e.block_scoped => {
+                errors::CANNOT_REDECLARE_BLOCK_SCOPED.format(&[&e.name])
+            }
+            Self::Redeclared(e) => errors::DUPLICATE_IDENTIFIER.format(&[&e.name]),
             Self::UndefinedSymbol(e) => errors::CANNOT_FIND_NAME.format(&[&e.name]),
         }
     }
 }
 
-impl From<DuplicateSymbolError> for BindingError {
-    fn from(err: DuplicateSymbolError) -> Self {
-        BindingError::DuplicateSymbol(err)
-    }
+fn serialize_span<S: serde::Serializer>(span: &Span, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    let mut state = serializer.serialize_struct("Span", 2)?;
+    state.serialize_field("start", &span.start)?;
+    state.serialize_field("end", &span.end)?;
+    state.end()
 }
 
-impl From<UndefinedSymbolError> for BindingError {
-    fn from(err: UndefinedSymbolError) -> Self {
-        BindingError::UndefinedSymbol(err)
+/// Errors that come from oxc's semantic analysis of a file: names that are
+/// never declared (TS2304) and conflicting redeclarations (TS2300 / TS2451).
+///
+/// `symbols` supplies the globals (lib.d.ts) that unresolved references may
+/// refer to.
+pub fn semantic_errors(
+    semantic: &Semantic,
+    diagnostics: &[OxcDiagnostic],
+    symbols: &SymbolTable,
+) -> Vec<BindingError> {
+    let scoping = semantic.scoping();
+    let mut errors = Vec::new();
+
+    for (name, reference_ids) in scoping.root_unresolved_references() {
+        let name = name.as_str();
+        let known = is_builtin_global(name)
+            || symbols.global_value(name).is_some()
+            || symbols.lookup_type(name).is_some();
+        if known {
+            continue;
+        }
+        for &reference_id in reference_ids {
+            let flags = scoping.get_reference(reference_id).flags();
+            // Only report names used as values (or in `typeof`). The bundled
+            // lib.d.ts is a subset of TypeScript's, so a missing type or
+            // namespace (`JSX.Element`) is more likely a gap there than an
+            // error in the program.
+            if !flags.is_value() && !flags.is_value_as_type() {
+                continue;
+            }
+            let reference = scoping.get_reference(reference_id);
+            errors.push(BindingError::UndefinedSymbol(UndefinedSymbolError {
+                name: name.to_string(),
+                span: semantic.reference_span(reference),
+                is_type: false,
+            }));
+        }
     }
+
+    // oxc reports a redeclaration exactly when TypeScript's declaration
+    // merging rules forbid it (its SymbolFlags excludes mirror tsc's).
+    let mut reported = rustc_hash::FxHashSet::default();
+    for diagnostic in diagnostics {
+        let Some(name) = diagnostic
+            .message
+            .strip_prefix("Identifier `")
+            .and_then(|rest| rest.strip_suffix("` has already been declared"))
+        else {
+            continue;
+        };
+        let spans: Vec<Span> = diagnostic
+            .labels
+            .iter()
+            .map(|label| Span::new(label.offset(), label.offset() + label.len()))
+            .collect();
+        let block_scoped = spans.first().is_some_and(|&first| {
+            scoping.symbol_ids().any(|symbol| {
+                scoping.symbol_span(symbol) == first
+                    && scoping
+                        .symbol_flags(symbol)
+                        .intersects(SymbolFlags::BlockScopedVariable)
+            })
+        });
+        for span in spans {
+            if reported.insert(span) {
+                errors.push(BindingError::Redeclared(RedeclaredError {
+                    name: name.to_string(),
+                    span,
+                    block_scoped,
+                }));
+            }
+        }
+    }
+
+    errors.sort_by_key(|e| e.span().start);
+    errors
 }
 
 /// Binder performs two main tasks:
 /// 1. Register declarations (variables, functions, types) in the symbol table
 /// 2. Check for undefined references in expressions
-pub struct Binder {
+///
+/// `scoping` is oxc's semantic model of the same program: scopes, symbols,
+/// and resolved references.
+pub struct Binder<'s> {
     pub symbols: SymbolTable,
     pub errors: Vec<BindingError>,
+    scoping: &'s Scoping,
 }
 
-impl Default for Binder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Binder {
-    pub fn new() -> Self {
-        Self {
-            symbols: SymbolTable::new(),
-            errors: Vec::new(),
-        }
-    }
-
-    /// Create a binder with a pre-populated symbol table (e.g., from lib.d.ts).
-    pub fn with_symbols(symbols: SymbolTable) -> Self {
+impl<'s> Binder<'s> {
+    /// Create a binder over a pre-populated symbol table (e.g., from lib.d.ts).
+    pub fn new(symbols: SymbolTable, scoping: &'s Scoping) -> Self {
         Self {
             symbols,
             errors: Vec::new(),
+            scoping,
+        }
+    }
+
+    /// Record the value type of a declaration's binding.
+    pub(super) fn define_value(&mut self, ident: &BindingIdentifier, ty: crate::types::TypeId) {
+        if let Some(symbol) = ident.symbol_id.get() {
+            self.symbols.define_value(self.scoping, symbol, ty);
         }
     }
 
@@ -226,22 +315,8 @@ impl Binder {
 
     fn bind_for_in_statement(&mut self, for_in: &ForInStatement) {
         self.symbols.push_scope(ScopeKind::Block);
-        match &for_in.left {
-            ForStatementLeft::VariableDeclaration(decl) => {
-                self.bind_variable_declaration(decl);
-            }
-            ForStatementLeft::AssignmentTargetIdentifier(ident)
-                if self.symbols.lookup(ident.name.as_str()).is_none()
-                    && !is_builtin_global(ident.name.as_str()) =>
-            {
-                self.errors
-                    .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                        name: ident.name.to_string(),
-                        span: ident.span,
-                        is_type: false,
-                    }));
-            }
-            _ => {}
+        if let ForStatementLeft::VariableDeclaration(decl) = &for_in.left {
+            self.bind_variable_declaration(decl);
         }
         self.bind_expression(&for_in.right);
         self.bind_statement(&for_in.body);
@@ -250,22 +325,8 @@ impl Binder {
 
     fn bind_for_of_statement(&mut self, for_of: &ForOfStatement) {
         self.symbols.push_scope(ScopeKind::Block);
-        match &for_of.left {
-            ForStatementLeft::VariableDeclaration(decl) => {
-                self.bind_variable_declaration(decl);
-            }
-            ForStatementLeft::AssignmentTargetIdentifier(ident)
-                if self.symbols.lookup(ident.name.as_str()).is_none()
-                    && !is_builtin_global(ident.name.as_str()) =>
-            {
-                self.errors
-                    .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                        name: ident.name.to_string(),
-                        span: ident.span,
-                        is_type: false,
-                    }));
-            }
-            _ => {}
+        if let ForStatementLeft::VariableDeclaration(decl) = &for_of.left {
+            self.bind_variable_declaration(decl);
         }
         self.bind_expression(&for_of.right);
         self.bind_statement(&for_of.body);
@@ -384,10 +445,50 @@ impl Binder {
 
 /// Built-in globals that we skip for now (no lib.d.ts yet).
 /// Once we load lib.d.ts, these will be properly defined.
+/// Globals that TypeScript's standard lib declares but the bundled lib.d.ts
+/// may not: ECMAScript built-ins, common DOM/Node globals, and `arguments`.
 pub(crate) fn is_builtin_global(name: &str) -> bool {
     matches!(
         name,
-        "console"
+        "arguments"
+            | "AggregateError"
+            | "ArrayBuffer"
+            | "Atomics"
+            | "BigInt"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "DataView"
+            | "EvalError"
+            | "FinalizationRegistry"
+            | "Float32Array"
+            | "Float64Array"
+            | "Function"
+            | "Int8Array"
+            | "Int16Array"
+            | "Int32Array"
+            | "Intl"
+            | "Proxy"
+            | "Reflect"
+            | "SharedArrayBuffer"
+            | "URIError"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "Uint16Array"
+            | "Uint32Array"
+            | "WeakRef"
+            | "decodeURI"
+            | "decodeURIComponent"
+            | "encodeURI"
+            | "encodeURIComponent"
+            | "escape"
+            | "eval"
+            | "unescape"
+            | "navigator"
+            | "location"
+            | "fetch"
+            | "queueMicrotask"
+            | "structuredClone"
+            | "console"
             | "window"
             | "document"
             | "global"
@@ -439,29 +540,45 @@ mod tests {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
-    fn parse_and_bind(source: &str) -> Binder {
+    struct Bound {
+        errors: Vec<BindingError>,
+        symbols: SymbolTable,
+    }
+
+    fn parse_and_bind(source: &str) -> Bound {
         let allocator = Allocator::default();
         let source_type = SourceType::ts();
         let result = Parser::new(&allocator, source, source_type).parse();
         assert!(!result.fatal_error);
+        let oxc_semantic::SemanticBuilderReturn {
+            semantic,
+            diagnostics,
+        } = oxc_semantic::SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&result.program);
 
-        let mut binder = Binder::new();
+        let mut binder = Binder::new(SymbolTable::new(), semantic.scoping());
         binder.bind_program(&result.program);
-        binder
+        let mut errors = binder.errors;
+        errors.extend(semantic_errors(&semantic, &diagnostics, &binder.symbols));
+        Bound {
+            errors,
+            symbols: binder.symbols,
+        }
     }
 
     #[test]
     fn test_bind_variable() {
         let binder = parse_and_bind("const x: number = 42;");
         assert!(binder.errors.is_empty());
-        assert!(binder.symbols.lookup("x").is_some());
+        assert!(binder.symbols.global_value("x").is_some());
     }
 
     #[test]
     fn test_bind_function() {
         let binder = parse_and_bind("function add(a: number, b: number): number { return a + b; }");
         assert!(binder.errors.is_empty());
-        assert!(binder.symbols.lookup("add").is_some());
+        assert!(binder.symbols.global_value("add").is_some());
     }
 
     #[test]
@@ -473,11 +590,18 @@ mod tests {
 
     #[test]
     fn test_duplicate_variable() {
+        // tsc reports TS2451 on every declaration of a redeclared `const`.
         let binder = parse_and_bind("const x = 1; const x = 2;");
-        assert_eq!(binder.errors.len(), 1);
-        match &binder.errors[0] {
-            BindingError::DuplicateSymbol(err) => assert_eq!(err.name, "x"),
-            _ => panic!("Expected DuplicateSymbol error"),
+        assert_eq!(binder.errors.len(), 2);
+        for error in &binder.errors {
+            match error {
+                BindingError::Redeclared(err) => {
+                    assert_eq!(err.name, "x");
+                    assert!(err.block_scoped);
+                }
+                _ => panic!("Expected Redeclared error, got {error:?}"),
+            }
+            assert_eq!(error.code(), 2451);
         }
     }
 
@@ -540,7 +664,7 @@ mod tests {
         );
         assert!(binder.errors.is_empty());
         // Class is in both namespaces
-        assert!(binder.symbols.lookup("Person").is_some());
+        assert!(binder.symbols.global_value("Person").is_some());
         assert!(binder.symbols.lookup_type("Person").is_some());
     }
 
@@ -548,7 +672,7 @@ mod tests {
     fn test_arrow_function() {
         let binder = parse_and_bind("const add = (a: number, b: number) => a + b;");
         assert!(binder.errors.is_empty());
-        assert!(binder.symbols.lookup("add").is_some());
+        assert!(binder.symbols.global_value("add").is_some());
     }
 
     #[test]
@@ -714,5 +838,44 @@ mod tests {
             BindingError::UndefinedSymbol(err) => assert_eq!(err.name, "y"),
             _ => panic!("Expected UndefinedSymbol error"),
         }
+    }
+
+    #[test]
+    fn test_hoisted_function_is_found() {
+        let binder = parse_and_bind("foo(); function foo() {}");
+        assert!(binder.errors.is_empty(), "{:?}", binder.errors);
+    }
+
+    #[test]
+    fn test_declaration_merging_rules() {
+        // Mergeable declarations are fine.
+        let binder = parse_and_bind("interface A { a: 1 } interface A { b: 2 } var v; var v;");
+        assert!(binder.errors.is_empty(), "{:?}", binder.errors);
+
+        // Conflicting ones are reported on every declaration.
+        let binder = parse_and_bind("let x; let x; class C {} class C {}");
+        let codes: Vec<u32> = binder.errors.iter().map(BindingError::code).collect();
+        assert_eq!(codes, [2451, 2451, 2300, 2300]);
+    }
+
+    #[test]
+    fn test_duplicate_type_parameter() {
+        let binder = parse_and_bind("function f<X, X>() {}");
+        assert_eq!(binder.errors.len(), 1, "{:?}", binder.errors);
+        assert_eq!(binder.errors[0].code(), 2300);
+    }
+
+    #[test]
+    fn test_unknown_value_is_ts2304_but_unknown_type_is_not_yet() {
+        let binder = parse_and_bind("let a: Missing = nope;");
+        let names: Vec<&str> = binder
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                BindingError::UndefinedSymbol(e) => Some(e.name.as_str()),
+                BindingError::Redeclared(_) => None,
+            })
+            .collect();
+        assert_eq!(names, ["nope"]);
     }
 }

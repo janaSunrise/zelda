@@ -14,7 +14,9 @@ publish = false
 zelda = { path = "." }
 oxc_allocator = "0.159"
 oxc_ast = "0.159"
+oxc_diagnostics = "0.159"
 oxc_parser = "0.159"
+oxc_semantic = "0.159"
 oxc_span = "0.159"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -63,7 +65,9 @@ workspace = true
 [dependencies]
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
+oxc_diagnostics.workspace = true
 oxc_parser.workspace = true
+oxc_semantic.workspace = true
 oxc_span.workspace = true
 clap = { workspace = true, features = ["color"] }
 miette = { version = "7.6", features = ["fancy"] }

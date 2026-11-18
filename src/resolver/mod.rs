@@ -65,6 +65,24 @@ impl ResolverConfig {
     }
 }
 
+/// Extensions of files TypeScript checks, longest first.
+const TS_EXTENSIONS: [&str; 7] = [".d.mts", ".d.cts", ".d.ts", ".mts", ".cts", ".tsx", ".ts"];
+
+/// TypeScript sources that a JavaScript import specifier can refer to.
+const JS_TO_TS_EXTENSIONS: [(&str, &[&str]); 4] = [
+    (".js", &[".ts", ".tsx", ".d.ts"]),
+    (".jsx", &[".tsx", ".d.ts"]),
+    (".mjs", &[".mts", ".d.mts"]),
+    (".cjs", &[".cts", ".d.cts"]),
+];
+
+fn is_declaration_file(path: &Path) -> bool {
+    let name = path.to_string_lossy();
+    [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
 pub struct ModuleResolver {
     config: ResolverConfig,
 }
@@ -145,45 +163,48 @@ impl ModuleResolver {
         self.try_resolve_path(&full_path).ok()
     }
 
-    /// Try resolving a path with various TypeScript extensions.
+    /// Resolve a path the way TypeScript does: an explicit TypeScript
+    /// extension is used as is, a JavaScript extension maps to the TypeScript
+    /// source it compiles from (`./a.js` -> `./a.ts`), and otherwise the
+    /// configured extensions and `index` files are tried.
     fn try_resolve_path(&self, base_path: &Path) -> Result<ResolvedModule, ResolveError> {
-        let mut tried_paths = Vec::new();
+        let path_str = base_path.to_string_lossy();
+        let mut candidates: Vec<PathBuf> = Vec::new();
 
-        if let Some(ext) = base_path.extension() {
-            let ext_str = ext.to_string_lossy().to_string();
-            if ext_str == "ts" || ext_str == "tsx" || ext_str == "js" || ext_str == "jsx" {
-                if base_path.exists() {
-                    return Ok(ResolvedModule {
-                        path: base_path
-                            .canonicalize()
-                            .unwrap_or_else(|_| base_path.to_path_buf()),
-                        is_declaration: ext_str == "d.ts",
-                    });
-                }
-                tried_paths.push(base_path.to_path_buf());
+        if TS_EXTENSIONS.iter().any(|ext| path_str.ends_with(ext)) {
+            candidates.push(base_path.to_path_buf());
+        }
+        for (js_ext, ts_exts) in JS_TO_TS_EXTENSIONS {
+            if let Some(stem) = path_str.strip_suffix(js_ext) {
+                candidates.extend(
+                    ts_exts
+                        .iter()
+                        .map(|ext| PathBuf::from(format!("{stem}{ext}"))),
+                );
             }
         }
-
         for ext in &self.config.extensions {
-            let try_path = if let Some(index) = ext.strip_prefix('/') {
-                base_path.join(index)
-            } else {
-                PathBuf::from(format!("{}{}", base_path.display(), ext))
-            };
+            candidates.push(match ext.strip_prefix('/') {
+                // Directory index: ./foo -> ./foo/index.ts
+                Some(index) => base_path.join(index),
+                // File extension: ./foo -> ./foo.ts
+                None => PathBuf::from(format!("{path_str}{ext}")),
+            });
+        }
 
-            if try_path.exists() {
-                let is_declaration = try_path.to_string_lossy().ends_with(".d.ts");
+        for candidate in &candidates {
+            if candidate.is_file() {
                 return Ok(ResolvedModule {
-                    path: try_path.canonicalize().unwrap_or(try_path),
-                    is_declaration,
+                    is_declaration: is_declaration_file(candidate),
+                    path: candidate
+                        .canonicalize()
+                        .unwrap_or_else(|_| candidate.clone()),
                 });
             }
-            tried_paths.push(try_path);
         }
-
         Err(ResolveError::ModuleNotFound {
             specifier: base_path.display().to_string(),
-            tried_paths,
+            tried_paths: candidates,
         })
     }
 
@@ -194,51 +215,13 @@ impl ModuleResolver {
         from_file: &Path,
     ) -> Result<ResolvedModule, ResolveError> {
         let base_dir = from_file.parent().unwrap_or(Path::new("."));
-        let relative_path = Path::new(specifier);
-        let base_path = base_dir.join(relative_path);
-
-        let mut tried_paths = Vec::new();
-
-        // If specifier already has an extension, try it directly
-        if let Some(ext) = base_path.extension() {
-            let ext_str = ext.to_string_lossy().to_string();
-            if ext_str == "ts" || ext_str == "tsx" || ext_str == "js" || ext_str == "jsx" {
-                if base_path.exists() {
-                    let is_decl = ext_str == "d.ts";
-                    return Ok(ResolvedModule {
-                        path: base_path
-                            .canonicalize()
-                            .unwrap_or_else(|_| base_path.clone()),
-                        is_declaration: is_decl,
-                    });
-                }
-                tried_paths.push(base_path.clone());
-            }
-        }
-
-        for ext in &self.config.extensions {
-            let try_path = if let Some(index) = ext.strip_prefix('/') {
-                // Directory index: ./foo -> ./foo/index.ts
-                base_path.join(index)
-            } else {
-                // File extension: ./foo -> ./foo.ts
-                PathBuf::from(format!("{}{}", base_path.display(), ext))
-            };
-
-            if try_path.exists() {
-                let is_declaration = try_path.to_string_lossy().ends_with(".d.ts");
-                return Ok(ResolvedModule {
-                    path: try_path.canonicalize().unwrap_or(try_path),
-                    is_declaration,
-                });
-            }
-            tried_paths.push(try_path);
-        }
-
-        Err(ResolveError::ModuleNotFound {
-            specifier: specifier.to_string(),
-            tried_paths,
-        })
+        self.try_resolve_path(&base_dir.join(specifier))
+            .map_err(|err| match err {
+                ResolveError::ModuleNotFound { tried_paths, .. } => ResolveError::ModuleNotFound {
+                    specifier: specifier.to_string(),
+                    tried_paths,
+                },
+            })
     }
 
     /// Resolve a node module import (lodash, @types/node).
@@ -319,6 +302,38 @@ mod tests {
         }
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn test_resolve_typescript_extensions() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let main = create_test_file(dir, "main.ts", "");
+        create_test_file(dir, "a.ts", "");
+        create_test_file(dir, "m.mts", "");
+        create_test_file(dir, "c.cts", "");
+        create_test_file(dir, "types.d.ts", "");
+        let resolver = ModuleResolver::new(ResolverConfig::new());
+        let resolve = |spec: &str| {
+            let resolved = resolver.resolve(spec, &main).unwrap();
+            let name = resolved
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (name, resolved.is_declaration)
+        };
+
+        // A JS extension refers to the TypeScript source it compiles from.
+        assert_eq!(resolve("./a.js"), ("a.ts".into(), false));
+        assert_eq!(resolve("./m.mjs"), ("m.mts".into(), false));
+        assert_eq!(resolve("./c.cjs"), ("c.cts".into(), false));
+        assert_eq!(resolve("./types.js"), ("types.d.ts".into(), true));
+        // An explicit TypeScript extension is used as is.
+        assert_eq!(resolve("./a.ts"), ("a.ts".into(), false));
+        assert_eq!(resolve("./m.mts"), ("m.mts".into(), false));
+        assert!(resolver.resolve("./missing.js", &main).is_err());
     }
 
     #[test]

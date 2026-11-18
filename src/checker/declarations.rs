@@ -6,7 +6,7 @@
 //! - Detects missing returns in non-void functions
 
 use oxc_ast::ast::*;
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::errors;
 use crate::symbols::{ScopeKind, SymbolKind};
@@ -120,22 +120,13 @@ impl<'a> Checker<'a> {
                 errors::CIRCULAR_BASE_TYPE.code,
             ));
         }
-
-        for heritage in &decl.extends {
-            let name = match &heritage.type_name {
-                TSTypeName::IdentifierReference(ident) => ident.name.to_string(),
-                _ => continue,
-            };
-            if self.symbols.lookup_type(&name).is_none() {
-                self.errors
-                    .push(TypeError::undefined_type(&name, heritage.span));
-            }
-        }
     }
 
     /// Check a class declaration for type errors.
     pub(super) fn check_class_declaration(&mut self, class: &Class) {
         let class_name = class.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+
+        self.check_property_initialization(class);
 
         if let Some(id) = &class.id
             && self.is_own_base_type(class_name)
@@ -295,12 +286,9 @@ impl<'a> Checker<'a> {
                         base_ty_id
                     };
 
-                    let _ = self.symbols.define(
-                        ident.name.as_str(),
-                        ty_id,
-                        SymbolKind::Parameter,
-                        ident.span,
-                    );
+                    if let Some(symbol) = ident.symbol_id.get() {
+                        self.symbols.define_value(self.scoping, symbol, ty_id);
+                    }
                 }
             }
 
@@ -331,14 +319,34 @@ impl<'a> Checker<'a> {
                     }
                 }
 
-                // Check for missing return in non-void functions
-                let declared = self.get_type(declared_id);
-                let requires_return = !matches!(
-                    declared,
-                    Type::Void | Type::Undefined | Type::Any | Type::Never
-                );
-                if requires_return && return_types.is_empty() {
-                    self.errors.push(TypeError::missing_return(func.span));
+                // A return is only required if the end of the body is reachable
+                // and the (awaited) return type doesn't admit `undefined`.
+                if !func.generator && can_complete_normally(&body.statements) {
+                    let required_id = if func.r#async {
+                        self.awaited_type(declared_id)
+                    } else {
+                        declared_id
+                    };
+                    let requires_return = !self.admits_undefined(required_id)
+                        && !matches!(self.get_type(required_id), Type::Never);
+                    if requires_return {
+                        // TS2355 if the function never returns a value, TS2366 if
+                        // only some paths do. tsc reports on the return type.
+                        let diagnostic = if return_types.is_empty() {
+                            errors::MUST_RETURN_VALUE
+                        } else {
+                            errors::MISSING_RETURN
+                        };
+                        let span = func
+                            .return_type
+                            .as_ref()
+                            .map_or(func.span, |ann| ann.type_annotation.span());
+                        self.errors.push(TypeError::new(
+                            diagnostic.format(&[]),
+                            span,
+                            diagnostic.code,
+                        ));
+                    }
                 }
             }
 
@@ -476,4 +484,322 @@ impl<'a> Checker<'a> {
         }
         false
     }
+
+    /// TS2564 (`strictPropertyInitialization`): an instance property whose
+    /// type excludes `undefined` must be initialized inline or assigned on
+    /// every path through the constructor.
+    fn check_property_initialization(&mut self, class: &Class) {
+        if class.declare || self.in_declaration_file {
+            return;
+        }
+        let constructor_body = class.body.body.iter().find_map(|element| match element {
+            ClassElement::MethodDefinition(method)
+                if method.kind == MethodDefinitionKind::Constructor =>
+            {
+                method.value.body.as_deref()
+            }
+            _ => None,
+        });
+
+        for element in &class.body.body {
+            let (key, annotation, exempt) = match element {
+                ClassElement::PropertyDefinition(p) => (
+                    &p.key,
+                    &p.type_annotation,
+                    p.value.is_some()
+                        || p.r#static
+                        || p.declare
+                        || p.optional
+                        || p.definite
+                        || p.r#type == PropertyDefinitionType::TSAbstractPropertyDefinition,
+                ),
+                ClassElement::AccessorProperty(p) => (
+                    &p.key,
+                    &p.type_annotation,
+                    p.value.is_some()
+                        || p.r#static
+                        || p.definite
+                        || p.r#type == AccessorPropertyType::TSAbstractAccessorProperty,
+                ),
+                _ => continue,
+            };
+            // Without an annotation the type is `any`, which allows undefined.
+            let Some(annotation) = annotation else {
+                continue;
+            };
+            // tsc only checks identifier and private names.
+            let name = match key {
+                PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                PropertyKey::PrivateIdentifier(id) => format!("#{}", id.name),
+                _ => continue,
+            };
+            if exempt {
+                continue;
+            }
+            let ty = self.resolve_ts_type(&annotation.type_annotation);
+            if self.admits_undefined(ty) {
+                continue;
+            }
+            if constructor_body.is_some_and(|body| definitely_assigns(&body.statements, &name)) {
+                continue;
+            }
+            self.errors.push(TypeError::new(
+                errors::PROPERTY_NOT_INITIALIZED.format(&[&name]),
+                key.span(),
+                errors::PROPERTY_NOT_INITIALIZED.code,
+            ));
+        }
+    }
+
+    /// The type a `Promise<T>` resolves to (`T`), or the type itself.
+    fn awaited_type(&mut self, ty: TypeId) -> TypeId {
+        match self.get_type(ty) {
+            Type::TypeRef { name, type_args } if name == "Promise" && type_args.len() == 1 => {
+                type_args[0]
+            }
+            _ => ty,
+        }
+    }
+
+    /// Whether `undefined` is assignable to the type without an error:
+    /// `any`, `unknown`, `void`, `undefined`, or a union containing one.
+    fn admits_undefined(&mut self, ty: TypeId) -> bool {
+        let resolved = self.resolve_computed_type(ty);
+        match self.get_type(resolved).clone() {
+            Type::Any | Type::Unknown | Type::Void | Type::Undefined => true,
+            Type::Union(members) => members.into_iter().any(|m| self.admits_undefined(m)),
+            _ => false,
+        }
+    }
+}
+
+/// How a run of statements can complete, for one property.
+enum Completion {
+    /// Falls through; whether the property is assigned by then.
+    Normal(bool),
+    /// Every path returned (with the property assigned) or threw.
+    Exits,
+}
+
+/// Whether `this.<name>` is assigned on every path through a constructor body.
+fn definitely_assigns(statements: &[Statement], name: &str) -> bool {
+    match completion(statements, false, name) {
+        None => false,
+        Some(Completion::Exits) => true,
+        Some(Completion::Normal(assigned)) => assigned,
+    }
+}
+
+/// `None` if some path returns before the property is assigned. Assignments in
+/// loops, `try`, and `switch` aren't counted (they may not run), and returns in
+/// them aren't tracked, so this is conservative in both directions only there.
+fn completion(statements: &[Statement], mut assigned: bool, name: &str) -> Option<Completion> {
+    for statement in statements {
+        match statement {
+            Statement::ExpressionStatement(stmt) => {
+                assigned |= assigns_this_property(&stmt.expression, name);
+            }
+            Statement::ReturnStatement(ret) => {
+                if let Some(argument) = &ret.argument {
+                    assigned |= assigns_this_property(argument, name);
+                }
+                return assigned.then_some(Completion::Exits);
+            }
+            Statement::ThrowStatement(_) => return Some(Completion::Exits),
+            Statement::BlockStatement(block) => match completion(&block.body, assigned, name)? {
+                Completion::Exits => return Some(Completion::Exits),
+                Completion::Normal(a) => assigned = a,
+            },
+            Statement::IfStatement(stmt) => {
+                let then = completion(std::slice::from_ref(&stmt.consequent), assigned, name)?;
+                let otherwise = match &stmt.alternate {
+                    Some(alt) => completion(std::slice::from_ref(alt), assigned, name)?,
+                    None => Completion::Normal(assigned),
+                };
+                match (then, otherwise) {
+                    (Completion::Exits, Completion::Exits) => return Some(Completion::Exits),
+                    (Completion::Exits, Completion::Normal(a))
+                    | (Completion::Normal(a), Completion::Exits) => assigned = a,
+                    (Completion::Normal(a), Completion::Normal(b)) => assigned = a && b,
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(Completion::Normal(assigned))
+}
+
+/// Whether evaluating `expr` assigns `this.<name>`: `this.x = ...`, chains
+/// (`this.a = this.b = v`), sequences, and destructuring (`({ k: this.x } = o)`).
+fn assigns_this_property(expr: &Expression, name: &str) -> bool {
+    match expr.without_parentheses() {
+        Expression::AssignmentExpression(assign) => {
+            target_assigns(&assign.left, name) || assigns_this_property(&assign.right, name)
+        }
+        Expression::SequenceExpression(seq) => seq
+            .expressions
+            .iter()
+            .any(|e| assigns_this_property(e, name)),
+        _ => false,
+    }
+}
+
+fn target_assigns(target: &AssignmentTarget, name: &str) -> bool {
+    match target {
+        AssignmentTarget::StaticMemberExpression(member) => {
+            matches!(member.object, Expression::ThisExpression(_)) && member.property.name == name
+        }
+        AssignmentTarget::PrivateFieldExpression(field) => {
+            matches!(field.object, Expression::ThisExpression(_))
+                && name.strip_prefix('#') == Some(field.field.name.as_str())
+        }
+        AssignmentTarget::ObjectAssignmentTarget(object) => {
+            object.properties.iter().any(|property| match property {
+                AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                    maybe_default_assigns(&p.binding, name)
+                }
+                AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(_) => false,
+            }) || object
+                .rest
+                .as_ref()
+                .is_some_and(|rest| target_assigns(&rest.target, name))
+        }
+        AssignmentTarget::ArrayAssignmentTarget(array) => {
+            array
+                .elements
+                .iter()
+                .flatten()
+                .any(|element| maybe_default_assigns(element, name))
+                || array
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| target_assigns(&rest.target, name))
+        }
+        _ => false,
+    }
+}
+
+fn maybe_default_assigns(target: &AssignmentTargetMaybeDefault, name: &str) -> bool {
+    match target {
+        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+            target_assigns(&with_default.binding, name)
+        }
+        other => other
+            .as_assignment_target()
+            .is_some_and(|t| target_assigns(t, name)),
+    }
+}
+
+/// Whether control can reach the end of a statement list (tsc's "end point
+/// reachable"). Approximate: conditions are only constant when they are the
+/// literal `true`.
+fn can_complete_normally(statements: &[Statement]) -> bool {
+    statements.iter().all(statement_completes)
+}
+
+fn statement_completes(statement: &Statement) -> bool {
+    match statement {
+        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => false,
+        Statement::BlockStatement(block) => can_complete_normally(&block.body),
+        Statement::IfStatement(stmt) => match &stmt.alternate {
+            Some(alternate) => {
+                statement_completes(&stmt.consequent) || statement_completes(alternate)
+            }
+            None => true,
+        },
+        Statement::WhileStatement(stmt) => !is_true(&stmt.test) || breaks_out(&stmt.body),
+        Statement::DoWhileStatement(stmt) => !is_true(&stmt.test) || breaks_out(&stmt.body),
+        Statement::ForStatement(stmt) => {
+            stmt.test.as_ref().is_some_and(|test| !is_true(test)) || breaks_out(&stmt.body)
+        }
+        Statement::TryStatement(stmt) => {
+            if let Some(finalizer) = &stmt.finalizer
+                && !can_complete_normally(&finalizer.body)
+            {
+                return false;
+            }
+            can_complete_normally(&stmt.block.body)
+                || stmt
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| can_complete_normally(&handler.body.body))
+        }
+        Statement::SwitchStatement(stmt) => {
+            // Exits only if there's a default, no case breaks out, and the last
+            // case doesn't fall off the end.
+            let has_default = stmt.cases.iter().any(|case| case.test.is_none());
+            let breaks = stmt
+                .cases
+                .iter()
+                .any(|case| case.consequent.iter().any(breaks_out));
+            let last_completes = stmt
+                .cases
+                .last()
+                .is_none_or(|case| can_complete_normally(&case.consequent));
+            !has_default || breaks || last_completes
+        }
+        Statement::LabeledStatement(stmt) => statement_completes(&stmt.body),
+        _ => true,
+    }
+}
+
+fn is_true(expr: &Expression) -> bool {
+    matches!(expr.without_parentheses(), Expression::BooleanLiteral(lit) if lit.value)
+}
+
+/// Whether a `break` in `statement` exits the enclosing loop or switch: any
+/// labeled break, or an unlabeled one not inside a nested loop or switch.
+fn breaks_out(statement: &Statement) -> bool {
+    match statement {
+        Statement::BreakStatement(_) => true,
+        Statement::BlockStatement(block) => block.body.iter().any(breaks_out),
+        Statement::IfStatement(stmt) => {
+            breaks_out(&stmt.consequent) || stmt.alternate.as_ref().is_some_and(breaks_out)
+        }
+        Statement::TryStatement(stmt) => {
+            stmt.block.body.iter().any(breaks_out)
+                || stmt
+                    .handler
+                    .as_ref()
+                    .is_some_and(|h| h.body.body.iter().any(breaks_out))
+                || stmt
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(|f| f.body.iter().any(breaks_out))
+        }
+        Statement::LabeledStatement(stmt) => breaks_out(&stmt.body),
+        // Unlabeled breaks inside these target them, not the outer loop.
+        Statement::WhileStatement(_)
+        | Statement::DoWhileStatement(_)
+        | Statement::ForStatement(_)
+        | Statement::ForInStatement(_)
+        | Statement::ForOfStatement(_)
+        | Statement::SwitchStatement(_) => contains_labeled_break(statement),
+        _ => false,
+    }
+}
+
+/// Conservatively treat any labeled break in a nested loop as leaving the outer one.
+fn contains_labeled_break(statement: &Statement) -> bool {
+    let body = match statement {
+        Statement::WhileStatement(s) => &s.body,
+        Statement::DoWhileStatement(s) => &s.body,
+        Statement::ForStatement(s) => &s.body,
+        Statement::ForInStatement(s) => &s.body,
+        Statement::ForOfStatement(s) => &s.body,
+        Statement::BreakStatement(s) => return s.label.is_some(),
+        Statement::BlockStatement(b) => return b.body.iter().any(contains_labeled_break),
+        Statement::IfStatement(s) => {
+            return contains_labeled_break(&s.consequent)
+                || s.alternate.as_ref().is_some_and(contains_labeled_break);
+        }
+        Statement::SwitchStatement(s) => {
+            return s
+                .cases
+                .iter()
+                .any(|case| case.consequent.iter().any(contains_labeled_break));
+        }
+        _ => return false,
+    };
+    contains_labeled_break(body)
 }

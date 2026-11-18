@@ -16,6 +16,7 @@ mod types;
 mod tests;
 
 use flow::{NarrowingContext, apply_guard_with_arena, extract_type_guard};
+use oxc_semantic::Scoping;
 
 use oxc_ast::ast::*;
 use oxc_span::Span;
@@ -312,6 +313,8 @@ impl TypeError {
 /// - Type narrowing for control flow analysis
 pub struct Checker<'a> {
     pub symbols: &'a mut SymbolTable,
+    /// oxc's semantic model of the program: scopes, symbols, resolved references.
+    scoping: &'a Scoping,
     pub errors: Vec<TypeError>,
     narrowing: NarrowingContext,
     /// Current class name for super call checking (Some when inside a class)
@@ -324,12 +327,15 @@ pub struct Checker<'a> {
     relation_stack: rustc_hash::FxHashSet<(TypeId, TypeId)>,
     /// Nesting depth of generic instantiation, to stop infinite expansion.
     instantiation_depth: u32,
+    /// Checking a declaration file (`.d.ts`): everything in it is ambient.
+    in_declaration_file: bool,
 }
 
 impl<'a> Checker<'a> {
-    pub fn new(symbols: &'a mut SymbolTable) -> Self {
+    pub fn new(symbols: &'a mut SymbolTable, scoping: &'a Scoping) -> Self {
         Self {
             symbols,
+            scoping,
             errors: Vec::new(),
             narrowing: NarrowingContext::new(),
             current_class: None,
@@ -337,7 +343,14 @@ impl<'a> Checker<'a> {
             uninitialized_vars: rustc_hash::FxHashSet::default(),
             relation_stack: rustc_hash::FxHashSet::default(),
             instantiation_depth: 0,
+            in_declaration_file: false,
         }
+    }
+
+    /// Mark the program as a declaration file (`.d.ts`).
+    pub fn in_declaration_file(mut self, yes: bool) -> Self {
+        self.in_declaration_file = yes;
+        self
     }
 
     /// Get a mutable reference to the type arena.
@@ -401,7 +414,7 @@ impl<'a> Checker<'a> {
                 // Extract and apply type guard for true branch
                 let guard = extract_type_guard(&if_stmt.test);
                 if let Some(extracted) = &guard
-                    && let Some(original_id) = self.lookup_variable_type(&extracted.variable)
+                    && let Some(original_id) = self.lookup_variable_type(extracted)
                 {
                     // Apply the guard using symbols directly to avoid borrow conflicts
                     let narrowed =
@@ -415,7 +428,7 @@ impl<'a> Checker<'a> {
                 if let Some(alt) = &if_stmt.alternate {
                     // Apply negated guard for else branch
                     if let Some(extracted) = &guard
-                        && let Some(original_id) = self.lookup_variable_type(&extracted.variable)
+                        && let Some(original_id) = self.lookup_variable_type(extracted)
                     {
                         let narrowed = self.apply_type_guard(
                             original_id,
@@ -704,7 +717,7 @@ impl<'a> Checker<'a> {
         // Get the target type
         let target_type_id = match &assign.left {
             AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                self.symbols.lookup(ident.name.as_str()).map(|s| s.ty)
+                self.symbols.value_of(self.scoping, ident)
             }
             AssignmentTarget::StaticMemberExpression(member) => {
                 // Get property type from the object type
@@ -756,8 +769,8 @@ impl<'a> Checker<'a> {
             } = &object_type
             {
                 // Look up the class constructor in the value namespace
-                if let Some(symbol) = self.symbols.lookup(class_name) {
-                    let symbol_ty = self.get_type(symbol.ty).clone();
+                if let Some(constructor_id) = self.symbols.global_value(class_name) {
+                    let symbol_ty = self.get_type(constructor_id).clone();
                     if let Type::ClassConstructor { static_members, .. } = &symbol_ty {
                         // Check if the property exists as a static member
                         if static_members.iter().any(|p| p.name == prop_name) {
@@ -897,9 +910,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Look up a variable's type from the symbol table.
-    fn lookup_variable_type(&self, name: &str) -> Option<TypeId> {
-        self.symbols.lookup(name).map(|s| s.ty)
+    /// The declared type of the variable a type guard narrows.
+    fn lookup_variable_type(&self, guard: &flow::ExtractedGuard) -> Option<TypeId> {
+        let symbol = guard
+            .reference
+            .and_then(|r| self.scoping.get_reference(r).symbol_id());
+        match symbol {
+            Some(symbol) => self.symbols.value_of_symbol(symbol),
+            None => self.symbols.global_value(&guard.variable),
+        }
     }
 
     /// Apply a type guard to narrow a type.

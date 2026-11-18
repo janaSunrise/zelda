@@ -9,6 +9,7 @@
 //! The `NarrowingContext` tracks narrowed types within a scope. When entering
 //! conditional branches (if/else), types are refined based on the condition.
 
+use oxc_semantic::ReferenceId;
 use rustc_hash::FxHashMap;
 
 use oxc_ast::ast::*;
@@ -69,6 +70,8 @@ pub enum TypeGuard {
 pub struct ExtractedGuard {
     /// The variable being guarded
     pub variable: String,
+    /// oxc's reference for the guarded identifier, to find its declaration
+    pub reference: Option<ReferenceId>,
     /// The type guard to apply
     pub guard: TypeGuard,
     /// Whether this is negated (for else branches)
@@ -99,6 +102,7 @@ pub fn extract_type_guard(expr: &Expression) -> Option<ExtractedGuard> {
         // Bare identifier: if (x) - truthiness check
         Expression::Identifier(ident) => Some(ExtractedGuard {
             variable: ident.name.to_string(),
+            reference: ident.reference_id.get(),
             guard: TypeGuard::Truthy,
             negated: false,
         }),
@@ -130,6 +134,7 @@ fn extract_from_binary(binary: &BinaryExpression) -> Option<ExtractedGuard> {
             {
                 return Some(ExtractedGuard {
                     variable: left.name.to_string(),
+                    reference: left.reference_id.get(),
                     guard: TypeGuard::Instanceof(right.name.to_string()),
                     negated: false,
                 });
@@ -198,6 +203,7 @@ fn extract_typeof_guard(
     {
         return Some(ExtractedGuard {
             variable: ident.name.to_string(),
+            reference: ident.reference_id.get(),
             guard: TypeGuard::Typeof(lit.value.display().to_string()),
             negated,
         });
@@ -216,6 +222,7 @@ fn extract_null_guard(
     {
         return Some(ExtractedGuard {
             variable: ident.name.to_string(),
+            reference: ident.reference_id.get(),
             guard: TypeGuard::NotNull,
             // For x === null, we negate (narrowing to null)
             // For x !== null, we don't negate (removing null)
@@ -237,6 +244,7 @@ fn extract_undefined_guard(
     {
         return Some(ExtractedGuard {
             variable: ident.name.to_string(),
+            reference: ident.reference_id.get(),
             guard: TypeGuard::NotUndefined,
             // For x === undefined, we negate (narrowing to undefined)
             // For x !== undefined, we don't negate (removing undefined)
@@ -267,6 +275,7 @@ fn extract_discriminant_guard(
 
                 return Some(ExtractedGuard {
                     variable,
+                    reference: obj_ident.reference_id.get(),
                     guard: TypeGuard::Discriminant(property, value),
                     negated: is_inequality,
                 });

@@ -61,6 +61,12 @@ pub const ABSTRACT_WITH_BODY: Diagnostic = Diagnostic::new(
 // 2300-2399: Declaration Errors
 // ============================================
 
+pub const CANNOT_REDECLARE_BLOCK_SCOPED: Diagnostic =
+    Diagnostic::new(2451, "Cannot redeclare block-scoped variable '{0}'.");
+pub const PROPERTY_NOT_INITIALIZED: Diagnostic = Diagnostic::new(
+    2564,
+    "Property '{0}' has no initializer and is not definitely assigned in the constructor.",
+);
 pub const DUPLICATE_IDENTIFIER: Diagnostic = Diagnostic::new(2300, "Duplicate identifier '{0}'.");
 pub const CANNOT_FIND_NAME: Diagnostic = Diagnostic::new(2304, "Cannot find name '{0}'.");
 pub const NO_EXPORTED_MEMBER: Diagnostic =

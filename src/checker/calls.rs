@@ -160,7 +160,7 @@ impl<'a> Checker<'a> {
         };
 
         // Get parent's constructor type
-        let parent_constructor_id = self.symbols.lookup(&parent_class_name).map(|s| s.ty);
+        let parent_constructor_id = self.symbols.global_value(&parent_class_name);
 
         let params = match parent_constructor_id {
             Some(ty_id) => {
@@ -190,7 +190,7 @@ impl<'a> Checker<'a> {
 
         // Get the constructor type from the value namespace
         let constructor_type_id = if let Expression::Identifier(ident) = &new_expr.callee {
-            self.symbols.lookup(ident.name.as_str()).map(|s| s.ty)
+            self.symbols.value_of(self.scoping, ident)
         } else {
             None
         };

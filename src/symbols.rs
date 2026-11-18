@@ -1,5 +1,7 @@
 use rustc_hash::FxHashMap;
 
+use oxc_ast::ast::IdentifierReference;
+use oxc_semantic::Scoping;
 use oxc_span::Span;
 use serde::Serialize;
 
@@ -44,8 +46,6 @@ pub struct Scope {
     )]
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>, // Parent scope. None for Global, because no parent.
-    /// Value namespace: variables, functions. Uses FxHashMap for faster lookups.
-    pub symbols: FxHashMap<String, SymbolId>,
     /// Type namespace: type aliases, interfaces. Uses FxHashMap for faster lookups.
     pub type_symbols: FxHashMap<String, SymbolId>,
 }
@@ -56,7 +56,6 @@ impl Scope {
             id,
             kind,
             parent,
-            symbols: FxHashMap::default(),
             type_symbols: FxHashMap::default(),
         }
     }
@@ -67,9 +66,6 @@ pub struct SymbolId(pub usize);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind {
-    Variable,
-    Function,
-    Parameter,
     Class,
     Interface,
     TypeAlias,
@@ -164,6 +160,12 @@ pub struct SymbolTable {
     pub scopes: Vec<Scope>,
     pub current_scope: ScopeId,
     pub arena: TypeArena,
+    /// Value types of this file's declarations, keyed by oxc's symbol.
+    values: FxHashMap<oxc_semantic::SymbolId, TypeId>,
+    /// Value types of root-scope declarations by name: lib.d.ts globals and
+    /// this file's top-level declarations. Used for references oxc leaves
+    /// unresolved (globals) and for lookups that only have a name.
+    global_values: FxHashMap<String, TypeId>,
 }
 
 impl Default for SymbolTable {
@@ -181,7 +183,53 @@ impl SymbolTable {
             scopes: vec![global_scope],
             current_scope: ScopeId(0),
             arena: TypeArena::new(),
+            values: FxHashMap::default(),
+            global_values: FxHashMap::default(),
         }
+    }
+
+    /// Record the value type of a declared symbol.
+    pub fn define_value(&mut self, scoping: &Scoping, symbol: oxc_semantic::SymbolId, ty: TypeId) {
+        self.values.insert(symbol, ty);
+        if scoping.symbol_scope_id(symbol) == scoping.root_scope_id() {
+            self.global_values
+                .insert(scoping.symbol_name(symbol).to_string(), ty);
+        }
+    }
+
+    /// The value type an identifier refers to, following oxc's resolution of
+    /// the reference. Unresolved references are globals, looked up by name.
+    pub fn value_of(&self, scoping: &Scoping, ident: &IdentifierReference) -> Option<TypeId> {
+        let symbol = ident
+            .reference_id
+            .get()
+            .and_then(|r| scoping.get_reference(r).symbol_id());
+        match symbol {
+            Some(symbol) => self.values.get(&symbol).copied(),
+            None => self.global_value(ident.name.as_str()),
+        }
+    }
+
+    /// The value type of one of this file's declarations.
+    pub fn value_of_symbol(&self, symbol: oxc_semantic::SymbolId) -> Option<TypeId> {
+        self.values.get(&symbol).copied()
+    }
+
+    /// Make a value visible by name to this file, like a lib.d.ts global.
+    pub fn add_global_value(&mut self, name: impl Into<String>, ty: TypeId) {
+        self.global_values.insert(name.into(), ty);
+    }
+
+    /// The value type of a root-scope declaration or lib.d.ts global.
+    pub fn global_value(&self, name: &str) -> Option<TypeId> {
+        self.global_values.get(name).copied()
+    }
+
+    /// Drop symbol-keyed values, keeping only the by-name globals. Symbol ids
+    /// are per file, so a table shared with other files (lib.d.ts) must not
+    /// carry them.
+    pub fn clear_local_values(&mut self) {
+        self.values.clear();
     }
 
     pub fn push_scope(&mut self, kind: ScopeKind) -> ScopeId {
@@ -197,35 +245,6 @@ impl SymbolTable {
             Some(parent) => self.current_scope = parent,
             None => panic!("pop_scope called at global scope - binder bug"),
         }
-    }
-
-    /// Define a value symbol in the current scope.
-    /// Returns error if name already exists in the same scope.
-    pub fn define(
-        &mut self,
-        name: impl Into<String>,
-        ty: TypeId,
-        kind: SymbolKind,
-        span: Span,
-    ) -> Result<SymbolId, DuplicateSymbolError> {
-        let name = name.into();
-        let scope = &self.scopes[self.current_scope.0];
-
-        if let Some(&existing_id) = scope.symbols.get(&name) {
-            let existing = &self.symbols[existing_id.0];
-            return Err(DuplicateSymbolError {
-                name,
-                existing: existing.span,
-                duplicate: span,
-            });
-        }
-
-        let id = SymbolId(self.symbols.len());
-        let symbol = Symbol::new(name.clone(), ty, kind, span, self.current_scope);
-        self.symbols.push(symbol);
-        self.scopes[self.current_scope.0].symbols.insert(name, id);
-
-        Ok(id)
     }
 
     /// Define a type symbol in the current scope.
@@ -259,21 +278,6 @@ impl SymbolTable {
         Ok(id)
     }
 
-    /// Look up a value symbol, walking up the scope chain.
-    pub fn lookup(&self, name: &str) -> Option<&Symbol> {
-        let mut scope_id = Some(self.current_scope);
-
-        while let Some(id) = scope_id {
-            let scope = &self.scopes[id.0];
-            if let Some(&symbol_id) = scope.symbols.get(name) {
-                return Some(&self.symbols[symbol_id.0]);
-            }
-            scope_id = scope.parent;
-        }
-
-        None
-    }
-
     /// Look up a type symbol, walking up the scope chain.
     pub fn lookup_type(&self, name: &str) -> Option<&Symbol> {
         let mut scope_id = Some(self.current_scope);
@@ -299,134 +303,68 @@ mod tests {
     }
 
     #[test]
-    fn test_define_and_lookup() {
+    fn test_define_type_and_lookup() {
         let mut table = SymbolTable::new();
+        let ty = table.arena.object(vec![]);
         table
-            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
+            .define_type("User", ty, SymbolKind::Interface, span(0, 10))
             .unwrap();
 
-        let sym = table.lookup("x").unwrap();
-        assert_eq!(sym.name, "x");
-        assert_eq!(sym.ty, TypeId::NUMBER);
+        let sym = table.lookup_type("User").unwrap();
+        assert_eq!(sym.name, "User");
+        assert_eq!(sym.ty, ty);
+        assert_eq!(sym.kind, SymbolKind::Interface);
     }
 
     #[test]
-    fn test_duplicate_detection() {
+    fn test_duplicate_type_detection() {
         let mut table = SymbolTable::new();
         table
-            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
+            .define_type("T", TypeId::NUMBER, SymbolKind::TypeAlias, span(0, 10))
             .unwrap();
 
-        let result = table.define("x", TypeId::STRING, SymbolKind::Variable, span(20, 30));
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.name, "x");
+        let err = table
+            .define_type("T", TypeId::STRING, SymbolKind::TypeAlias, span(20, 30))
+            .unwrap_err();
+        assert_eq!(err.name, "T");
         assert_eq!(err.existing, span(0, 10));
         assert_eq!(err.duplicate, span(20, 30));
     }
 
     #[test]
-    fn test_scope_chain_lookup() {
+    fn test_type_scope_chain_and_shadowing() {
         let mut table = SymbolTable::new();
         table
-            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
+            .define_type("T", TypeId::NUMBER, SymbolKind::TypeAlias, span(0, 10))
             .unwrap();
 
         table.push_scope(ScopeKind::Function);
-        assert!(table.lookup("x").is_some());
-
+        assert_eq!(table.lookup_type("T").unwrap().ty, TypeId::NUMBER);
         table
-            .define("y", TypeId::STRING, SymbolKind::Variable, span(20, 30))
+            .define_type("T", TypeId::STRING, SymbolKind::TypeAlias, span(20, 30))
             .unwrap();
-        assert!(table.lookup("y").is_some());
+        table
+            .define_type("U", TypeId::BOOLEAN, SymbolKind::TypeAlias, span(40, 50))
+            .unwrap();
+        assert_eq!(table.lookup_type("T").unwrap().ty, TypeId::STRING);
 
         table.pop_scope();
-        assert!(table.lookup("x").is_some());
-        assert!(table.lookup("y").is_none());
+        assert_eq!(table.lookup_type("T").unwrap().ty, TypeId::NUMBER);
+        assert!(table.lookup_type("U").is_none());
     }
 
     #[test]
-    fn test_shadowing() {
+    fn test_global_values() {
         let mut table = SymbolTable::new();
-        table
-            .define("x", TypeId::NUMBER, SymbolKind::Variable, span(0, 10))
-            .unwrap();
-
-        table.push_scope(ScopeKind::Function);
-        table
-            .define("x", TypeId::STRING, SymbolKind::Variable, span(20, 30))
-            .unwrap();
-
-        assert_eq!(table.lookup("x").unwrap().ty, TypeId::STRING);
-
-        table.pop_scope();
-        assert_eq!(table.lookup("x").unwrap().ty, TypeId::NUMBER);
-    }
-
-    #[test]
-    fn test_type_namespace() {
-        let mut table = SymbolTable::new();
-
-        let empty_object = table.arena.object(vec![]);
-        table
-            .define_type("User", empty_object, SymbolKind::Interface, span(0, 20))
-            .unwrap();
-
-        let empty_object2 = table.arena.object(vec![]);
-        table
-            .define("User", empty_object2, SymbolKind::Variable, span(30, 50))
-            .unwrap();
-
-        // Both namespaces have User
-        assert!(table.lookup_type("User").is_some());
-        assert!(table.lookup("User").is_some());
-
-        assert_eq!(
-            table.lookup_type("User").unwrap().kind,
-            SymbolKind::Interface
-        );
-        assert_eq!(table.lookup("User").unwrap().kind, SymbolKind::Variable);
+        assert!(table.global_value("x").is_none());
+        table.add_global_value("x", TypeId::NUMBER);
+        assert_eq!(table.global_value("x"), Some(TypeId::NUMBER));
     }
 
     #[test]
     fn test_undefined_reference() {
         let table = SymbolTable::new();
-        assert!(table.lookup("undefined_var").is_none());
+        assert!(table.global_value("undefined_var").is_none());
         assert!(table.lookup_type("undefined_var").is_none());
-    }
-
-    #[test]
-    fn test_nested_scopes() {
-        let mut table = SymbolTable::new();
-
-        table
-            .define("a", TypeId::NUMBER, SymbolKind::Variable, span(0, 5))
-            .unwrap();
-
-        table.push_scope(ScopeKind::Function);
-        table
-            .define("b", TypeId::NUMBER, SymbolKind::Variable, span(10, 15))
-            .unwrap();
-
-        table.push_scope(ScopeKind::Block);
-        table
-            .define("c", TypeId::NUMBER, SymbolKind::Variable, span(20, 25))
-            .unwrap();
-
-        // All visible from innermost
-        assert!(table.lookup("a").is_some());
-        assert!(table.lookup("b").is_some());
-        assert!(table.lookup("c").is_some());
-
-        table.pop_scope();
-        assert!(table.lookup("a").is_some());
-        assert!(table.lookup("b").is_some());
-        assert!(table.lookup("c").is_none());
-
-        table.pop_scope();
-        assert!(table.lookup("a").is_some());
-        assert!(table.lookup("b").is_none());
-        assert!(table.lookup("c").is_none());
     }
 }

@@ -15,10 +15,13 @@ fn check(source: &str) -> Vec<TypeError> {
     let mut symbols = SymbolTable::new();
     load_lib_dts(&mut symbols);
 
-    let mut binder = Binder::with_symbols(symbols);
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&result.program)
+        .semantic;
+    let mut binder = Binder::new(symbols, semantic.scoping());
     binder.bind_program(&result.program);
 
-    let mut checker = Checker::new(&mut binder.symbols);
+    let mut checker = Checker::new(&mut binder.symbols, semantic.scoping());
     checker.check_program(&result.program);
 
     checker.errors
@@ -179,9 +182,38 @@ fn test_reassignment_correct() {
 
 #[test]
 fn test_missing_return_in_non_void() {
+    // No return at all: TS2355. Some paths return: TS2366.
     let errors = check("function f(): number {}");
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2366); // Missing return
+    assert_eq!(errors[0].code, 2355);
+
+    let errors = check("function f(b: boolean): number { if (b) { return 1; } }");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, 2366);
+}
+
+#[test]
+fn test_unreachable_end_needs_no_return() {
+    for source in [
+        "function f(): number { throw new Error(); }",
+        "function f(b: boolean): number { if (b) { return 1; } else { throw 0; } }",
+        "function f(): number { while (true) {} }",
+        "function f(): number { for (;;) { if (Math.random()) { return 1; } } }",
+        "function f(x: number): number { switch (x) { case 1: return 1; default: return 2; } }",
+        "function f(): number { try { return 1; } catch { throw 0; } }",
+        "async function f(): Promise<void> {}",
+        "function* f(): Generator<number> {}",
+    ] {
+        let errors = check(source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+}
+
+#[test]
+fn test_loop_with_break_can_complete() {
+    let errors = check("function f(): number { while (true) { break; } }");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, 2355);
 }
 
 #[test]
@@ -1585,6 +1617,10 @@ fn test_interface_extends_chain() {
 
 #[test]
 fn test_interface_extends_nonexistent() {
+    // tsc reports TS2304 here. Unresolved *type* references aren't reported
+    // yet: with the bundled lib.d.ts being a subset of TypeScript's, most of
+    // them are lib gaps rather than errors (see `binder::semantic_errors`).
+    // Restore this expectation once the full lib is loaded.
     let errors = check(
         r#"
         interface Dog extends NonExistent {
@@ -1592,8 +1628,7 @@ fn test_interface_extends_nonexistent() {
         }
     "#,
     );
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].code, 2304); // Cannot find name 'NonExistent'
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 #[test]
@@ -2202,8 +2237,8 @@ fn test_class_basic_instantiation() {
     let errors = check(
         r#"
         class Point {
-            x: number;
-            y: number;
+            x!: number;
+            y!: number;
         }
         const p = new Point();
     "#,
@@ -2216,8 +2251,8 @@ fn test_class_instance_property_access() {
     let errors = check(
         r#"
         class Point {
-            x: number;
-            y: number;
+            x!: number;
+            y!: number;
         }
         const p = new Point();
         const x: number = p.x;
@@ -2231,8 +2266,8 @@ fn test_class_instance_property_not_found() {
     let errors = check(
         r#"
         class Point {
-            x: number;
-            y: number;
+            x!: number;
+            y!: number;
         }
         const p = new Point();
         const z = p.z;
@@ -2338,7 +2373,7 @@ fn test_class_as_type_annotation() {
     let errors = check(
         r#"
         class User {
-            name: string;
+            name!: string;
         }
         const user: User = new User();
     "#,
@@ -2351,7 +2386,7 @@ fn test_class_type_mismatch() {
     let errors = check(
         r#"
         class User {
-            name: string;
+            name!: string;
         }
         const user: User = { name: "alice" };
     "#,
@@ -2365,10 +2400,10 @@ fn test_class_extends_basic() {
     let errors = check(
         r#"
         class Animal {
-            name: string;
+            name!: string;
         }
         class Dog extends Animal {
-            breed: string;
+            breed!: string;
         }
         const dog = new Dog();
         const name: string = dog.name;
@@ -2405,10 +2440,10 @@ fn test_class_extends_property_not_on_base() {
     let errors = check(
         r#"
         class Animal {
-            name: string;
+            name!: string;
         }
         class Dog extends Animal {
-            breed: string;
+            breed!: string;
         }
         const animal = new Animal();
         const breed = animal.breed;
@@ -2423,10 +2458,10 @@ fn test_class_assignable_to_base() {
     let errors = check(
         r#"
         class Animal {
-            name: string;
+            name!: string;
         }
         class Dog extends Animal {
-            breed: string;
+            breed!: string;
         }
         const dog = new Dog();
         const animal: Animal = dog;
@@ -2440,7 +2475,7 @@ fn test_generic_class_basic() {
     let errors = check(
         r#"
         class Box<T> {
-            value: T;
+            value!: T;
         }
         const box = new Box<number>();
         const val: number = box.value;
@@ -2454,7 +2489,7 @@ fn test_generic_class_constraint_satisfied() {
     let errors = check(
         r#"
         class Container<T extends { length: number }> {
-            item: T;
+            item!: T;
         }
         const c = new Container<string>();
     "#,
@@ -2467,7 +2502,7 @@ fn test_generic_class_constraint_violated() {
     let errors = check(
         r#"
         class Container<T extends { length: number }> {
-            item: T;
+            item!: T;
         }
         const c = new Container<number>();
     "#,
@@ -2591,8 +2626,8 @@ fn test_class_implements_multiple_interfaces() {
             age: number;
         }
         class Person implements Named, Aged {
-            name: string;
-            age: number;
+            name!: string;
+            age!: number;
         }
     "#,
     );
@@ -2633,7 +2668,7 @@ fn test_this_type_in_method() {
     let errors = check(
         r#"
         class Counter {
-            count: number;
+            count!: number;
             increment(): void {
                 this.count = this.count + 1;
             }
@@ -2648,7 +2683,7 @@ fn test_this_property_not_found() {
     let errors = check(
         r#"
         class Counter {
-            count: number;
+            count!: number;
             increment(): void {
                 this.nonexistent = 1;
             }
@@ -3230,5 +3265,116 @@ fn test_circular_interface_base_is_ts2310() {
             "Type 'I1<T>' recursively references itself as a base type.",
             "Type 'I2<T>' recursively references itself as a base type.",
         ]
+    );
+}
+
+// Name resolution goes through oxc's semantic analysis, so identifiers refer
+// to the declaration in their own scope.
+
+#[test]
+fn test_shadowed_variable_uses_inner_type() {
+    let errors = check(
+        r#"
+        const x: number = 1;
+        function f() {
+            const x: string = "s";
+            const y: number = x;
+        }
+    "#,
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, 2322);
+}
+
+#[test]
+fn test_function_locals_are_checked() {
+    let errors = check(
+        r#"
+        function f() {
+            let s: string = "a";
+            let n: number = s;
+        }
+    "#,
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, 2322);
+}
+
+// TS2564: strictPropertyInitialization
+
+fn uninitialized_properties(source: &str) -> Vec<String> {
+    check(source)
+        .into_iter()
+        .filter(|e| e.code == 2564)
+        .map(|e| e.message)
+        .collect()
+}
+
+#[test]
+fn test_property_initialization_required() {
+    let messages = uninitialized_properties(
+        r#"
+        class C {
+            a: number;
+            b: number | undefined;
+            c: number | null;
+            d?: number;
+            e!: number;
+            f = 0;
+            g: string = "s";
+            static h: number;
+            #i: number;
+            "j": number;
+            k: any;
+        }
+    "#,
+    );
+    assert_eq!(
+        messages,
+        [
+            "Property 'a' has no initializer and is not definitely assigned in the constructor.",
+            "Property 'c' has no initializer and is not definitely assigned in the constructor.",
+            "Property '#i' has no initializer and is not definitely assigned in the constructor.",
+        ]
+    );
+}
+
+#[test]
+fn test_property_initialization_exempts_ambient_and_abstract() {
+    assert!(uninitialized_properties("declare class C { a: number; }").is_empty());
+    assert!(uninitialized_properties("abstract class C { abstract a: number; }").is_empty());
+}
+
+#[test]
+fn test_property_assigned_on_every_constructor_path() {
+    let messages = uninitialized_properties(
+        r#"
+        class Assigned {
+            a: number;
+            b: number;
+            c: number;
+            constructor(o: { k: number }, cond: boolean) {
+                this.a = 0;
+                ({ k: this.b } = o);
+                if (cond) { this.c = 1; } else { throw new Error(); }
+            }
+        }
+        class EarlyReturn {
+            a: number;
+            constructor(cond: boolean) {
+                if (cond) { return; }
+                this.a = 0;
+            }
+        }
+        class ReturnAssigns {
+            a: number;
+            constructor() { return (this.a = 1, this); }
+        }
+    "#,
+    );
+    assert_eq!(
+        messages,
+        ["Property 'a' has no initializer and is not definitely assigned in the constructor."],
+        "only EarlyReturn.a"
     );
 }

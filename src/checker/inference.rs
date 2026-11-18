@@ -30,10 +30,9 @@ impl<'a> Checker<'a> {
                 if let Some(narrowed_id) = self.narrowing.get_narrowed_id(ident.name.as_str()) {
                     return narrowed_id;
                 }
-                // Fall back to symbol table
+                // Fall back to the declared type of the symbol it refers to
                 self.symbols
-                    .lookup(ident.name.as_str())
-                    .map(|s| s.ty)
+                    .value_of(self.scoping, ident)
                     .unwrap_or(TypeId::ANY)
             }
 

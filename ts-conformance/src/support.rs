@@ -20,6 +20,11 @@ const UNSUPPORTED_OPTIONS: &[(&str, Option<&str>, &str)] = &[
     ("strict", Some("false"), "non-strict mode"),
     ("strictnullchecks", Some("false"), "non-strict mode"),
     ("noimplicitany", Some("false"), "non-strict mode"),
+    (
+        "strictpropertyinitialization",
+        Some("false"),
+        "non-strict mode",
+    ),
     ("nolib", Some("true"), "custom lib (noLib)"),
     ("lib", None, "custom lib (@lib)"),
     ("libfiles", None, "custom lib (@libFiles)"),

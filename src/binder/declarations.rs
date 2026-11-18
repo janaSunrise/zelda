@@ -11,9 +11,9 @@ use crate::symbols::{ScopeKind, SymbolKind};
 use crate::types::resolution;
 use crate::types::{EnumMember, EnumValue, Type, TypeId, TypeParam};
 
-use super::Binder;
+use super::{Binder, BindingError, RedeclaredError};
 
-impl Binder {
+impl Binder<'_> {
     /// Bind a variable declaration (let, const, var).
     pub(super) fn bind_variable_declaration(&mut self, decl: &VariableDeclaration) {
         let is_const = decl.kind == VariableDeclarationKind::Const;
@@ -42,20 +42,15 @@ impl Binder {
                 self.widen_type(ty_id)
             };
 
-            if let Err(err) = self.symbols.define(name, ty_id, SymbolKind::Variable, span) {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, ty_id);
 
             // For class expressions, also register instance type in type namespace
             if let Some(Expression::ClassExpression(class)) = &declarator.init {
                 let (instance_type_id, _, _) =
                     resolution::build_class_type(class, &mut self.symbols.arena);
-                if let Err(err) =
-                    self.symbols
-                        .define_type(name, instance_type_id, SymbolKind::Class, span)
-                {
-                    self.errors.push(err.into());
-                }
+                let _ = self
+                    .symbols
+                    .define_type(name, instance_type_id, SymbolKind::Class, span);
             }
         }
 
@@ -74,13 +69,9 @@ impl Binder {
     /// 6. Pop back to parent scope
     pub(super) fn bind_function_declaration(&mut self, decl: &Function) {
         if let Some(ident) = &decl.id {
-            let name = ident.name.as_str();
-            let span = ident.span;
             let ty_id = self.build_function_type(decl);
 
-            if let Err(err) = self.symbols.define(name, ty_id, SymbolKind::Function, span) {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, ty_id);
         }
 
         self.symbols.push_scope(ScopeKind::Function);
@@ -110,9 +101,19 @@ impl Binder {
         type_params: &Option<oxc_allocator::Box<TSTypeParameterDeclaration>>,
     ) {
         if let Some(params) = type_params {
+            let mut seen = rustc_hash::FxHashSet::default();
             for param in &params.params {
                 let name = param.name.name.as_str();
                 let span = param.name.span;
+
+                // `<X, X>`: tsc reports each repeat (oxc allows these).
+                if !seen.insert(name) {
+                    self.errors.push(BindingError::Redeclared(RedeclaredError {
+                        name: name.to_string(),
+                        span,
+                        block_scoped: false,
+                    }));
+                }
 
                 // Build the TypeParameter type
                 let constraint = param
@@ -131,28 +132,18 @@ impl Binder {
                 });
 
                 // Register in type namespace
-                if let Err(err) = self
+                let _ = self
                     .symbols
-                    .define_type(name, ty_id, SymbolKind::TypeAlias, span)
-                {
-                    self.errors.push(err.into());
-                }
+                    .define_type(name, ty_id, SymbolKind::TypeAlias, span);
             }
         }
     }
 
     fn bind_formal_parameter(&mut self, param: &FormalParameter) {
         if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
-            let name = ident.name.as_str();
-            let span = ident.span;
             let ty_id = self.resolve_type_annotation_oxc(&param.type_annotation);
 
-            if let Err(err) = self
-                .symbols
-                .define(name, ty_id, SymbolKind::Parameter, span)
-            {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, ty_id);
         }
     }
 
@@ -161,8 +152,6 @@ impl Binder {
     /// Catch parameters: `catch (e)` or `catch (e: Error)`.
     pub(super) fn bind_catch_parameter(&mut self, param: &CatchParameter) {
         if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
-            let name = ident.name.as_str();
-            let span = ident.span;
             // Catch parameters are typically `unknown` or `any` in TypeScript
             let ty_id = param
                 .type_annotation
@@ -170,12 +159,7 @@ impl Binder {
                 .map(|ann| self.resolve_ts_type(&ann.type_annotation))
                 .unwrap_or(TypeId::UNKNOWN);
 
-            if let Err(err) = self
-                .symbols
-                .define(name, ty_id, SymbolKind::Parameter, span)
-            {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, ty_id);
         }
     }
 
@@ -240,19 +224,11 @@ impl Binder {
                 })
             };
 
-            if let Err(err) = self
-                .symbols
-                .define(name, value_type_id, SymbolKind::Class, span)
-            {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, value_type_id);
             // Type namespace: the instance type (Object with properties)
-            if let Err(err) =
-                self.symbols
-                    .define_type(name, instance_type_id, SymbolKind::Class, span)
-            {
-                self.errors.push(err.into());
-            }
+            let _ = self
+                .symbols
+                .define_type(name, instance_type_id, SymbolKind::Class, span);
         }
 
         self.symbols.push_scope(ScopeKind::Class);
@@ -299,12 +275,9 @@ impl Binder {
         let span = decl.id.span;
         let ty_id = self.build_interface_type(decl);
 
-        if let Err(err) = self
+        let _ = self
             .symbols
-            .define_type(name, ty_id, SymbolKind::Interface, span)
-        {
-            self.errors.push(err.into());
-        }
+            .define_type(name, ty_id, SymbolKind::Interface, span);
     }
 
     /// Bind an enum declaration.
@@ -385,21 +358,13 @@ impl Binder {
         });
 
         // Register in type namespace (for `let x: Color`)
-        if let Err(err) = self
+        let _ = self
             .symbols
-            .define_type(name, enum_type_id, SymbolKind::Enum, span)
-        {
-            self.errors.push(err.into());
-        }
+            .define_type(name, enum_type_id, SymbolKind::Enum, span);
 
         // Register in value namespace (for `Color.Red`)
         // The enum value is an object with properties for each member
-        if let Err(err) = self
-            .symbols
-            .define(name, enum_type_id, SymbolKind::Enum, span)
-        {
-            self.errors.push(err.into());
-        }
+        self.define_value(&decl.id, enum_type_id);
     }
 
     /// Bind a type alias declaration.
@@ -450,12 +415,9 @@ impl Binder {
             })
         };
 
-        if let Err(err) = self
+        let _ = self
             .symbols
-            .define_type(name, ty_id, SymbolKind::TypeAlias, span)
-        {
-            self.errors.push(err.into());
-        }
+            .define_type(name, ty_id, SymbolKind::TypeAlias, span);
     }
 
     /// Bind an arrow function expression.
@@ -500,12 +462,8 @@ impl Binder {
         self.bind_type_parameters(&func.type_parameters);
 
         if let Some(ident) = &func.id {
-            let name = ident.name.as_str();
-            let span = ident.span;
             let ty_id = self.build_function_type(func);
-            if let Err(err) = self.symbols.define(name, ty_id, SymbolKind::Function, span) {
-                self.errors.push(err.into());
-            }
+            self.define_value(ident, ty_id);
         }
 
         for param in &func.params.items {

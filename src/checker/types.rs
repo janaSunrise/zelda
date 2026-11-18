@@ -61,20 +61,14 @@ impl<'a> Checker<'a> {
         use oxc_ast::ast::TSTypeQueryExprName;
 
         match &query.expr_name {
-            TSTypeQueryExprName::IdentifierReference(ident) => {
-                let name = ident.name.as_str();
-                self.symbols
-                    .lookup(name)
-                    .map(|s| s.ty)
-                    .unwrap_or(TypeId::ANY)
-            }
+            TSTypeQueryExprName::IdentifierReference(ident) => self
+                .symbols
+                .value_of(self.scoping, ident)
+                .unwrap_or(TypeId::ANY),
             // TODO: resolve full qualified chain instead of just the last part
             TSTypeQueryExprName::QualifiedName(qual) => {
                 let name = qual.right.name.as_str();
-                self.symbols
-                    .lookup(name)
-                    .map(|s| s.ty)
-                    .unwrap_or(TypeId::ANY)
+                self.symbols.global_value(name).unwrap_or(TypeId::ANY)
             }
             TSTypeQueryExprName::TSImportType(_) => TypeId::ANY,
             TSTypeQueryExprName::ThisExpression(_) => TypeId::ANY,

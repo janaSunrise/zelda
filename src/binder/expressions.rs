@@ -1,31 +1,15 @@
-//! Walking expressions to find undefined variable references.
-//!
-//! For each identifier in an expression, we check if it's defined in the current scope chain.
-//! Compound expressions like `x + y` recursively check each part.
+//! Walking expressions to bind the declarations nested inside them (arrow
+//! functions, function and class expressions). Undefined names are found by
+//! oxc's semantic analysis instead (see `semantic_errors`).
 
 use oxc_ast::ast::*;
 
-use crate::symbols::UndefinedSymbolError;
+use super::Binder;
 
-use super::{Binder, BindingError, is_builtin_global};
-
-impl Binder {
+impl Binder<'_> {
     /// Walk an expression to find undefined variable references.
     pub(super) fn bind_expression(&mut self, expr: &Expression) {
         match expr {
-            // Identifiers - check if defined
-            Expression::Identifier(ident) => {
-                let name = ident.name.as_str();
-                if !is_builtin_global(name) && self.symbols.lookup(name).is_none() {
-                    self.errors
-                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                            name: name.to_string(),
-                            span: ident.span,
-                            is_type: false,
-                        }));
-                }
-            }
-
             // Call expressions
             Expression::CallExpression(call) => {
                 self.bind_expression(&call.callee);
@@ -171,17 +155,6 @@ impl Binder {
     /// Check assignment targets for undefined references.
     pub(super) fn bind_assignment_target(&mut self, target: &AssignmentTarget) {
         match target {
-            AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                let name = ident.name.as_str();
-                if !is_builtin_global(name) && self.symbols.lookup(name).is_none() {
-                    self.errors
-                        .push(BindingError::UndefinedSymbol(UndefinedSymbolError {
-                            name: name.to_string(),
-                            span: ident.span,
-                            is_type: false,
-                        }));
-                }
-            }
             AssignmentTarget::StaticMemberExpression(member) => {
                 self.bind_expression(&member.object);
             }

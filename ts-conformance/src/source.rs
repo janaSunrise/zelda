@@ -98,6 +98,8 @@ pub fn normalize_file_name(name: &str) -> String {
 impl TestFile {
     /// Parse a test file's content. `id` is its path relative to `tests/cases`.
     pub fn parse(id: &str, text: &str) -> Self {
+        // tsc's file reading drops a UTF-8 byte order mark.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let file_name = id.rsplit('/').next().unwrap_or(id);
         let suite = id.split('/').next().unwrap_or_default().to_string();
         let stem = file_name
@@ -214,6 +216,13 @@ mod tests {
         assert_eq!(test.units[0].content, "export const a = 1;");
         assert_eq!(test.units[1].name, "b.ts");
         assert_eq!(test.units[1].content, "import { a } from './a';");
+    }
+
+    #[test]
+    fn strips_byte_order_mark() {
+        let test = TestFile::parse("compiler/bom.ts", "\u{feff}// @strict: false\r\nlet x;");
+        assert_eq!(test.settings["strict"], "false");
+        assert_eq!(test.units[0].content, "let x;");
     }
 
     #[test]

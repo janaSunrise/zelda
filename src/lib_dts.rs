@@ -5,6 +5,7 @@
 
 use oxc_allocator::Allocator;
 use oxc_parser::{Parser, ParserReturn};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 
 use crate::binder::Binder;
@@ -41,11 +42,14 @@ pub fn load_lib_dts(symbols: &mut SymbolTable) {
 
     // Create a temporary binder to process lib.d.ts
     // We'll transfer the symbols to the provided symbol table
-    let mut binder = Binder::with_symbols(std::mem::take(symbols));
+    let semantic = SemanticBuilder::new().build(&program).semantic;
+    let mut binder = Binder::new(std::mem::take(symbols), semantic.scoping());
     binder.bind_program(&program);
 
-    // Transfer back the enriched symbol table
+    // Transfer back the enriched symbol table. lib.d.ts declarations are all
+    // global, so only their by-name entries are kept.
     *symbols = binder.into_symbols();
+    symbols.clear_local_values();
 }
 
 #[cfg(test)]
@@ -112,10 +116,16 @@ mod tests {
 
         // Check that some global values are defined
         assert!(
-            symbols.lookup("console").is_some(),
+            symbols.global_value("console").is_some(),
             "console should be defined"
         );
-        assert!(symbols.lookup("Math").is_some(), "Math should be defined");
-        assert!(symbols.lookup("JSON").is_some(), "JSON should be defined");
+        assert!(
+            symbols.global_value("Math").is_some(),
+            "Math should be defined"
+        );
+        assert!(
+            symbols.global_value("JSON").is_some(),
+            "JSON should be defined"
+        );
     }
 }

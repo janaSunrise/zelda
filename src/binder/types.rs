@@ -8,7 +8,7 @@ use crate::types::{Param, Property, Type, TypeId};
 
 use super::Binder;
 
-impl Binder {
+impl Binder<'_> {
     /// Get type from annotation if present, otherwise infer from initializer.
     /// Falls back to `any` if neither exists.
     pub(super) fn resolve_binding_type(&mut self, declarator: &VariableDeclarator) -> TypeId {
@@ -262,10 +262,8 @@ impl Binder {
     fn resolve_type_query(&self, query: &TSTypeQuery) -> TypeId {
         match &query.expr_name {
             TSTypeQueryExprName::IdentifierReference(ident) => {
-                // Look up the identifier in the symbol table
-                let name = ident.name.as_str();
-                if let Some(symbol) = self.symbols.lookup(name) {
-                    symbol.ty
+                if let Some(ty) = self.symbols.value_of(self.scoping, ident) {
+                    ty
                 } else {
                     // Symbol not found - return any for now
                     TypeId::ANY
@@ -275,8 +273,8 @@ impl Binder {
                 // For qualified names like A.B.C, look up just the last part for simplicity
                 // A proper implementation would resolve the full chain
                 let name = qual.right.name.as_str();
-                if let Some(symbol) = self.symbols.lookup(name) {
-                    symbol.ty
+                if let Some(ty) = self.symbols.global_value(name) {
+                    ty
                 } else {
                     TypeId::ANY
                 }
@@ -330,8 +328,7 @@ impl Binder {
             Expression::FunctionExpression(func) => self.build_function_type(func),
             Expression::Identifier(ident) => self
                 .symbols
-                .lookup(ident.name.as_str())
-                .map(|s| s.ty)
+                .value_of(self.scoping, ident)
                 .unwrap_or(TypeId::ANY),
             Expression::BinaryExpression(binary) => self.infer_binary_type(binary),
             Expression::UnaryExpression(unary) => self.infer_unary_type(unary),
