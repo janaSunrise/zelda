@@ -329,6 +329,20 @@ pub const IMPLICIT_ANY_INDEX: Diagnostic = Diagnostic::new(
 
 pub const CANNOT_READ_FILE: Diagnostic = Diagnostic::new(5083, "Cannot read file '{0}': {1}.");
 
+/// Serializes a span as `{ "start": .., "end": .. }` byte offsets, for the
+/// JSON output. `oxc_span::Span` only implements `Serialize` behind a feature
+/// that pulls in oxc's ESTree serializer.
+pub fn serialize_span<S: serde::Serializer>(
+    span: &oxc_span::Span,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    let mut state = serializer.serialize_struct("Span", 2)?;
+    state.serialize_field("start", &span.start)?;
+    state.serialize_field("end", &span.end)?;
+    state.end()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

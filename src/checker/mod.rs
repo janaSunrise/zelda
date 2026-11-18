@@ -92,7 +92,7 @@ pub enum Severity {
 #[derive(Debug, Clone, Serialize)]
 pub struct TypeError {
     pub message: String,
-    #[serde(serialize_with = "serialize_span")]
+    #[serde(serialize_with = "crate::errors::serialize_span")]
     pub span: Span,
     pub code: u32,
     pub severity: Severity,
@@ -104,20 +104,8 @@ pub struct TypeError {
 #[derive(Debug, Clone, Serialize)]
 pub struct RelatedSpan {
     pub message: String,
-    #[serde(serialize_with = "serialize_span")]
+    #[serde(serialize_with = "crate::errors::serialize_span")]
     pub span: Span,
-}
-
-/// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
-fn serialize_span<S>(span: &Span, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeStruct;
-    let mut state = serializer.serialize_struct("Span", 2)?;
-    state.serialize_field("start", &span.start)?;
-    state.serialize_field("end", &span.end)?;
-    state.end()
 }
 
 impl TypeError {

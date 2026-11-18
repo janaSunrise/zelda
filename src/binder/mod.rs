@@ -27,7 +27,7 @@ pub enum BindingError {
 #[derive(Debug, Clone, Serialize)]
 pub struct RedeclaredError {
     pub name: String,
-    #[serde(serialize_with = "serialize_span")]
+    #[serde(serialize_with = "crate::errors::serialize_span")]
     pub span: Span,
     /// `let`/`const` are involved (TS2451 rather than TS2300).
     pub block_scoped: bool,
@@ -58,14 +58,6 @@ impl BindingError {
             Self::UndefinedSymbol(e) => errors::CANNOT_FIND_NAME.format(&[&e.name]),
         }
     }
-}
-
-fn serialize_span<S: serde::Serializer>(span: &Span, serializer: S) -> Result<S::Ok, S::Error> {
-    use serde::ser::SerializeStruct;
-    let mut state = serializer.serialize_struct("Span", 2)?;
-    state.serialize_field("start", &span.start)?;
-    state.serialize_field("end", &span.end)?;
-    state.end()
 }
 
 /// Errors that come from oxc's semantic analysis of a file: names that are

@@ -47,7 +47,7 @@ pub enum ProjectError {
     Parse {
         file: PathBuf,
         message: String,
-        #[serde(serialize_with = "serialize_span")]
+        #[serde(serialize_with = "crate::errors::serialize_span")]
         span: Span,
     },
     Binding {
@@ -63,7 +63,7 @@ pub enum ProjectError {
     ModuleNotFound {
         specifier: String,
         from_file: PathBuf,
-        #[serde(serialize_with = "serialize_span")]
+        #[serde(serialize_with = "crate::errors::serialize_span")]
         span: Span,
     },
     FileReadError {
@@ -125,18 +125,6 @@ impl ProjectError {
     pub fn is_warning(&self) -> bool {
         matches!(self, Self::Type { error, .. } if error.is_warning())
     }
-}
-
-/// Custom serializer for oxc_span::Span since it doesn't implement Serialize.
-fn serialize_span<S>(span: &Span, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeStruct;
-    let mut state = serializer.serialize_struct("Span", 2)?;
-    state.serialize_field("start", &span.start)?;
-    state.serialize_field("end", &span.end)?;
-    state.end()
 }
 
 /// Coordinates multi-file type checking with module resolution and caching.
